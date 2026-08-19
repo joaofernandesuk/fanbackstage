@@ -5,8 +5,8 @@ from app.accounts import service
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_auth_rate_limit
-from app.models.identity import TokenPurpose, User
 from app.integrations.email import email_provider
+from app.models.identity import TokenPurpose, User
 from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
