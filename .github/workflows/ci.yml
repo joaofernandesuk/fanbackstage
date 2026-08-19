@@ -22,6 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - name: Install FFmpeg with bounded repository retries
         run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
           timeout 180s sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           timeout 180s sudo apt-get install -y --no-install-recommends ffmpeg
       - run: uv sync --all-groups
