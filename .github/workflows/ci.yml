@@ -20,7 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg with bounded repository retries
+        run: |
+          timeout 180s sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          timeout 180s sudo apt-get install -y --no-install-recommends ffmpeg
       - run: uv sync --all-groups
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run alembic upgrade head
