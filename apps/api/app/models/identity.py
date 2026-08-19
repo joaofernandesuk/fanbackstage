@@ -1,5 +1,6 @@
 import enum
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import (
@@ -17,6 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, Timestamped, UUIDPrimaryKey
 
+if TYPE_CHECKING:
+    from app.models.creator import CreatorProfile
+
 
 class TokenPurpose(str, enum.Enum):
     email_verification = "email_verification"
@@ -31,6 +35,9 @@ class User(UUIDPrimaryKey, Timestamped, Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     roles: Mapped[list["Role"]] = relationship(secondary="user_roles", lazy="selectin")
+    creator_profile: Mapped["CreatorProfile | None"] = relationship(
+        back_populates="user", uselist=False
+    )
 
 
 class Role(UUIDPrimaryKey, Timestamped, Base):

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "no-reply@fanbackstage.local"
+    kyc_provider: str = "development"
 
     def validate_production(self) -> None:
         if (
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
             and self.session_secret == "change-me-for-development-only"
         ):
             raise RuntimeError("FANBACKSTAGE_SESSION_SECRET must be set in production")
+        if self.environment == "production" and self.kyc_provider == "development":
+            raise RuntimeError("The development KYC provider cannot run in production")
 
 
 @lru_cache
