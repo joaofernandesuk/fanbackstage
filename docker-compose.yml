@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fanbackstage
+      POSTGRES_USER: fanbackstage
+      POSTGRES_PASSWORD: fanbackstage
+    ports: ["${FANBACKSTAGE_POSTGRES_PORT:-5432}:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+    ports: ["${FANBACKSTAGE_REDIS_PORT:-6379}:6379"]
+  mailpit:
+    image: axllent/mailpit:latest
+    ports: ["${FANBACKSTAGE_MAILPIT_UI_PORT:-8025}:8025", "${FANBACKSTAGE_SMTP_PORT:-1025}:1025"]
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    ports: ["7880:7880", "7881:7881", "50000-50020:50000-50020/udp"]
+    volumes: [./infra/livekit/livekit.yaml:/etc/livekit.yaml:ro]
+volumes:
+  postgres_data:

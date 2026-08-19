@@ -1,0 +1,33 @@
+name: FanBackstage CI
+on: [push, pull_request]
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_DB: fanbackstage, POSTGRES_USER: fanbackstage, POSTGRES_PASSWORD: fanbackstage }
+        ports: ["5432:5432"]
+        options: >- 
+          --health-cmd "pg_isready -U fanbackstage -d fanbackstage" --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    defaults: { run: { working-directory: apps/api } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --all-groups
+      - run: uv run ruff check . && uv run ruff format --check .
+      - run: uv run alembic upgrade head
+      - run: FANBACKSTAGE_ENVIRONMENT=test FANBACKSTAGE_DATABASE_URL=postgresql+asyncpg://fanbackstage:fanbackstage@localhost:5432/fanbackstage FANBACKSTAGE_REDIS_URL=redis://localhost:6379/1 uv run pytest
+  web:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: apps/web } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck && pnpm test && pnpm build

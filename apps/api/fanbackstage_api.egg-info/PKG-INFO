@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: fanbackstage-api
+Version: 0.1.0
+Summary: FanBackstage Phase 0 API foundation
+Requires-Python: >=3.12
+Requires-Dist: alembic<2,>=1.14
+Requires-Dist: asyncpg<1,>=0.30
+Requires-Dist: aiosmtplib<4,>=3.0
+Requires-Dist: celery[redis]<6,>=5.4
+Requires-Dist: email-validator<3,>=2.2
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: pwdlib[argon2]<1,>=0.2
+Requires-Dist: pydantic-settings<3,>=2.7
+Requires-Dist: psycopg[binary]<4,>=3.2
+Requires-Dist: redis<6,>=5.2
+Requires-Dist: sqlalchemy[asyncio]<3,>=2.0
+Requires-Dist: uvicorn[standard]<1,>=0.32

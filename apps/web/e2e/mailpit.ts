@@ -1,0 +1,3 @@
+import { expect } from "@playwright/test";
+const base = process.env.E2E_MAILPIT_URL ?? "http://127.0.0.1:18025";
+export async function securityLink(email: string, path: string): Promise<string> { const deadline = Date.now() + 15000; let last = ""; while (Date.now() < deadline) { const body = await (await fetch(`${base}/api/v1/messages`)).json(); const match = body.messages.find((m: {To:{Address:string}[];Snippet:string}) => m.To.some(x => x.Address === email) && m.Snippet.includes(path)); if (match) { const link = match.Snippet.match(/http:\/\/[^\s]+/)?.[0]; if (link) return link; last = match.Snippet; } await new Promise(r => setTimeout(r, 250)); } expect(last, `Mailpit email missing for ${email}`).toContain("link"); throw new Error("unreachable"); }

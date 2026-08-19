@@ -1,0 +1,1 @@
+"""FanBackstage API modular monolith."""

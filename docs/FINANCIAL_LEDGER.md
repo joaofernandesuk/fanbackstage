@@ -1,0 +1,130 @@
+# Financial Ledger, Commissions and Payouts
+
+Financial source-of-truth rules. Any feature creating economic value must integrate here rather than maintaining its own balance.
+
+# 22. Unified Wallet and Immutable Financial Ledger
+
+Do not treat a mutable balance column as the source of truth. Balances are derived/cached representations of immutable ledger entries.
+
+```text
+LedgerEntry / FinancialTransaction
+transaction_id
+source_type / source_id
+currency
+gross_amount
+platform_fee
+processor_fee (where represented)
+creator_pool
+group_share
+creator_share
+referral_share
+tax / withholding fields where applicable
+status
+created_at
+settled_at
+reversal_of_transaction_id
+```
+
+
+## 21.1 Example settlement
+
+```text
+Video purchase: €20
+Platform commission: 20% = €4
+Net creator-side pool: €16
+Active agency contract: 50/50
+Creator: €8
+Agency: €8
+```
+
+The exact commission configuration and contract version used must be referenced by the transaction. Later changes do not affect the result.
+
+
+## 21.2 Ledger principles
+
+- Double-entry accounting is preferred for financial correctness.
+- Never delete financial history; corrections are reversals/adjustments.
+- Idempotency keys for all payment callbacks and purchase commands.
+- Pending, available, reserved, paid-out and reversed states are distinct.
+- Chargebacks/refunds create explicit financial consequences.
+- Payouts must be reconcilable to underlying earnings.
+- Multi-currency policy must be explicit; never silently mix balances.
+
+# 23. Platform Commission Engine
+
+Commission must be configurable in backoffice and support controlled overrides with deterministic precedence.
+
+- Platform default commission.
+- Creator-specific override.
+- Group/agency override where business policy allows.
+- Revenue-type override: webcam, PPV, marketplace, subscription, tips, messaging, etc.
+- Time-bound promotional override.
+- Featuring usually represents platform revenue rather than creator revenue split, but this must be encoded explicitly.
+
+A commission resolver should return the effective rule plus the rule/version IDs used, allowing every transaction to explain why it settled as it did.
+
+# 24. Financial Dashboards
+
+
+## 23.1 Platform admin dashboard
+
+- GMV
+- Platform net/gross revenue
+- Creator revenue
+- Agency revenue
+- Pending/available payouts
+- Completed payouts
+- Refunds
+- Chargebacks
+- Subscription revenue
+- PPV revenue
+- Webcam/private revenue
+- Messaging revenue
+- Marketplace revenue
+- Tips
+- Featuring/promotion revenue
+- Referral/affiliate cost
+- Processor fees where known
+
+Filters: today, yesterday, 7 days, 30 days, current month, prior month and custom range; further filter by creator, agency, country/region where lawful, revenue type and currency.
+
+
+## 23.2 Creator dashboard
+
+- Revenue by source
+- Gross versus net
+- Pending and available balance
+- Payout history
+- Profile visits
+- Followers/subscribers
+- Conversion rate
+- Subscription churn/renewal
+- ARPU/ARPPU where meaningful
+- Top content
+- Top customers subject to privacy policy
+- Webcam hours and revenue/hour
+- Promotion spend and attributable performance
+
+
+## 23.3 Group dashboard
+
+- Managed creators
+- Revenue by creator
+- Revenue split by contract version
+- Manager activity
+- Creator growth/performance
+- Group earnings/payout state
+- Permission and contract status
+
+# 33. Payment and Payout Abstraction
+
+Do not tightly couple domain logic to a single payment processor. Implement provider adapters around payment intents/charges, refunds, disputes, identity/payout onboarding and webhooks. Adult-industry acceptance must be validated with the selected provider before production.
+
+- Idempotent webhooks
+- Signature verification
+- Event replay protection
+- Provider reference IDs
+- Explicit payment state machine
+- Payout state machine
+- Refund and dispute workflows
+- Processor errors isolated from entitlement state until payment certainty exists

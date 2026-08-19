@@ -1,0 +1,13 @@
+.env
+.env.local
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.next/
+node_modules/
+coverage/
+playwright-report/
+test-results/
+*.pyc
+
