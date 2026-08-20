@@ -51,6 +51,24 @@ async def test_readiness_rejects_missing_required_dependency(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cors_preflight_allows_authenticated_subscription_plan_put():
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.options(
+            "/api/v1/creator/subscription-plan",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+    assert response.status_code == 200
+    assert "PUT" in response.headers["access-control-allow-methods"]
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+@pytest.mark.asyncio
 async def test_migrated_schema_has_expected_constraints_indexes_and_foreign_keys(db_session):
     tables = set(
         (
