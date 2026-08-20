@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { api, ApiError, CurrentUser } from "../lib/api";
 
 export function AccountPanel() {
@@ -9,5 +10,5 @@ export function AccountPanel() {
   async function logout() { await api("/auth/logout", { method: "POST" }); router.push("/login"); }
   if (error) return <section className="card"><h1>Account</h1><p role="alert" className="error">{error}</p></section>;
   if (!user) return <section className="card"><p>Loading your FanBackstage account…</p></section>;
-  return <section className="card"><p className="eyebrow">ACCOUNT</p><h1>Your FanBackstage</h1><p>{user.email}</p><p>Roles: {user.roles.join(", ")}</p><button onClick={logout}>Log out</button></section>;
+  return <section className="card"><p className="eyebrow">ACCOUNT</p><h1>Your FanBackstage</h1><p>{user.email}</p><p>Roles: {user.roles.join(", ")}</p><Link className="button" href="/creator-onboarding">Become a creator</Link><button onClick={logout}>Log out</button></section>;
 }
