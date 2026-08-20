@@ -4,6 +4,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.accounts import service as accounts
 from app.content.access import can_access_content
+from app.core.config import Settings
 from app.creators import service as creators
 from app.finance import service as finance
 from app.models.content import (
@@ -132,6 +133,16 @@ def test_payment_webhook_signature_is_required_and_verified():
     payload = b'{"id":"event","type":"payment.succeeded","payment_reference":"ref"}'
     with pytest.raises(finance.FinancialError, match="signature"):
         finance.verify_development_webhook(payload, "invalid")
+
+
+def test_production_rejects_the_development_payment_provider():
+    with pytest.raises(RuntimeError, match="development payment provider"):
+        Settings(
+            environment="production",
+            payment_provider="development",
+            session_secret="production-secret",
+            kyc_provider="production",
+        ).validate_production()
 
 
 @pytest.mark.asyncio
