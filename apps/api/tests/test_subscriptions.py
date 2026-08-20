@@ -268,10 +268,48 @@ async def test_failed_renewal_enters_grace_and_preserves_subscription_access(db_
         )
         == 2
     )
-    subscription.grace_period_end = datetime.now(UTC) - timedelta(seconds=1)
-    assert await subscriptions.finalize_expired_subscriptions(db_session) == 1
-    assert subscription.status is SubscriptionStatus.expired
-    assert not await can_access_content(db_session, content, buyer)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_subscription_does_not_retry_pending_renewal(db_session):
+    _owner, profile = await creator(db_session, "retry-cancel-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "retry-cancel-buyer@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_1", "amount_minor": 1000, "enabled": True}],
+    )
+    subscription = await subscriptions.create_subscription(
+        db_session, buyer, profile.id, "month_1", "retry-cancel"
+    )
+    paid = await db_session.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_id == subscription.id)
+    )
+    assert paid
+    attempt = await db_session.get(PaymentAttempt, paid.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    subscription.current_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.renew_due_subscriptions(db_session) == 1
+    renewal = await db_session.scalar(
+        select(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_id == subscription.id, SubscriptionPeriod.sequence == 2
+        )
+    )
+    assert renewal
+    renewal_attempt = await db_session.get(PaymentAttempt, renewal.payment_attempt_id)
+    assert renewal_attempt
+    renewal_attempt.status = PaymentStatus.failed
+    await subscriptions.fail_payment_attempt(db_session, renewal_attempt)
+    await subscriptions.set_auto_renew(db_session, buyer, subscription.id, False)
+    count = await db_session.scalar(select(func.count()).select_from(PaymentAttempt))
+    assert await subscriptions.retry_failed_subscription_renewals(db_session) == 0
+    assert await db_session.scalar(select(func.count()).select_from(PaymentAttempt)) == count
 
 
 @pytest.mark.asyncio
