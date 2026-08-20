@@ -10,6 +10,8 @@ Subscriptions issue a creator-scoped existing entitlement instead of one entitle
 
 Production scheduling must run the `process_subscription_renewals` and `finalize_subscription_expirations` Celery tasks on the scheduled queue. The development provider remains prohibited in production.
 
+Failed renewals keep one immutable commercial period and create durable `SubscriptionRenewalAttempt` records for every provider charge attempt. The scheduled retry task reads persisted attempt count and next-retry timestamps, creates at most the configured number of payment attempts, and becomes a no-op after settlement, cancellation, grace expiry, or exhaustion. No retry overwrites a previous `PaymentAttempt`.
+
 The public subscription UI always reads the server-resolved effective price; it never sends a client-calculated amount. The real-stack Playwright journey configures all four products, creates a duration-specific promotion, completes the existing payment/webhook/ledger settlement, verifies the resulting creator-scoped entitlement can access subscription content but not PPV content, then verifies cancel/reactivate behavior. It also covers the browser's private MinIO upload path and ensures public cards expose only preview derivatives.
 
 Migration `20260820_0006_subscriptions_promotions` is exercised in CI from the Phase 3 head (`20260820_0005`) to Phase 4 head. Its downgrade is intentionally only for empty local/test databases because it removes subscription history; deployed rollback must be a forward corrective migration.

@@ -110,3 +110,18 @@ def finalize_subscription_expirations() -> dict[str, int]:
             return value
 
     return {"expired": run_async(run())}
+
+
+@celery_app.task
+def retry_subscription_renewals() -> dict[str, int]:
+    """Create bounded, durable retries for failed renewal charges."""
+    from app.db.session import SessionLocal
+    from app.subscriptions.service import retry_failed_subscription_renewals
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            value = await retry_failed_subscription_renewals(session)
+            await session.commit()
+            return value
+
+    return {"created": run_async(run())}

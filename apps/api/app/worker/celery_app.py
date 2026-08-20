@@ -27,6 +27,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.reconcile_financial_settlement": {"queue": "financial"},
     "app.worker.tasks.process_subscription_renewals": {"queue": "scheduled"},
     "app.worker.tasks.finalize_subscription_expirations": {"queue": "scheduled"},
+    "app.worker.tasks.retry_subscription_renewals": {"queue": "scheduled"},
     "app.worker.tasks.*": {"queue": "default"},
 }
 celery_app.conf.beat_schedule = {
@@ -36,6 +37,10 @@ celery_app.conf.beat_schedule = {
     },
     "subscription-expirations": {
         "task": "app.worker.tasks.finalize_subscription_expirations",
+        "schedule": 300.0,
+    },
+    "subscription-renewal-retries": {
+        "task": "app.worker.tasks.retry_subscription_renewals",
         "schedule": 300.0,
     },
     "financial-settlement-reconciliation": {

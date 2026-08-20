@@ -24,6 +24,7 @@ from app.models.subscription import (
     SubscriptionPlanPrice,
     SubscriptionPromotion,
     SubscriptionPromotionRule,
+    SubscriptionRenewalAttempt,
     SubscriptionStatus,
 )
 from app.subscriptions import service as subscriptions
@@ -250,6 +251,23 @@ async def test_failed_renewal_enters_grace_and_preserves_subscription_access(db_
     await db_session.flush()
     assert subscription.status is SubscriptionStatus.grace_period
     assert subscription.grace_period_end and await can_access_content(db_session, content, buyer)
+    renewal_attempt = await db_session.scalar(
+        select(SubscriptionRenewalAttempt).where(
+            SubscriptionRenewalAttempt.subscription_period_id == failed_period.id
+        )
+    )
+    assert renewal_attempt
+    renewal_attempt.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.retry_failed_subscription_renewals(db_session) == 1
+    assert await subscriptions.retry_failed_subscription_renewals(db_session) == 0
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(SubscriptionRenewalAttempt)
+            .where(SubscriptionRenewalAttempt.subscription_period_id == failed_period.id)
+        )
+        == 2
+    )
     subscription.grace_period_end = datetime.now(UTC) - timedelta(seconds=1)
     assert await subscriptions.finalize_expired_subscriptions(db_session) == 1
     assert subscription.status is SubscriptionStatus.expired

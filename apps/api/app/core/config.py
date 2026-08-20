@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     creator_earnings_settlement_seconds: int = 0
     subscription_grace_period_days: int = 3
     subscription_renewal_retry_limit: int = 3
+    subscription_renewal_retry_seconds: int = 300
 
     def validate_production(self) -> None:
         if (
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
             raise RuntimeError("FANBACKSTAGE_FINANCE_DEFAULT_COMMISSION_BASIS_POINTS is invalid")
         if self.creator_earnings_settlement_seconds < 0:
             raise RuntimeError("FANBACKSTAGE_CREATOR_EARNINGS_SETTLEMENT_SECONDS is invalid")
-        if self.subscription_grace_period_days < 0 or self.subscription_renewal_retry_limit < 0:
+        if self.subscription_grace_period_days < 0 or self.subscription_renewal_retry_limit < 0 or self.subscription_renewal_retry_seconds <= 0:
             raise RuntimeError("Subscription grace/retry configuration is invalid")
 
 

@@ -196,3 +196,23 @@ class SubscriptionPeriod(UUIDPrimaryKey, Timestamped, Base):
     entitlement_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("content_entitlements.id", ondelete="RESTRICT"), unique=True
     )
+
+
+class SubscriptionRenewalAttempt(UUIDPrimaryKey, Timestamped, Base):
+    """Durable payment-attempt history for one renewal period."""
+
+    __tablename__ = "subscription_renewal_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "subscription_period_id", "attempt_number", name="uq_renewal_attempt_number"
+        ),
+        UniqueConstraint("payment_attempt_id", name="uq_renewal_attempt_payment"),
+    )
+    subscription_period_id: Mapped[UUID] = mapped_column(
+        ForeignKey("subscription_periods.id", ondelete="RESTRICT"), index=True
+    )
+    payment_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="RESTRICT"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

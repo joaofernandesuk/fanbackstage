@@ -36,6 +36,7 @@ from app.models.subscription import (
     SubscriptionPlanPrice,
     SubscriptionPromotion,
     SubscriptionPromotionRule,
+    SubscriptionRenewalAttempt,
     SubscriptionStatus,
 )
 
@@ -269,8 +270,15 @@ async def create_subscription(
 async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> Subscription | None:
     period = await db.scalar(
         select(SubscriptionPeriod)
-        .where(SubscriptionPeriod.payment_attempt_id == attempt.id)
-        .with_for_update()
+        .outerjoin(
+            SubscriptionRenewalAttempt,
+            SubscriptionRenewalAttempt.subscription_period_id == SubscriptionPeriod.id,
+        )
+        .where(
+            (SubscriptionPeriod.payment_attempt_id == attempt.id)
+            | (SubscriptionRenewalAttempt.payment_attempt_id == attempt.id)
+        )
+        .with_for_update(of=SubscriptionPeriod)
     )
     if not period:
         return None
@@ -364,8 +372,15 @@ async def fail_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> Sub
     """Record a failed initial/renewal charge without extending entitlement."""
     period = await db.scalar(
         select(SubscriptionPeriod)
-        .where(SubscriptionPeriod.payment_attempt_id == attempt.id)
-        .with_for_update()
+        .outerjoin(
+            SubscriptionRenewalAttempt,
+            SubscriptionRenewalAttempt.subscription_period_id == SubscriptionPeriod.id,
+        )
+        .where(
+            (SubscriptionPeriod.payment_attempt_id == attempt.id)
+            | (SubscriptionRenewalAttempt.payment_attempt_id == attempt.id)
+        )
+        .with_for_update(of=SubscriptionPeriod)
     )
     if not period:
         return None
@@ -374,11 +389,20 @@ async def fail_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> Sub
     )
     assert subscription
     period.status = SubscriptionPeriodStatus.failed
+    renewal_attempt = await db.scalar(
+        select(SubscriptionRenewalAttempt).where(
+            SubscriptionRenewalAttempt.payment_attempt_id == attempt.id
+        )
+    )
+    if renewal_attempt:
+        renewal_attempt.next_retry_at = datetime.now(UTC) + timedelta(
+            seconds=get_settings().subscription_renewal_retry_seconds
+        )
     if subscription.current_period_end and subscription.current_period_end <= datetime.now(UTC):
         subscription.status = SubscriptionStatus.grace_period
-        subscription.grace_period_end = datetime.now(UTC) + timedelta(
-            days=get_settings().subscription_grace_period_days
-        )
+        subscription.grace_period_end = subscription.grace_period_end or datetime.now(
+            UTC
+        ) + timedelta(days=get_settings().subscription_grace_period_days)
         last_paid_period = await db.scalar(
             select(SubscriptionPeriod)
             .where(
@@ -525,6 +549,78 @@ async def renew_due_subscriptions(db: AsyncSession) -> int:
                 payment_attempt_id=attempt.id,
             )
         )
+        await db.flush()
+        period = await db.scalar(
+            select(SubscriptionPeriod).where(SubscriptionPeriod.payment_attempt_id == attempt.id)
+        )
+        assert period
+        db.add(
+            SubscriptionRenewalAttempt(
+                subscription_period_id=period.id,
+                payment_attempt_id=attempt.id,
+                attempt_number=1,
+                next_retry_at=None,
+            )
+        )
         subscription.status = SubscriptionStatus.payment_failed
+        created += 1
+    return created
+
+
+async def retry_failed_subscription_renewals(db: AsyncSession) -> int:
+    now, settings = datetime.now(UTC), get_settings()
+    periods = (
+        await db.scalars(
+            select(SubscriptionPeriod)
+            .join(Subscription)
+            .where(
+                Subscription.status == SubscriptionStatus.grace_period,
+                Subscription.auto_renew.is_(True),
+                Subscription.grace_period_end > now,
+                SubscriptionPeriod.status == SubscriptionPeriodStatus.failed,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    created = 0
+    for period in periods:
+        count = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(SubscriptionRenewalAttempt)
+                .where(SubscriptionRenewalAttempt.subscription_period_id == period.id)
+            )
+            or 1
+        )
+        if count >= settings.subscription_renewal_retry_limit:
+            continue
+        latest = await db.scalar(
+            select(SubscriptionRenewalAttempt)
+            .where(SubscriptionRenewalAttempt.subscription_period_id == period.id)
+            .order_by(SubscriptionRenewalAttempt.attempt_number.desc())
+        )
+        if latest and latest.next_retry_at and latest.next_retry_at > now:
+            continue
+        subscription = await db.get(Subscription, period.subscription_id)
+        assert subscription
+        attempt = PaymentAttempt(
+            buyer_user_id=subscription.subscriber_user_id,
+            provider=settings.payment_provider,
+            provider_reference=f"devretry_{secrets.token_urlsafe(18)}",
+            amount_minor=period.charged_amount_minor,
+            currency=period.currency,
+            idempotency_key=f"renewal-retry:{period.id}:{count + 1}",
+        )
+        db.add(attempt)
+        await db.flush()
+        db.add(
+            SubscriptionRenewalAttempt(
+                subscription_period_id=period.id,
+                payment_attempt_id=attempt.id,
+                attempt_number=count + 1,
+                next_retry_at=now + timedelta(seconds=settings.subscription_renewal_retry_seconds),
+            )
+        )
+        period.status = SubscriptionPeriodStatus.pending
         created += 1
     return created

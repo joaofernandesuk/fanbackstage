@@ -29,7 +29,7 @@ jobs:
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run alembic upgrade head
       - name: Verify Phase 4 migration lifecycle
-        run: uv run alembic downgrade 20260820_0005 && uv run alembic upgrade head
+        run: uv run alembic downgrade 20260820_0006 && uv run alembic upgrade head
       - run: FANBACKSTAGE_ENVIRONMENT=test FANBACKSTAGE_DATABASE_URL=postgresql+asyncpg://fanbackstage:fanbackstage@localhost:5432/fanbackstage FANBACKSTAGE_REDIS_URL=redis://localhost:6379/1 uv run pytest
   web:
     runs-on: ubuntu-latest
