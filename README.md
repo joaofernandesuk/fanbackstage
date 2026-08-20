@@ -1,6 +1,6 @@
 # FanBackstage — Get closer. Go backstage.
 
-FanBackstage.com is a modular creator entertainment platform. This repository currently implements **Phase 0 only**: identity, authentication, server-side sessions, permissions, audit foundation, local infrastructure and the web application shell.
+FanBackstage.com is a modular creator entertainment platform. This repository implements the Phase 0 identity foundation and the in-progress **Phase 1 creator identity and profile foundation**.
 
 ## Start locally
 
@@ -21,4 +21,4 @@ The API is the source of truth for permissions and future business rules. Authen
 
 ## Scope
 
-No creator profiles, content, streaming rooms, commerce, payments, subscriptions, messaging, marketplace, or financial ledger product logic is included yet. Those domains remain roadmap phases and must retain the documented invariants.
+Phase 1 adds creator applications linked to existing users, lifecycle and verification states, development-only KYC verification guarded from production, audited admin review actions, and public-safe creator profiles. Content, streaming rooms, commerce, payments, subscriptions, messaging, marketplace, and financial ledger product logic remain later phases.
