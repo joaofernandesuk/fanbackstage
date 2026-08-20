@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.accounts import service as accounts
 from app.content.access import can_access_content
@@ -15,7 +15,7 @@ from app.models.content import (
     ModerationStatus,
 )
 from app.models.creator import CreatorStatus
-from app.models.finance import PaymentAttempt, PaymentStatus
+from app.models.finance import LedgerTransaction, PaymentAttempt, PaymentStatus
 from app.models.subscription import (
     PromotionEligibility,
     PromotionRenewalScope,
@@ -95,6 +95,18 @@ async def test_subscription_snapshots_promotion_posts_ledger_and_grants_creator_
     await finance.process_development_webhook(db_session, payload, signature)
     assert subscription.status is SubscriptionStatus.active
     assert period.ledger_transaction_id and period.entitlement_id
+    # A provider replay must neither add another webhook settlement nor duplicate
+    # the immutable subscription-charge posting/entitlement.
+    assert await finance.process_development_webhook(db_session, payload, signature) is None
+    assert await subscriptions.settle_payment_attempt(db_session, attempt) is subscription
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(LedgerTransaction)
+            .where(LedgerTransaction.idempotency_key == f"subscription-period:{period.id}")
+        )
+        == 1
+    )
     content = ContentItem(
         owner_creator_id=profile.id,
         created_by_user_id=owner.id,
