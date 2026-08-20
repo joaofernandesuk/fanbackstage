@@ -11,7 +11,8 @@ export function SubscriptionPromotionSettings() {
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const rules = durations
       .filter((duration) => form.get(`${duration}-included`) === "on")
       .map((duration) => ({
@@ -33,7 +34,7 @@ export function SubscriptionPromotionSettings() {
         }),
       });
       setMessage("Subscription promotion created.");
-      event.currentTarget.reset();
+      formElement.reset();
     } catch (error) {
       setMessage(error instanceof ApiError ? error.message : "Unable to create promotion");
     }

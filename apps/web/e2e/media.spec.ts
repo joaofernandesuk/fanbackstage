@@ -43,6 +43,7 @@ test("creator media travels through the real private processing stack", async ({
   const password = "phase2-media-password";
   const username = `media${stamp}`;
   const galleryTitle = `Private gallery ${stamp}`;
+  const subscriptionTitle = `Subscriber gallery ${stamp}`;
 
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
@@ -123,15 +124,24 @@ test("creator media travels through the real private processing stack", async ({
   await page.getByLabel("PPV price (minor units; only when PPV)").first().fill("999");
   await page.getByRole("button", { name: "Create and submit gallery" }).click();
   await expect(page.getByText(/pending_review/)).toBeVisible();
+  await page.getByRole("group", { name: "Ready images" }).getByRole("checkbox").check();
+  await page.getByLabel("Gallery title").fill(subscriptionTitle);
+  await page.getByLabel("Access policy").first().selectOption("subscription");
+  await page.getByRole("button", { name: "Create and submit gallery" }).click();
+  await expect(page.getByText(/pending_review/)).toHaveCount(2);
 
   await page.goto("/account");
   await page.getByRole("button", { name: "Log out" }).click();
   await login(page, admin.email, admin.password);
-  const content = await page.evaluate(async ({ apiBase, galleryTitle }) => {
+  const published = await page.evaluate(async ({ apiBase, galleryTitle, subscriptionTitle }) => {
     const result = await fetch(`${apiBase}/api/v1/admin/content-review`, { credentials: "include" });
-    return (await result.json()).find((item: { title: string }) => item.title === galleryTitle);
-  }, { apiBase, galleryTitle });
-  await approve(page, `/admin/content-review/${content.id}/approve`);
+    const items = await result.json();
+    return [galleryTitle, subscriptionTitle].map(title => items.find((item: { title: string }) => item.title === title));
+  }, { apiBase, galleryTitle, subscriptionTitle });
+  expect(published).toHaveLength(2);
+  expect(published.every(Boolean)).toBe(true);
+  await approve(page, `/admin/content-review/${published[0].id}/approve`);
+  await approve(page, `/admin/content-review/${published[1].id}/approve`);
   await page.goto("/account");
   await page.getByRole("button", { name: "Log out" }).click();
 
@@ -139,7 +149,7 @@ test("creator media travels through the real private processing stack", async ({
   const owner = await page.evaluate(async ({ apiBase, contentId }) => {
     const result = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
     return await result.json();
-  }, { apiBase, contentId: content.id });
+  }, { apiBase, contentId: published[0].id });
   expect(owner.has_access).toBe(true);
   expect(JSON.stringify(owner)).not.toContain("original/");
   await page.goto("/creator-studio");
@@ -149,6 +159,12 @@ test("creator media travels through the real private processing stack", async ({
   }
   await page.getByRole("button", { name: "Save subscription plan" }).click();
   await expect(page.getByText("Subscription plan saved.")).toBeVisible();
+  await page.getByLabel("Promotion name").fill(`Launch ${stamp}`);
+  await page.getByLabel("Starts at", { exact: true }).fill(new Date(Date.now() - 60_000).toISOString().slice(0, 16));
+  await page.getByRole("group", { name: "1 month" }).getByLabel("Include duration").check();
+  await page.getByRole("group", { name: "1 month" }).getByLabel("Discount (basis points)").fill("2000");
+  await page.getByRole("button", { name: "Create subscription promotion" }).click();
+  await expect(page.getByText("Subscription promotion created.")).toBeVisible();
   const buyerContext = await browser.newContext();
   const buyerPage = await buyerContext.newPage();
   const buyerEmail = `phase3-buyer-${stamp}@example.com`;
@@ -161,12 +177,11 @@ test("creator media travels through the real private processing stack", async ({
   await login(buyerPage, buyerEmail, password);
   await buyerPage.goto(`/creator/${username}`);
   await buyerPage.getByRole("button", { name: "Unlock for 999 EUR" }).click();
-  await expect(buyerPage.getByText("LOCKED")).toHaveCount(0);
-  const buyerContent = await buyerPage.evaluate(async ({ apiBase, contentId }) => {
+  await expect(buyerPage.getByRole("button", { name: "Unlock for 999 EUR" })).toHaveCount(0);
+  await expect.poll(async () => buyerPage.evaluate(async ({ apiBase, contentId }) => {
     const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
-    return await response.json();
-  }, { apiBase, contentId: content.id });
-  expect(buyerContent.has_access).toBe(true);
+    return (await response.json()).has_access;
+  }, { apiBase, contentId: published[0].id }), { timeout: 10_000 }).toBe(true);
   await buyerContext.close();
   const subscriberContext = await browser.newContext();
   const subscriberPage = await subscriberContext.newPage();
@@ -179,6 +194,7 @@ test("creator media travels through the real private processing stack", async ({
   await subscriberPage.getByRole("button", { name: "Verify email" }).click();
   await login(subscriberPage, subscriberEmail, password);
   await subscriberPage.goto(`/creator/${username}`);
+  await expect(subscriberPage.getByText("800 EUR")).toBeVisible();
   await subscriberPage.getByRole("button", { name: "Subscribe" }).first().click();
   await expect(subscriberPage.getByText("Subscription is active.")).toBeVisible();
   const subscription = await subscriberPage.evaluate(async ({ apiBase }) => {
@@ -196,23 +212,34 @@ test("creator media travels through the real private processing stack", async ({
   const lockedPpv = await subscriberPage.evaluate(async ({ apiBase, contentId }) => {
     const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
     return response.json();
-  }, { apiBase, contentId: content.id });
+  }, { apiBase, contentId: published[0].id });
   expect(lockedPpv.has_access).toBe(false);
+  const subscriptionContent = await subscriberPage.evaluate(async ({ apiBase, contentId }) => {
+    const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
+    return response.json();
+  }, { apiBase, contentId: published[1].id });
+  expect(subscriptionContent.has_access).toBe(true);
   await subscriberContext.close();
   const earnings = await page.evaluate(async ({ apiBase }) => {
     const response = await fetch(`${apiBase}/api/v1/finance/creator/earnings?currency=EUR`, { credentials: "include" });
     return { status: response.status, body: await response.json() };
   }, { apiBase });
   expect(earnings.status).toBe(200);
-  expect(earnings.body).toMatchObject({ pending_amount_minor: 1600, ppv_gross_amount_minor: 999, platform_fee_amount_minor: 199, creator_net_amount_minor: 800, currency: "EUR" });
+  // The PPV settlement credits 800 and the promotion-priced subscription credits 640.
+  // Keep the PPV-specific totals separate: subscription revenue shares the immutable
+  // creator-pending ledger account but must not be reported as PPV revenue.
+  expect(earnings.body).toMatchObject({ pending_amount_minor: 1440, ppv_gross_amount_minor: 999, platform_fee_amount_minor: 199, creator_net_amount_minor: 800, currency: "EUR" });
   const anonymous = await browser.newContext();
   const anonymousPage = await anonymous.newPage();
   await anonymousPage.goto(`http://127.0.0.1:31000/creator/${username}`);
   await expect(anonymousPage.getByText(galleryTitle)).toBeVisible();
-  await expect(anonymousPage.locator("img")).toHaveCount(1);
-  const previewUrl = await anonymousPage.locator("img").getAttribute("src");
-  expect(previewUrl).toContain("/media/previews/");
-  expect(previewUrl).not.toContain("original/");
+  await expect(anonymousPage.locator("img")).toHaveCount(2);
+  for (const previewUrl of await anonymousPage.locator("img").evaluateAll(images =>
+    images.map(image => image.getAttribute("src")),
+  )) {
+    expect(previewUrl).toContain("/media/previews/");
+    expect(previewUrl).not.toContain("original/");
+  }
   await anonymous.close();
 
   await page.goto("/creator-studio");
