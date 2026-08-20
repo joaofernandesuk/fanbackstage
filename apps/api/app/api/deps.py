@@ -24,3 +24,12 @@ async def current_identity(
 
 
 CurrentIdentity = Annotated[tuple[User, UserSession], Depends(current_identity)]
+
+
+async def optional_identity(
+    db: Db, session_cookie: str | None = Cookie(default=None, alias="fanbackstage_session")
+) -> tuple[User, UserSession] | None:
+    return await authenticate(db, session_cookie)
+
+
+OptionalIdentity = Annotated[tuple[User, UserSession] | None, Depends(optional_identity)]

@@ -1,9 +1,11 @@
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
 
-from app.api.deps import CurrentIdentity, Db
+from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.content import service
+from app.content.access import can_access_content
 from app.models.content import ContentItem
 from app.schemas.content import ContentResponse, GalleryCreate, GalleryItemCreate, VideoCreate
 
@@ -97,3 +99,12 @@ async def archive(content_id: UUID, identity: CurrentIdentity, db: Db) -> Conten
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/public/{content_id}", response_model=ContentResponse)
+async def public_content(content_id: UUID, identity: OptionalIdentity, db: Db) -> ContentResponse:
+    item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
+    if not item or item.status.value != "published":
+        raise HTTPException(status_code=404, detail="Content not found")
+    has_access = await can_access_content(db, item, identity[0] if identity else None)
+    return response(item, has_access)
