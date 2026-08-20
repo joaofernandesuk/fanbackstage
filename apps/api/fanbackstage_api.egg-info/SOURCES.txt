@@ -9,12 +9,15 @@ app/api/routes/__init__.py
 app/api/routes/account.py
 app/api/routes/admin.py
 app/api/routes/auth.py
+app/api/routes/creators.py
 app/api/routes/health.py
 app/audit/__init__.py
 app/audit/service.py
 app/core/__init__.py
 app/core/config.py
 app/core/rate_limit.py
+app/creators/__init__.py
+app/creators/service.py
 app/db/__init__.py
 app/db/base.py
 app/db/session.py
@@ -23,11 +26,13 @@ app/integrations/email.py
 app/integrations/streaming.py
 app/models/__init__.py
 app/models/audit.py
+app/models/creator.py
 app/models/identity.py
 app/permissions/__init__.py
 app/permissions/policies.py
 app/schemas/__init__.py
 app/schemas/auth.py
+app/schemas/creator.py
 app/worker/__init__.py
 app/worker/celery_app.py
 app/worker/tasks.py
@@ -37,6 +42,7 @@ fanbackstage_api.egg-info/dependency_links.txt
 fanbackstage_api.egg-info/requires.txt
 fanbackstage_api.egg-info/top_level.txt
 tests/test_auth_integration.py
+tests/test_creator_lifecycle.py
 tests/test_foundation_integration.py
 tests/test_permissions.py
 tests/test_security_tokens.py
