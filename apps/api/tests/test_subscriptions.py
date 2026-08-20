@@ -15,7 +15,7 @@ from app.models.content import (
     ModerationStatus,
 )
 from app.models.creator import CreatorStatus
-from app.models.finance import PaymentAttempt
+from app.models.finance import PaymentAttempt, PaymentStatus
 from app.models.subscription import (
     PromotionEligibility,
     PromotionRenewalScope,
@@ -185,6 +185,62 @@ async def test_cancel_preserves_access_and_renewal_keeps_selected_duration(db_se
     renewal_payload, renewal_signature = finance.development_webhook_payload(renewal_attempt)
     await finance.process_development_webhook(db_session, renewal_payload, renewal_signature)
     assert renewal.status.value == "active" and subscription.status is SubscriptionStatus.active
+
+
+@pytest.mark.asyncio
+async def test_failed_renewal_enters_grace_and_preserves_subscription_access(db_session):
+    owner, profile = await creator(db_session, "grace-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "grace-buyer@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_1", "amount_minor": 1000, "enabled": True}],
+    )
+    subscription = await subscriptions.create_subscription(
+        db_session, buyer, profile.id, "month_1", "grace-start"
+    )
+    paid_period = await db_session.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_id == subscription.id)
+    )
+    assert paid_period
+    initial_attempt = await db_session.get(PaymentAttempt, paid_period.payment_attempt_id)
+    assert initial_attempt
+    payload, signature = finance.development_webhook_payload(initial_attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    subscription.current_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.renew_due_subscriptions(db_session) == 1
+    failed_period = await db_session.scalar(
+        select(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_id == subscription.id,
+            SubscriptionPeriod.sequence == 2,
+        )
+    )
+    assert failed_period
+    failed_attempt = await db_session.get(PaymentAttempt, failed_period.payment_attempt_id)
+    assert failed_attempt
+    failed_attempt.status = PaymentStatus.failed
+    await subscriptions.fail_payment_attempt(db_session, failed_attempt)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Grace access",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.subscription,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    assert subscription.status is SubscriptionStatus.grace_period
+    assert subscription.grace_period_end and await can_access_content(db_session, content, buyer)
+    subscription.grace_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.finalize_expired_subscriptions(db_session) == 1
+    assert subscription.status is SubscriptionStatus.expired
+    assert not await can_access_content(db_session, content, buyer)
 
 
 @pytest.mark.asyncio

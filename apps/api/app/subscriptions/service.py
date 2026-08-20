@@ -379,6 +379,27 @@ async def fail_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> Sub
         subscription.grace_period_end = datetime.now(UTC) + timedelta(
             days=get_settings().subscription_grace_period_days
         )
+        last_paid_period = await db.scalar(
+            select(SubscriptionPeriod)
+            .where(
+                SubscriptionPeriod.subscription_id == subscription.id,
+                SubscriptionPeriod.status == SubscriptionPeriodStatus.active,
+                SubscriptionPeriod.entitlement_id.is_not(None),
+            )
+            .order_by(SubscriptionPeriod.sequence.desc())
+        )
+        if last_paid_period and last_paid_period.entitlement_id:
+            entitlement = await db.get(ContentEntitlement, last_paid_period.entitlement_id)
+            if entitlement:
+                entitlement.valid_until = subscription.grace_period_end
+        await record_event(
+            db,
+            "subscription.grace_entered",
+            actor_user_id=subscription.subscriber_user_id,
+            target_type="subscription",
+            target_id=str(subscription.id),
+            metadata={"period_id": str(period.id)},
+        )
     else:
         subscription.status = SubscriptionStatus.payment_failed
     return subscription
@@ -403,6 +424,25 @@ async def finalize_expired_subscriptions(db: AsyncSession) -> int:
     ).all()
     for subscription in rows:
         subscription.status, subscription.ended_at = SubscriptionStatus.expired, now
+        entitlement_ids = (
+            await db.scalars(
+                select(SubscriptionPeriod.entitlement_id).where(
+                    SubscriptionPeriod.subscription_id == subscription.id,
+                    SubscriptionPeriod.entitlement_id.is_not(None),
+                )
+            )
+        ).all()
+        for entitlement_id in entitlement_ids:
+            entitlement = await db.get(ContentEntitlement, entitlement_id)
+            if entitlement and (entitlement.valid_until is None or entitlement.valid_until > now):
+                entitlement.valid_until = now
+        await record_event(
+            db,
+            "subscription.expired",
+            actor_user_id=subscription.subscriber_user_id,
+            target_type="subscription",
+            target_id=str(subscription.id),
+        )
     return len(rows)
 
 
