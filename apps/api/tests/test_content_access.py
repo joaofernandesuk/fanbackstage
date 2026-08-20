@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.accounts import service as accounts
-from app.content.access import can_access_content
+from app.content.access import can_access_content, can_access_preview
 from app.creators import service as creators
 from app.models.content import (
     AccessPolicy,
@@ -11,6 +11,13 @@ from app.models.content import (
     ContentItem,
     ContentStatus,
     ContentType,
+    DerivativeType,
+    Gallery,
+    GalleryItem,
+    MediaAsset,
+    MediaDerivative,
+    MediaStatus,
+    MediaType,
 )
 from app.models.creator import CreatorStatus
 
@@ -58,3 +65,39 @@ async def test_content_access_is_free_only_by_default_and_entitlement_is_explici
     assert await can_access_content(db_session, content, viewer)
     content.access_policy = AccessPolicy.free
     assert await can_access_content(db_session, content, None)
+
+
+@pytest.mark.asyncio
+async def test_preview_requires_published_ready_configured_gallery_media(db_session):
+    owner, profile = await creator(db_session, "preview-owner@example.com")
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        storage_key="private/source",
+        original_filename="source.png",
+        mime_type="image/png",
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Gallery",
+        status=ContentStatus.draft,
+    )
+    content.gallery = Gallery(preview_count=1)
+    db_session.add_all([asset, content])
+    await db_session.flush()
+    db_session.add(GalleryItem(gallery_id=content.gallery.id, media_asset_id=asset.id, position=0))
+    derivative = MediaDerivative(
+        media_asset_id=asset.id,
+        derivative_type=DerivativeType.blurred_preview,
+        status=MediaStatus.ready,
+        storage_key="private/preview",
+        mime_type="image/webp",
+    )
+    db_session.add(derivative)
+    await db_session.flush()
+    assert not await can_access_preview(db_session, derivative)
+    content.status = ContentStatus.published
+    assert await can_access_preview(db_session, derivative)
