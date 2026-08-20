@@ -1,0 +1,161 @@
+import { expect, test } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { securityLink } from "./mailpit";
+
+const apiBase =
+  process.env.E2E_API_URL ?? process.env.NEXT_PUBLIC_FANBACKSTAGE_API_URL ?? "http://127.0.0.1:8000";
+const admin = { email: "phase2-e2e-admin@example.com", password: "phase2-e2e-admin-password" };
+const image = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
+function videoFixture(): Buffer {
+  const directory = mkdtempSync(join(tmpdir(), "fanbackstage-phase2-"));
+  const path = join(directory, "video.mp4");
+  execFileSync("ffmpeg", ["-y", "-f", "lavfi", "-i", "color=c=purple:s=32x24:d=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", path], { stdio: "ignore" });
+  return readFileSync(path);
+}
+
+async function login(page: import("@playwright/test").Page, email: string, password: string) {
+  await page.goto("/login");
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Log in" }).click();
+  await expect(page.getByText(email)).toBeVisible();
+}
+
+async function approve(page: import("@playwright/test").Page, path: string) {
+  const response = await page.evaluate(async ({ apiBase, path }) => {
+    const result = await fetch(`${apiBase}/api/v1${path}`, { method: "POST", credentials: "include" });
+    return { status: result.status, body: await result.json() };
+  }, { apiBase, path });
+  expect(response.status).toBe(200);
+}
+
+test("creator media travels through the real private processing stack", async ({ browser, page }) => {
+  const stamp = Date.now();
+  const email = `phase2-media-${stamp}@example.com`;
+  const password = "phase2-media-password";
+  const username = `media${stamp}`;
+  const galleryTitle = `Private gallery ${stamp}`;
+
+  await page.goto("/register");
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Create account" }).click();
+  await page.goto(await securityLink(email, "/verify-email"));
+  await page.getByRole("button", { name: "Verify email" }).click();
+  await login(page, email, password);
+  await page.getByRole("link", { name: "Become a creator" }).click();
+  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Display name").fill("Media E2E Creator");
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await page.getByRole("button", { name: "Submit application" }).click();
+  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Log out" }).click();
+
+  await login(page, admin.email, admin.password);
+  const applications = await page.evaluate(async ({ apiBase }) => {
+    const result = await fetch(`${apiBase}/api/v1/admin/creator-applications`, { credentials: "include" });
+    return { status: result.status, body: await result.json() };
+  }, { apiBase });
+  expect(applications.status).toBe(200);
+  const application = applications.body.find((item: { username: string }) => item.username === username);
+  expect(application).toBeTruthy();
+  await approve(page, `/admin/creator-applications/${application.id}/approve`);
+  await page.getByRole("button", { name: "Log out" }).click();
+
+  await login(page, email, password);
+  await page.goto("/creator-onboarding");
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await page.goto("/account");
+  await page.getByRole("link", { name: "Creator studio" }).click();
+  const browserErrors: string[] = [];
+  const storageRequests: { url: string; method: string; headers: Record<string, string> }[] = [];
+  const storageResponses: { url: string; status: number; headers: Record<string, string>; body: string }[] = [];
+  const storageFailures: { url: string; error: string | null }[] = [];
+  page.on("console", message => { if (message.type() === "error") browserErrors.push(message.text()); });
+  page.on("request", request => {
+    if (request.method() === "PUT" && request.url().includes("X-Amz-Algorithm")) {
+      storageRequests.push({ url: request.url(), method: request.method(), headers: request.headers() });
+    }
+  });
+  page.on("response", async response => {
+    if (response.request().method() === "PUT" && response.url().includes("X-Amz-Algorithm")) {
+      storageResponses.push({
+        url: response.url(),
+        status: response.status(),
+        headers: response.headers(),
+        body: await response.text().catch(() => ""),
+      });
+    }
+  });
+  page.on("requestfailed", request => {
+    if (request.method() === "PUT" && request.url().includes("X-Amz-Algorithm")) {
+      storageFailures.push({ url: request.url(), error: request.failure()?.errorText ?? null });
+    }
+  });
+  await page.getByLabel("Upload image or video").setInputFiles({ name: "gallery.png", mimeType: "image/png", buffer: image });
+  await page.getByRole("button", { name: "Upload media" }).click();
+  await expect.poll(() => storageRequests.length, { timeout: 10000 }).toBe(1);
+  await expect.poll(() => storageResponses.length + storageFailures.length, { timeout: 10000 }).toBeGreaterThan(0);
+  if (!storageResponses.some(response => response.status === 200)) {
+    throw new Error(JSON.stringify({ browserErrors, storageRequests, storageResponses, storageFailures }));
+  }
+  await test.info().attach("direct-upload-diagnostics.json", {
+    body: JSON.stringify({ browserErrors, storageRequests, storageResponses, storageFailures }, null, 2),
+    contentType: "application/json",
+  });
+  await expect.poll(async () => page.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/media/mine`, { credentials: "include" });
+    return (await response.json() as { status: string }[]).filter(asset => asset.status === "ready").length;
+  }, { apiBase }), { timeout: 30000 }).toBeGreaterThan(0);
+  await page.reload();
+  await page.getByRole("group", { name: "Ready images" }).getByRole("checkbox").check();
+  await page.getByLabel("Gallery title").fill(galleryTitle);
+  await page.getByLabel("Access policy").first().selectOption("ppv");
+  await page.getByRole("button", { name: "Create and submit gallery" }).click();
+  await expect(page.getByText(/pending_review/)).toBeVisible();
+
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Log out" }).click();
+  await login(page, admin.email, admin.password);
+  const content = await page.evaluate(async ({ apiBase, galleryTitle }) => {
+    const result = await fetch(`${apiBase}/api/v1/admin/content-review`, { credentials: "include" });
+    return (await result.json()).find((item: { title: string }) => item.title === galleryTitle);
+  }, { apiBase, galleryTitle });
+  await approve(page, `/admin/content-review/${content.id}/approve`);
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Log out" }).click();
+
+  await login(page, email, password);
+  const owner = await page.evaluate(async ({ apiBase, contentId }) => {
+    const result = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
+    return await result.json();
+  }, { apiBase, contentId: content.id });
+  expect(owner.has_access).toBe(true);
+  expect(JSON.stringify(owner)).not.toContain("original/");
+  const anonymous = await browser.newContext();
+  const anonymousPage = await anonymous.newPage();
+  await anonymousPage.goto(`http://127.0.0.1:31000/creator/${username}`);
+  await expect(anonymousPage.getByText(galleryTitle)).toBeVisible();
+  await expect(anonymousPage.locator("img")).toHaveCount(1);
+  const previewUrl = await anonymousPage.locator("img").getAttribute("src");
+  expect(previewUrl).toContain("/media/previews/");
+  expect(previewUrl).not.toContain("original/");
+  await anonymous.close();
+
+  await page.goto("/creator-studio");
+  await page.getByLabel("Upload image or video").setInputFiles({ name: "video.mp4", mimeType: "video/mp4", buffer: videoFixture() });
+  await page.getByRole("button", { name: "Upload media" }).click();
+  await expect.poll(async () => page.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/media/mine`, { credentials: "include" });
+    return (await response.json() as { status: string }[]).filter(asset => asset.status === "ready").length;
+  }, { apiBase }), { timeout: 30000 }).toBeGreaterThan(1);
+});

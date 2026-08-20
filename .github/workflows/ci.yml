@@ -42,3 +42,18 @@ jobs:
         with: { node-version: 22, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck && pnpm test && pnpm build
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.19.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: docker compose up -d
+      - run: cd apps/api && uv sync --all-groups
+      - run: cd apps/web && pnpm install --no-frozen-lockfile && pnpm exec playwright install --with-deps chromium
+      - run: cd apps/web && pnpm test:e2e

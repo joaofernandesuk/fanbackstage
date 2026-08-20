@@ -44,6 +44,7 @@ Access policies should resolve through an entitlement service. The same asset ma
 - Videos may be free, follower-only, subscription-included, PPV, private/direct or bundled.
 - Creator may define a preview duration, e.g. first 20 seconds, or choose a custom time range.
 - Backend generates a separate preview derivative via media processing; unauthorised clients never receive the original source URL.
+- Creator preview start/duration changes are accepted only before review and render asynchronously. Content cannot enter review while that selected derivative is unavailable.
 - Video purchase grants a durable entitlement subject to platform policy, refunds/chargebacks and legal takedown conditions.
 - Creator can publish teasers separately from the paid master asset.
 

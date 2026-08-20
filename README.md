@@ -7,13 +7,15 @@ FanBackstage.com is a modular creator entertainment platform. This repository im
 1. Copy `.env.example` to `.env` and replace the development session secret for shared environments.
 2. Install [uv](https://docs.astral.sh/uv/) and pnpm, then run `make deps`.
 3. Run `make dev` to start PostgreSQL, Redis, Mailpit, MinIO and the local LiveKit scaffold. Mailpit is available at `http://localhost:8025` by default; it receives development verification and password-reset emails.
-4. Run `make migrate`, then `make api` and `make web` in separate terminals.
+4. Run `make migrate`, then `make api`, `make worker`, and `make web` in separate terminals. The worker and MinIO are required for upload/processing flows.
+
+Development pins MinIO to `RELEASE.2025-09-07T16-13-09Z`. Its private bucket is never made public: direct browser PUTs are restricted with MinIO's server-level CORS allowlist (`http://localhost:3000` and the Playwright origin `http://127.0.0.1:31000`). CORS only permits the browser request; it grants no object-read permission.
 
 The web app is at `http://localhost:3000`; the API is at `http://localhost:8000`; API documentation is at `/docs`.
 
 ## Validation
 
-Run `make lint` and `make test`. CI also runs a production web build and a fresh Alembic migration check against PostgreSQL.
+Run `make lint` and `make test`. Run `make e2e` for the real local media journey; it starts the full dependency stack and launches the API, worker, and browser application through Playwright. CI also runs a production web build, real-stack browser journeys, and fresh reversible Alembic migration checks against PostgreSQL.
 
 ## Architecture
 
@@ -21,4 +23,4 @@ The API is the source of truth for permissions and future business rules. Authen
 
 ## Scope
 
-Phase 2 adds private S3-compatible creator uploads, image/video processing, derivative delivery, galleries, standalone videos, content lifecycle, preview selection, and server-authorized access policies. Payments, subscription billing, PPV checkout, feed, stories, messaging, marketplace, and financial ledger product logic remain later phases.
+Phase 2 adds private S3-compatible creator uploads, image/video processing, derivative delivery, galleries, standalone videos, content review lifecycle, creator-selected gallery covers and video preview windows, bounded recovery/requeue, and server-authorized access policies. Payments, subscription billing, PPV checkout, feed, stories, messaging, marketplace, and financial ledger product logic remain later phases.

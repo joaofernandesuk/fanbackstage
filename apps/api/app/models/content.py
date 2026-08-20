@@ -93,6 +93,7 @@ class MediaAsset(UUIDPrimaryKey, Timestamped, Base):
     height: Mapped[int | None] = mapped_column(Integer)
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
     checksum_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    processing_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processing_error: Mapped[str | None] = mapped_column(String(255))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     derivatives: Mapped[list["MediaDerivative"]] = relationship(

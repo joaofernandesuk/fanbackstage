@@ -34,6 +34,8 @@ published -> restricted -> restored / removed
 published -> archived
 ```
 
+`MediaAsset` records a bounded `processing_attempts` counter. A failed asset may return to `queued` only through the owner-authorised recovery workflow while below the configured maximum; every processing attempt remains observable and derivative rows stay unique per asset/type.
+
 
 ## 36.2 Subscription
 

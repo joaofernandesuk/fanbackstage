@@ -18,7 +18,11 @@ ROLE_PERMISSIONS: dict[str, set[Permission]] = {
     "creator": {Permission.ACCOUNT_SELF_READ, Permission.CREATOR_ACCESS},
     "manager": {Permission.ACCOUNT_SELF_READ, Permission.MANAGER_ACCESS},
     "moderator": {Permission.ACCOUNT_SELF_READ, Permission.MODERATION_ACCESS},
-    "admin": {Permission.ACCOUNT_SELF_READ, Permission.ADMIN_ACCESS},
+    "admin": {
+        Permission.ACCOUNT_SELF_READ,
+        Permission.ADMIN_ACCESS,
+        Permission.MODERATION_ACCESS,
+    },
     "super_admin": set(Permission),
 }
 

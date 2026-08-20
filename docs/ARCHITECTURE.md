@@ -137,7 +137,7 @@ Business rules must live in backend domain/application services, not duplicated 
 - Entitlement service decides whether a user can access an asset.
 - Promotion engine decides eligibility and effective subscription price.
 - Media service produces preview/transcoded derivatives.
-- Moderation service controls publish/restrict status.
+- Moderation service controls content review, publish/restrict status. Phase 2 provides only the minimal approve/reject queue required to enforce content lifecycle transitions; case management remains a later boundary.
 
 # 39. Security Requirements
 

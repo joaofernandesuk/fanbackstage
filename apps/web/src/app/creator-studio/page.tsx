@@ -36,7 +36,8 @@ export default function CreatorStudioPage() {
     try {
       const created = await api<Upload>("/media/uploads", { method: "POST", body: JSON.stringify({ filename: file.name, mime_type: file.type }) });
       if (!created.upload_url) throw new Error("The upload authorization is missing");
-      await fetch(created.upload_url, { method: "PUT", headers: { "Content-Type": file.type }, body: file });
+      const uploadResponse = await fetch(created.upload_url, { method: "PUT", headers: { "Content-Type": file.type }, body: file });
+      if (!uploadResponse.ok) throw new Error(`Storage upload failed (${uploadResponse.status})`);
       await api<Upload>(`/media/${created.id}/finalize`, { method: "POST" });
       setMessage("Upload queued for processing.");
       await refresh();
@@ -51,9 +52,13 @@ export default function CreatorStudioPage() {
     try {
       const gallery = await api<Content>("/content/galleries", { method: "POST", body: JSON.stringify({ title: form.get("gallery-title"), access_policy: form.get("gallery-policy") }) });
       for (const media_asset_id of selected) await api(`/content/galleries/${gallery.id}/items`, { method: "POST", body: JSON.stringify({ media_asset_id }) });
-      await api(`/content/galleries/${gallery.id}/preview`, { method: "PATCH", body: JSON.stringify({ preview_count: 1, preview_asset_ids: [selected[0]] }) });
-      await api(`/content/${gallery.id}/publish`, { method: "POST" });
-      setMessage("Gallery published with its selected secure preview.");
+      const cover = String(form.get("gallery-cover") || selected[0]);
+      const previewCount = Number(form.get("gallery-preview-count") || 0);
+      if (!selected.includes(cover)) { setError("The cover image must be one of the selected gallery images."); return; }
+      await api(`/content/galleries/${gallery.id}/cover`, { method: "PATCH", body: JSON.stringify({ media_asset_id: cover }) });
+      await api(`/content/galleries/${gallery.id}/preview`, { method: "PATCH", body: JSON.stringify({ preview_count: previewCount, preview_asset_ids: [] }) });
+      await api(`/content/${gallery.id}/submit`, { method: "POST" });
+      setMessage("Gallery submitted for review with its secure preview configuration.");
       await refresh();
     } catch (e) { setError(e instanceof ApiError ? e.message : "Gallery could not be published"); }
   }
@@ -62,12 +67,19 @@ export default function CreatorStudioPage() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
-      const video = await api<Content>("/content/videos", { method: "POST", body: JSON.stringify({ title: form.get("video-title"), access_policy: form.get("video-policy"), media_asset_id: form.get("video") }) });
-      await api(`/content/${video.id}/publish`, { method: "POST" });
-      setMessage("Video published. Its poster and preview remain separate derivatives.");
+      await api<Content>("/content/videos", { method: "POST", body: JSON.stringify({ title: form.get("video-title"), access_policy: form.get("video-policy"), media_asset_id: form.get("video"), preview_start_seconds: Number(form.get("video-preview-start") || 0), preview_duration_seconds: Number(form.get("video-preview-duration") || 20) }) });
+      setMessage("Video preview rendering is queued. Submit it for review once processing is complete.");
       await refresh();
     } catch (e) { setError(e instanceof ApiError ? e.message : "Video could not be published"); }
   }
 
-  return <section className="card"><p className="eyebrow">CREATOR STUDIO</p><h1>Media library</h1><form onSubmit={upload}><label>Upload image or video<input name="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" required /></label><button>Upload media</button></form><h2>Gallery editor</h2><form onSubmit={createGallery}><label>Gallery title<input name="gallery-title" required /></label><label>Access policy<select name="gallery-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><fieldset><legend>Ready images</legend>{readyImages.map((asset) => <label key={asset.id}><input name="image" type="checkbox" value={asset.id} />{asset.id}</label>)}</fieldset><button>Create and publish gallery</button></form><h2>Video editor</h2><form onSubmit={createVideo}><label>Video title<input name="video-title" required /></label><label>Access policy<select name="video-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><label>Ready video<select name="video" required><option value="">Select media</option>{readyVideos.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><button>Create and publish video</button></form><h2>Library status</h2><ul>{assets.map((asset) => <li key={asset.id}>{asset.id}: {asset.status}</li>)}</ul><h2>Content</h2><ul>{content.map((item) => <li key={item.id}>{item.content_type}: {item.title} ({item.status})</li>)}</ul>{message && <p>{message}</p>}{error && <p className="error">{error}</p>}</section>;
+  async function submitForReview(contentId: string) {
+    try {
+      await api(`/content/${contentId}/submit`, { method: "POST" });
+      setMessage("Content submitted for review.");
+      await refresh();
+    } catch (e) { setError(e instanceof ApiError ? e.message : "Content is not ready for review"); }
+  }
+
+  return <section className="card"><p className="eyebrow">CREATOR STUDIO</p><h1>Media library</h1><form onSubmit={upload}><label>Upload image or video<input name="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" required /></label><button>Upload media</button></form><h2>Gallery editor</h2><form onSubmit={createGallery}><label>Gallery title<input name="gallery-title" required /></label><label>Access policy<select name="gallery-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><label>Public preview images<input name="gallery-preview-count" type="number" min="0" max="100" defaultValue="1" /></label><label>Cover image<select name="gallery-cover"><option value="">First selected image</option>{readyImages.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><fieldset><legend>Ready images</legend>{readyImages.map((asset) => <label key={asset.id}><input name="image" type="checkbox" value={asset.id} />{asset.id}</label>)}</fieldset><button>Create and submit gallery</button></form><h2>Video editor</h2><form onSubmit={createVideo}><label>Video title<input name="video-title" required /></label><label>Access policy<select name="video-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><label>Preview starts at (seconds)<input name="video-preview-start" type="number" min="0" defaultValue="0" /></label><label>Preview duration (seconds)<input name="video-preview-duration" type="number" min="1" max="120" defaultValue="20" /></label><label>Ready video<select name="video" required><option value="">Select media</option>{readyVideos.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><button>Create video</button></form><h2>Library status</h2><ul>{assets.map((asset) => <li key={asset.id}>{asset.id}: {asset.status}</li>)}</ul><h2>Content</h2><ul>{content.map((item) => <li key={item.id}>{item.content_type}: {item.title} ({item.status}) {item.status === "processing" && <button onClick={() => submitForReview(item.id)}>Submit for review</button>}</li>)}</ul>{message && <p>{message}</p>}{error && <p className="error">{error}</p>}</section>;
 }

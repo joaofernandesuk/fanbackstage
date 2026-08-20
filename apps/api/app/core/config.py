@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     media_max_video_bytes: int = 500 * 1024 * 1024
     media_max_gallery_items: int = 100
     media_max_video_duration_seconds: int = 3600
+    media_processing_max_attempts: int = 3
 
     def validate_production(self) -> None:
         if (

@@ -1,12 +1,12 @@
 .DEFAULT_GOAL := help
 
 help:
-	@echo "FanBackstage: make deps | dev | test | lint | migrate | worker"
+	@echo "FanBackstage: make deps | dev | test | lint | migrate | worker | e2e"
 deps:
 	cd apps/api && uv sync --all-groups
 	cd apps/web && pnpm install --frozen-lockfile=false
 dev:
-	docker compose up -d postgres redis livekit
+	docker compose up -d postgres redis mailpit minio livekit
 	@echo "Run 'make api' and 'make web' in separate terminals."
 api:
 	cd apps/api && uv run uvicorn app.main:app --reload --port 8000
@@ -14,6 +14,8 @@ web:
 	cd apps/web && pnpm dev
 worker:
 	cd apps/api && uv run celery -A app.worker.celery_app worker --loglevel=INFO
+e2e: dev
+	cd apps/web && pnpm test:e2e
 migrate:
 	cd apps/api && uv run alembic upgrade head
 test:

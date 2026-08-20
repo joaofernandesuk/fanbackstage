@@ -3,18 +3,23 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.audit.service import record_event
 from app.media.service import approved_creator, asset_for_owner
 from app.models.content import (
     AccessPolicy,
     ContentItem,
     ContentStatus,
     ContentType,
+    DerivativeType,
     Gallery,
     GalleryItem,
     MediaAsset,
+    MediaDerivative,
     MediaStatus,
     MediaType,
+    ModerationStatus,
     VideoContent,
 )
 from app.models.identity import User
@@ -52,6 +57,8 @@ async def add_gallery_item(
     )
     if not content.gallery.cover_media_asset_id:
         content.gallery.cover_media_asset_id = asset.id
+    if content.status is ContentStatus.draft:
+        content.status = ContentStatus.processing
     return content
 
 
@@ -62,11 +69,14 @@ async def create_video(
     description: str | None,
     asset_id: UUID,
     policy: AccessPolicy,
+    preview_start_seconds: int = 0,
+    preview_duration_seconds: int = 20,
 ) -> ContentItem:
     creator = await approved_creator(db, user)
     asset = await asset_for_owner(db, user, asset_id)
     if asset.media_type is not MediaType.video:
         raise ValueError("Videos require video assets")
+    validate_video_preview(asset, preview_start_seconds, preview_duration_seconds)
     content = ContentItem(
         owner_creator_id=creator.id,
         created_by_user_id=user.id,
@@ -74,10 +84,16 @@ async def create_video(
         title=title,
         description=description,
         access_policy=policy,
+        status=ContentStatus.processing,
     )
-    content.video = VideoContent(source_media_asset_id=asset.id)
+    content.video = VideoContent(
+        source_media_asset_id=asset.id,
+        preview_start_seconds=preview_start_seconds,
+        preview_duration_seconds=preview_duration_seconds,
+    )
     db.add(content)
     await db.flush()
+    await mark_video_preview_queued(db, asset.id)
     return content
 
 
@@ -85,7 +101,14 @@ async def owned_content(
     db: AsyncSession, user: User, content_id: UUID, expected: ContentType | None = None
 ) -> ContentItem:
     creator = await approved_creator(db, user)
-    content = await db.get(ContentItem, content_id)
+    content = await db.scalar(
+        select(ContentItem)
+        .options(
+            selectinload(ContentItem.gallery).selectinload(Gallery.items),
+            selectinload(ContentItem.video),
+        )
+        .where(ContentItem.id == content_id)
+    )
     if (
         not content
         or content.owner_creator_id != creator.id
@@ -95,8 +118,10 @@ async def owned_content(
     return content
 
 
-async def publish(db: AsyncSession, user: User, content_id: UUID) -> ContentItem:
+async def submit_for_review(db: AsyncSession, user: User, content_id: UUID) -> ContentItem:
     content = await owned_content(db, user, content_id)
+    if content.status is not ContentStatus.processing:
+        raise ValueError("Only processing content can be submitted for review")
     if content.content_type is ContentType.gallery:
         assert content.gallery
         assets = [await db.get(MediaAsset, item.media_asset_id) for item in content.gallery.items]
@@ -109,7 +134,53 @@ async def publish(db: AsyncSession, user: User, content_id: UUID) -> ContentItem
         asset = await asset_for_owner(db, user, content.video.source_media_asset_id)
         if asset.status is not MediaStatus.ready:
             raise ValueError("Video media must be ready before publishing")
+        preview = await db.scalar(
+            select(MediaDerivative).where(
+                MediaDerivative.media_asset_id == asset.id,
+                MediaDerivative.derivative_type == DerivativeType.preview_clip,
+            )
+        )
+        if not preview or preview.status is not MediaStatus.ready:
+            raise ValueError("Video preview is still processing")
+    content.status = ContentStatus.pending_review
+    content.moderation_status = ModerationStatus.queued
+    await record_event(
+        db,
+        "content.submitted_for_review",
+        actor_user_id=user.id,
+        target_type="content_item",
+        target_id=str(content.id),
+    )
+    return content
+
+
+async def approve(db: AsyncSession, content: ContentItem, actor: User) -> ContentItem:
+    if content.status is not ContentStatus.pending_review:
+        raise ValueError("Only content pending review can be approved")
     content.status, content.published_at = ContentStatus.published, datetime.now(UTC)
+    content.moderation_status = ModerationStatus.approved
+    await record_event(
+        db,
+        "content.approved",
+        actor_user_id=actor.id,
+        target_type="content_item",
+        target_id=str(content.id),
+    )
+    return content
+
+
+async def reject(db: AsyncSession, content: ContentItem, actor: User) -> ContentItem:
+    if content.status is not ContentStatus.pending_review:
+        raise ValueError("Only content pending review can be rejected")
+    content.status = ContentStatus.rejected
+    content.moderation_status = ModerationStatus.rejected
+    await record_event(
+        db,
+        "content.rejected",
+        actor_user_id=actor.id,
+        target_type="content_item",
+        target_id=str(content.id),
+    )
     return content
 
 
@@ -145,6 +216,54 @@ async def configure_gallery_preview(
     content.gallery.preview_count = preview_count
     for item in items:
         item.is_preview = item.media_asset_id in preview_asset_ids
+    return content
+
+
+async def configure_gallery_cover(
+    db: AsyncSession, user: User, content_id: UUID, asset_id: UUID
+) -> ContentItem:
+    content = await owned_content(db, user, content_id, ContentType.gallery)
+    assert content.gallery
+    item = await db.scalar(
+        select(GalleryItem).where(
+            GalleryItem.gallery_id == content.gallery.id,
+            GalleryItem.media_asset_id == asset_id,
+        )
+    )
+    if not item:
+        raise ValueError("Cover media must belong to the gallery")
+    content.gallery.cover_media_asset_id = item.media_asset_id
+    return content
+
+
+def validate_video_preview(asset: MediaAsset, start: int, duration: int) -> None:
+    if asset.duration_seconds is not None and start + duration > asset.duration_seconds:
+        raise ValueError("Video preview must fit within the video duration")
+
+
+async def mark_video_preview_queued(db: AsyncSession, asset_id: UUID) -> None:
+    preview = await db.scalar(
+        select(MediaDerivative).where(
+            MediaDerivative.media_asset_id == asset_id,
+            MediaDerivative.derivative_type == DerivativeType.preview_clip,
+        )
+    )
+    if preview:
+        preview.status = MediaStatus.queued
+
+
+async def configure_video_preview(
+    db: AsyncSession, user: User, content_id: UUID, start: int, duration: int
+) -> ContentItem:
+    content = await owned_content(db, user, content_id, ContentType.video)
+    if content.status not in {ContentStatus.draft, ContentStatus.processing}:
+        raise ValueError("Video preview can only be changed before review")
+    assert content.video
+    asset = await asset_for_owner(db, user, content.video.source_media_asset_id)
+    validate_video_preview(asset, start, duration)
+    content.video.preview_start_seconds = start
+    content.video.preview_duration_seconds = duration
+    await mark_video_preview_queued(db, asset.id)
     return content
 
 

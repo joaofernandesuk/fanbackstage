@@ -25,6 +25,8 @@ class GalleryCreate(BaseModel):
 
 class VideoCreate(GalleryCreate):
     media_asset_id: UUID
+    preview_start_seconds: int = Field(default=0, ge=0)
+    preview_duration_seconds: int = Field(default=20, ge=1, le=120)
 
 
 class GalleryItemCreate(BaseModel):
@@ -37,6 +39,10 @@ class GalleryPreviewUpdate(BaseModel):
     preview_asset_ids: list[UUID] = Field(default_factory=list, max_length=100)
 
 
+class GalleryCoverUpdate(BaseModel):
+    media_asset_id: UUID
+
+
 class GalleryOrderUpdate(BaseModel):
     media_asset_ids: list[UUID] = Field(min_length=1, max_length=100)
 
@@ -45,6 +51,11 @@ class ContentUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=5000)
     access_policy: AccessPolicy | None = None
+
+
+class VideoPreviewUpdate(BaseModel):
+    preview_start_seconds: int = Field(ge=0)
+    preview_duration_seconds: int = Field(ge=1, le=120)
 
 
 class ContentPreview(BaseModel):

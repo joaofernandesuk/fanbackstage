@@ -60,6 +60,25 @@ async def finalize_upload(
         ) from exc
 
 
+@router.post("/{asset_id}/requeue", response_model=UploadResponse)
+async def requeue_upload(
+    asset_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> UploadResponse:
+    await enforce_media_rate_limit(request, str(identity[0].id))
+    try:
+        asset = await service.requeue_failed_upload(db, identity[0], asset_id)
+        await db.commit()
+        process_media_asset.delay(str(asset.id))
+        return UploadResponse(
+            id=asset.id, status=asset.status.value, media_type=asset.media_type.value
+        )
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
+
+
 @router.get("/mine", response_model=list[UploadResponse])
 async def my_media(identity: CurrentIdentity, db: Db) -> list[UploadResponse]:
     from app.media.service import approved_creator

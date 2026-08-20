@@ -103,5 +103,24 @@ async def asset_for_owner(db: AsyncSession, user: User, asset_id: UUID) -> Media
     return asset
 
 
+async def requeue_failed_upload(db: AsyncSession, user: User, asset_id: UUID) -> MediaAsset:
+    asset = await asset_for_owner(db, user, asset_id)
+    if asset.status is not MediaStatus.failed:
+        raise ValueError("Only failed media can be requeued")
+    if asset.processing_attempts >= get_settings().media_processing_max_attempts:
+        raise ValueError("Media processing retry limit reached")
+    asset.status = MediaStatus.queued
+    asset.processing_error = None
+    await record_event(
+        db,
+        "media.processing_requeued",
+        actor_user_id=user.id,
+        target_type="media_asset",
+        target_id=str(asset.id),
+        metadata={"attempt": asset.processing_attempts + 1},
+    )
+    return asset
+
+
 def checksum(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()

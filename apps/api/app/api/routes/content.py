@@ -22,12 +22,15 @@ from app.schemas.content import (
     ContentPreview,
     ContentResponse,
     ContentUpdate,
+    GalleryCoverUpdate,
     GalleryCreate,
     GalleryItemCreate,
     GalleryOrderUpdate,
     GalleryPreviewUpdate,
     VideoCreate,
+    VideoPreviewUpdate,
 )
+from app.worker.tasks import render_video_preview
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -161,8 +164,11 @@ async def create_video(payload: VideoCreate, identity: CurrentIdentity, db: Db) 
             payload.description,
             payload.media_asset_id,
             payload.access_policy,
+            payload.preview_start_seconds,
+            payload.preview_duration_seconds,
         )
         await db.commit()
+        render_video_preview.delay(str(item.id))
         return response(item)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
@@ -188,6 +194,23 @@ async def configure_preview(
         ) from exc
 
 
+@router.patch("/galleries/{content_id}/cover", response_model=ContentResponse)
+async def configure_cover(
+    content_id: UUID, payload: GalleryCoverUpdate, identity: CurrentIdentity, db: Db
+) -> ContentResponse:
+    try:
+        item = await service.configure_gallery_cover(
+            db, identity[0], content_id, payload.media_asset_id
+        )
+        await db.commit()
+        return response(item)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
+
+
 @router.patch("/galleries/{content_id}/order", response_model=ContentResponse)
 async def reorder(
     content_id: UUID, payload: GalleryOrderUpdate, identity: CurrentIdentity, db: Db
@@ -203,10 +226,33 @@ async def reorder(
         ) from exc
 
 
-@router.post("/{content_id}/publish", response_model=ContentResponse)
-async def publish(content_id: UUID, identity: CurrentIdentity, db: Db) -> ContentResponse:
+@router.patch("/videos/{content_id}/preview", response_model=ContentResponse)
+async def configure_video_preview(
+    content_id: UUID, payload: VideoPreviewUpdate, identity: CurrentIdentity, db: Db
+) -> ContentResponse:
     try:
-        item = await service.publish(db, identity[0], content_id)
+        item = await service.configure_video_preview(
+            db,
+            identity[0],
+            content_id,
+            payload.preview_start_seconds,
+            payload.preview_duration_seconds,
+        )
+        await db.commit()
+        render_video_preview.delay(str(item.id))
+        return response(item)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
+
+
+@router.post("/{content_id}/publish", response_model=ContentResponse, deprecated=True)
+@router.post("/{content_id}/submit", response_model=ContentResponse)
+async def submit_for_review(content_id: UUID, identity: CurrentIdentity, db: Db) -> ContentResponse:
+    try:
+        item = await service.submit_for_review(db, identity[0], content_id)
         await db.commit()
         return response(item)
     except (PermissionError, ValueError) as exc:

@@ -9,9 +9,17 @@ from PIL import Image, ImageFilter, ImageOps
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.media.service import checksum
 from app.media.storage import StorageProvider, storage_provider
-from app.models.content import DerivativeType, MediaAsset, MediaDerivative, MediaStatus, MediaType
+from app.models.content import (
+    DerivativeType,
+    MediaAsset,
+    MediaDerivative,
+    MediaStatus,
+    MediaType,
+    VideoContent,
+)
 
 
 async def _derivative(
@@ -25,13 +33,14 @@ async def _derivative(
     height: int | None = None,
     duration: int | None = None,
     provider: StorageProvider | None = None,
+    overwrite: bool = False,
 ) -> None:
     row = await db.scalar(
         select(MediaDerivative).where(
             MediaDerivative.media_asset_id == asset.id, MediaDerivative.derivative_type == kind
         )
     )
-    if row and row.status is MediaStatus.ready:
+    if row and row.status is MediaStatus.ready and not overwrite:
         return
     (provider or storage_provider()).put(key, body, mime)
     if not row:
@@ -108,7 +117,6 @@ async def _process_video(
         asset.duration_seconds = max(1, round(float(metadata["format"]["duration"])))
         poster = Path(directory) / "poster.jpg"
         playback = Path(directory) / "playback.mp4"
-        preview = Path(directory) / "preview.mp4"
         _run(
             "ffmpeg",
             "-y",
@@ -136,24 +144,6 @@ async def _process_video(
             "-an",
             str(playback),
         )
-        _run(
-            "ffmpeg",
-            "-y",
-            "-ss",
-            "0",
-            "-t",
-            str(min(20, asset.duration_seconds)),
-            "-i",
-            str(source),
-            "-vf",
-            "scale='min(854,iw)':-2",
-            "-c:v",
-            "libx264",
-            "-movflags",
-            "+faststart",
-            "-an",
-            str(preview),
-        )
         await _derivative(
             db,
             asset,
@@ -177,32 +167,98 @@ async def _process_video(
             asset.duration_seconds,
             provider,
         )
-        await _derivative(
+        await _render_video_preview(db, asset, source, 0, min(20, asset.duration_seconds), provider)
+
+
+async def _render_video_preview(
+    db: AsyncSession,
+    asset: MediaAsset,
+    source: Path,
+    start_seconds: int,
+    duration_seconds: int,
+    provider: StorageProvider,
+) -> None:
+    preview = source.with_name("preview.mp4")
+    _run(
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(start_seconds),
+        "-t",
+        str(duration_seconds),
+        "-i",
+        str(source),
+        "-vf",
+        "scale='min(854,iw)':-2",
+        "-c:v",
+        "libx264",
+        "-movflags",
+        "+faststart",
+        "-an",
+        str(preview),
+    )
+    await _derivative(
+        db,
+        asset,
+        DerivativeType.preview_clip,
+        f"derivative/{asset.id}/preview.mp4",
+        preview.read_bytes(),
+        "video/mp4",
+        asset.width,
+        asset.height,
+        duration_seconds,
+        provider,
+        overwrite=True,
+    )
+
+
+async def render_video_preview(
+    db: AsyncSession, content_id: UUID, provider: StorageProvider | None = None
+) -> None:
+    video = await db.scalar(select(VideoContent).where(VideoContent.content_id == content_id))
+    if not video:
+        raise ValueError("Video content not found")
+    asset = await db.get(MediaAsset, video.source_media_asset_id)
+    if (
+        not asset
+        or asset.status is not MediaStatus.ready
+        or asset.media_type is not MediaType.video
+    ):
+        raise ValueError("Video media is not ready")
+    if (
+        asset.duration_seconds
+        and video.preview_start_seconds + video.preview_duration_seconds > asset.duration_seconds
+    ):
+        raise ValueError("Video preview must fit within the video duration")
+    storage = provider or storage_provider()
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / "source.mp4"
+        source.write_bytes(storage.get(asset.storage_key))
+        await _render_video_preview(
             db,
             asset,
-            DerivativeType.preview_clip,
-            f"derivative/{asset.id}/preview.mp4",
-            preview.read_bytes(),
-            "video/mp4",
-            asset.width,
-            asset.height,
-            min(20, asset.duration_seconds),
-            provider,
+            source,
+            video.preview_start_seconds,
+            video.preview_duration_seconds,
+            storage,
         )
 
 
 async def process_media_asset(
     db: AsyncSession, asset_id: UUID, provider: StorageProvider | None = None
 ) -> MediaAsset:
-    asset = await db.get(MediaAsset, asset_id)
+    asset = await db.scalar(select(MediaAsset).where(MediaAsset.id == asset_id).with_for_update())
     if not asset:
         raise ValueError("Media asset not found")
     if asset.status is MediaStatus.ready:
         return asset
     if asset.status not in {MediaStatus.queued, MediaStatus.processing, MediaStatus.uploaded}:
         raise ValueError("Media asset is not ready for processing")
+    if asset.processing_attempts >= get_settings().media_processing_max_attempts:
+        raise ValueError("Media processing retry limit reached")
     storage = provider or storage_provider()
     asset.status = MediaStatus.processing
+    asset.processing_attempts += 1
     try:
         raw = storage.get(asset.storage_key)
         asset.checksum_sha256 = checksum(raw)
