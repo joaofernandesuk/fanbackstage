@@ -1,12 +1,12 @@
 # FanBackstage — Get closer. Go backstage.
 
-FanBackstage.com is a modular creator entertainment platform. This repository implements the Phase 0 identity foundation and the in-progress **Phase 1 creator identity and profile foundation**.
+FanBackstage.com is a modular creator entertainment platform. This repository implements the identity, creator-profile, and in-progress **Phase 2 content and media foundation**.
 
 ## Start locally
 
 1. Copy `.env.example` to `.env` and replace the development session secret for shared environments.
 2. Install [uv](https://docs.astral.sh/uv/) and pnpm, then run `make deps`.
-3. Run `make dev` to start PostgreSQL, Redis, Mailpit and the local LiveKit scaffold. Mailpit is available at `http://localhost:8025` by default; it receives development verification and password-reset emails.
+3. Run `make dev` to start PostgreSQL, Redis, Mailpit, MinIO and the local LiveKit scaffold. Mailpit is available at `http://localhost:8025` by default; it receives development verification and password-reset emails.
 4. Run `make migrate`, then `make api` and `make web` in separate terminals.
 
 The web app is at `http://localhost:3000`; the API is at `http://localhost:8000`; API documentation is at `/docs`.
@@ -21,4 +21,4 @@ The API is the source of truth for permissions and future business rules. Authen
 
 ## Scope
 
-Phase 1 adds creator applications linked to existing users, lifecycle and verification states, development-only KYC verification guarded from production, audited admin review actions, and public-safe creator profiles. Content, streaming rooms, commerce, payments, subscriptions, messaging, marketplace, and financial ledger product logic remain later phases.
+Phase 2 adds private S3-compatible creator uploads, image/video processing, derivative delivery, galleries, standalone videos, content lifecycle, preview selection, and server-authorized access policies. Payments, subscription billing, PPV checkout, feed, stories, messaging, marketplace, and financial ledger product logic remain later phases.
