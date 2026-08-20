@@ -9,7 +9,14 @@ from app.models.content import (
     ContentEntitlement,
     ContentItem,
     ContentStatus,
+    DerivativeType,
     EntitlementStatus,
+    Gallery,
+    GalleryItem,
+    MediaAsset,
+    MediaDerivative,
+    MediaStatus,
+    VideoContent,
 )
 from app.models.creator import CreatorProfile
 from app.models.identity import User
@@ -46,8 +53,6 @@ async def can_access_content(db: AsyncSession, content: ContentItem, user: User 
 
 async def can_access_asset(db: AsyncSession, asset_id: UUID, user: User | None) -> bool:
     """Only an owning or entitled published content item can authorize full media."""
-    from app.models.content import Gallery, GalleryItem, VideoContent
-
     content = await db.scalar(
         select(ContentItem)
         .outerjoin(VideoContent, VideoContent.content_id == ContentItem.id)
@@ -61,3 +66,37 @@ async def can_access_asset(db: AsyncSession, asset_id: UUID, user: User | None) 
         )
     )
     return bool(content and await can_access_content(db, content, user))
+
+
+async def can_access_preview(db: AsyncSession, derivative: MediaDerivative) -> bool:
+    """A preview is public only when it belongs to published, ready content and is configured."""
+    if derivative.status is not MediaStatus.ready:
+        return False
+    asset = await db.get(MediaAsset, derivative.media_asset_id)
+    if not asset or asset.status is not MediaStatus.ready:
+        return False
+    video = await db.scalar(
+        select(VideoContent).where(VideoContent.source_media_asset_id == asset.id)
+    )
+    if video:
+        content = await db.get(ContentItem, video.content_id)
+        return bool(
+            content
+            and content.status is ContentStatus.published
+            and derivative.derivative_type in {DerivativeType.poster, DerivativeType.preview_clip}
+        )
+    row = await db.execute(
+        select(ContentItem, Gallery, GalleryItem)
+        .join(Gallery, Gallery.content_id == ContentItem.id)
+        .join(GalleryItem, GalleryItem.gallery_id == Gallery.id)
+        .where(GalleryItem.media_asset_id == asset.id)
+    )
+    for content, gallery, item in row:
+        configured = item.is_preview or item.position < gallery.preview_count
+        if (
+            content.status is ContentStatus.published
+            and configured
+            and derivative.derivative_type is DerivativeType.blurred_preview
+        ):
+            return True
+    return False
