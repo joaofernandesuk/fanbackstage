@@ -1,0 +1,119 @@
+import pytest
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import DBAPIError
+
+from app.accounts import service as accounts
+from app.content.access import can_access_content
+from app.creators import service as creators
+from app.finance import service as finance
+from app.models.content import AccessPolicy, ContentItem, ContentStatus, ContentType
+from app.models.creator import CreatorStatus
+from app.models.finance import (
+    LedgerDirection,
+    LedgerEntry,
+    PaymentAttempt,
+    PaymentWebhookEvent,
+    PurchaseStatus,
+)
+
+
+async def approved_creator(db, email: str):
+    user, _ = await accounts.register(db, email, "strong-password-123", None)
+    profile = await creators.get_or_create_profile(db, user)
+    await creators.update_profile(
+        db, profile, {"username": email.split("@")[0], "display_name": "Creator"}, user.id
+    )
+    await creators.submit(db, profile, user.id)
+    await creators.development_verify(db, profile, True, user.id)
+    await creators.set_status(db, profile, CreatorStatus.approved, user.id)
+    return user, profile
+
+
+@pytest.mark.asyncio
+async def test_paid_ppv_is_idempotent_balanced_and_entitles_buyer(db_session):
+    owner, profile = await approved_creator(db_session, "finance-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "finance-buyer@example.com", "strong-password-123", None
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="PPV",
+        status=ContentStatus.published,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=999,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    purchase = await finance.initiate_purchase(db_session, buyer, content.id, "same-request")
+    assert (
+        await finance.initiate_purchase(db_session, buyer, content.id, "same-request")
+    ).id == purchase.id
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    settled = await finance.process_development_webhook(db_session, payload, signature)
+    assert settled and settled.status is PurchaseStatus.paid
+    await db_session.flush()
+    assert await can_access_content(db_session, content, buyer)
+    entries = (
+        await db_session.scalars(
+            select(LedgerEntry).where(LedgerEntry.transaction_id == settled.ledger_transaction_id)
+        )
+    ).all()
+    debit = sum(entry.amount_minor for entry in entries if entry.direction is LedgerDirection.debit)
+    credit = sum(
+        entry.amount_minor for entry in entries if entry.direction is LedgerDirection.credit
+    )
+    assert debit == credit == 999
+    assert settled.platform_fee_minor + settled.creator_amount_minor == settled.gross_amount_minor
+    assert await finance.process_development_webhook(db_session, payload, signature) is None
+    assert await db_session.scalar(select(func.count()).select_from(PaymentWebhookEvent)) == 1
+    with pytest.raises(DBAPIError):
+        await db_session.execute(
+            update(LedgerEntry).where(LedgerEntry.id == entries[0].id).values(amount_minor=1)
+        )
+        await db_session.flush()
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_full_refund_reverses_value_and_revokes_entitlement(db_session):
+    owner, profile = await approved_creator(db_session, "refund-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "refund-buyer@example.com", "strong-password-123", None
+    )
+    admin, _ = await accounts.register(
+        db_session, "refund-admin@example.com", "strong-password-123", None
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.video,
+        title="Refundable PPV",
+        status=ContentStatus.published,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=1000,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    purchase = await finance.initiate_purchase(db_session, buyer, content.id, "refund-request")
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    purchase = await finance.process_development_webhook(db_session, payload, signature)
+    assert purchase
+    refunded = await finance.refund_purchase(db_session, purchase, admin, "Customer support refund")
+    await db_session.flush()
+    assert refunded.status is PurchaseStatus.refunded
+    assert not await can_access_content(db_session, content, buyer)
+    with pytest.raises(finance.FinancialError):
+        await finance.refund_purchase(db_session, refunded, admin, "duplicate")
+
+
+def test_commission_uses_integer_minor_units_without_rounding_drift():
+    assert finance.commission_amount(101, 2000) == (20, 81)
+    assert finance.commission_amount(1, 9999) == (0, 1)

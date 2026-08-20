@@ -120,6 +120,7 @@ test("creator media travels through the real private processing stack", async ({
   await page.getByRole("group", { name: "Ready images" }).getByRole("checkbox").check();
   await page.getByLabel("Gallery title").fill(galleryTitle);
   await page.getByLabel("Access policy").first().selectOption("ppv");
+  await page.getByLabel("PPV price (minor units; only when PPV)").first().fill("999");
   await page.getByRole("button", { name: "Create and submit gallery" }).click();
   await expect(page.getByText(/pending_review/)).toBeVisible();
 
@@ -141,6 +142,25 @@ test("creator media travels through the real private processing stack", async ({
   }, { apiBase, contentId: content.id });
   expect(owner.has_access).toBe(true);
   expect(JSON.stringify(owner)).not.toContain("original/");
+  const buyerContext = await browser.newContext();
+  const buyerPage = await buyerContext.newPage();
+  const buyerEmail = `phase3-buyer-${stamp}@example.com`;
+  await buyerPage.goto("/register");
+  await buyerPage.getByLabel("Email").fill(buyerEmail);
+  await buyerPage.getByLabel("Password").fill(password);
+  await buyerPage.getByRole("button", { name: "Create account" }).click();
+  await buyerPage.goto(await securityLink(buyerEmail, "/verify-email"));
+  await buyerPage.getByRole("button", { name: "Verify email" }).click();
+  await login(buyerPage, buyerEmail, password);
+  await buyerPage.goto(`/creator/${username}`);
+  await buyerPage.getByRole("button", { name: "Unlock for 999 EUR" }).click();
+  await expect(buyerPage.getByText("LOCKED")).toHaveCount(0);
+  const buyerContent = await buyerPage.evaluate(async ({ apiBase, contentId }) => {
+    const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
+    return await response.json();
+  }, { apiBase, contentId: content.id });
+  expect(buyerContent.has_access).toBe(true);
+  await buyerContext.close();
   const anonymous = await browser.newContext();
   const anonymousPage = await anonymous.newPage();
   await anonymousPage.goto(`http://127.0.0.1:31000/creator/${username}`);

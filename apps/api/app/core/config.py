@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     media_max_gallery_items: int = 100
     media_max_video_duration_seconds: int = 3600
     media_processing_max_attempts: int = 3
+    payment_provider: str = "development"
+    payment_webhook_secret: str = "development-payment-webhook-secret"
+    finance_default_commission_basis_points: int = 2000
+    creator_earnings_settlement_seconds: int = 0
 
     def validate_production(self) -> None:
         if (
@@ -44,6 +48,10 @@ class Settings(BaseSettings):
             raise RuntimeError("FANBACKSTAGE_SESSION_SECRET must be set in production")
         if self.environment == "production" and self.kyc_provider == "development":
             raise RuntimeError("The development KYC provider cannot run in production")
+        if self.environment == "production" and self.payment_provider == "development":
+            raise RuntimeError("The development payment provider cannot run in production")
+        if not 0 <= self.finance_default_commission_basis_points <= 10000:
+            raise RuntimeError("FANBACKSTAGE_FINANCE_DEFAULT_COMMISSION_BASIS_POINTS is invalid")
 
 
 @lru_cache

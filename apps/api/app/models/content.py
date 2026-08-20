@@ -2,7 +2,17 @@ import enum
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, Timestamped, UUIDPrimaryKey
@@ -123,6 +133,12 @@ class MediaDerivative(UUIDPrimaryKey, Timestamped, Base):
 
 class ContentItem(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "content_items"
+    __table_args__ = (
+        CheckConstraint(
+            "price_amount_minor IS NULL OR (price_amount_minor > 0 AND price_currency IS NOT NULL)",
+            name="ck_content_price_valid",
+        ),
+    )
     owner_creator_id: Mapped[UUID] = mapped_column(
         ForeignKey("creator_profiles.id", ondelete="RESTRICT"), index=True
     )
@@ -143,6 +159,8 @@ class ContentItem(UUIDPrimaryKey, Timestamped, Base):
     access_policy: Mapped[AccessPolicy] = mapped_column(
         Enum(AccessPolicy, name="access_policy"), default=AccessPolicy.free, index=True
     )
+    price_amount_minor: Mapped[int | None] = mapped_column(Integer)
+    price_currency: Mapped[str | None] = mapped_column(String(3))
     title: Mapped[str] = mapped_column(String(160))
     description: Mapped[str | None] = mapped_column(Text)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

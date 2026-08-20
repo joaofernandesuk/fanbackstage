@@ -45,6 +45,8 @@ def response(item: ContentItem, has_access: bool = True) -> ContentResponse:
         access_policy=item.access_policy.value,
         has_access=has_access,
         locked=not has_access,
+        price_amount_minor=item.price_amount_minor if item.access_policy.value == "ppv" else None,
+        price_currency=item.price_currency if item.access_policy.value == "ppv" else None,
     )
 
 
@@ -128,13 +130,21 @@ async def create_gallery(
 ) -> ContentResponse:
     try:
         item = await service.create_gallery(
-            db, identity[0], payload.title, payload.description, payload.access_policy
+            db,
+            identity[0],
+            payload.title,
+            payload.description,
+            payload.access_policy,
+            payload.price_amount_minor,
+            payload.price_currency,
         )
         await db.commit()
         return response(item)
-    except PermissionError as exc:
+    except (PermissionError, ValueError) as exc:
         await db.rollback()
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
 
 
 @router.post("/galleries/{content_id}/items", response_model=ContentResponse)
@@ -166,6 +176,8 @@ async def create_video(payload: VideoCreate, identity: CurrentIdentity, db: Db) 
             payload.access_policy,
             payload.preview_start_seconds,
             payload.preview_duration_seconds,
+            payload.price_amount_minor,
+            payload.price_currency,
         )
         await db.commit()
         render_video_preview.delay(str(item.id))
@@ -268,9 +280,11 @@ async def archive(content_id: UUID, identity: CurrentIdentity, db: Db) -> Conten
         item = await service.archive(db, identity[0], content_id)
         await db.commit()
         return response(item)
-    except PermissionError as exc:
+    except (PermissionError, ValueError) as exc:
         await db.rollback()
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
 
 
 @router.patch("/{content_id}", response_model=ContentResponse)
@@ -283,9 +297,11 @@ async def update_content(
         )
         await db.commit()
         return response(item)
-    except PermissionError as exc:
+    except (PermissionError, ValueError) as exc:
         await db.rollback()
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
 
 
 @router.get("/public/{content_id}", response_model=ContentResponse)

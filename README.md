@@ -1,6 +1,6 @@
 # FanBackstage — Get closer. Go backstage.
 
-FanBackstage.com is a modular creator entertainment platform. This repository implements the identity, creator-profile, and in-progress **Phase 2 content and media foundation**.
+FanBackstage.com is a modular creator entertainment platform. This repository implements the identity, creator-profile, content/media foundation, and **Phase 3 financial core**.
 
 ## Start locally
 
@@ -23,4 +23,4 @@ The API is the source of truth for permissions and future business rules. Authen
 
 ## Scope
 
-Phase 2 adds private S3-compatible creator uploads, image/video processing, derivative delivery, galleries, standalone videos, content review lifecycle, creator-selected gallery covers and video preview windows, bounded recovery/requeue, and server-authorized access policies. Payments, subscription billing, PPV checkout, feed, stories, messaging, marketplace, and financial ledger product logic remain later phases.
+Phase 3 adds private PPV pricing, signed development payment webhooks, idempotent PPV purchase settlement, append-only double-entry ledger records, commission snapshots, creator pending/available balances, and auditable full refunds that revoke access. Subscriptions, promotions, feed, stories, messaging, marketplace, and payout execution remain later phases.

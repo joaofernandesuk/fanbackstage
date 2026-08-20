@@ -11,6 +11,8 @@ class Permission(StrEnum):
     MODERATION_ACCESS = "moderation.access"
     CREATOR_ACCESS = "creator.access"
     MANAGER_ACCESS = "manager.access"
+    FINANCIAL_ACCESS = "financial.access"
+    FINANCIAL_CONFIGURE = "financial.configure"
 
 
 ROLE_PERMISSIONS: dict[str, set[Permission]] = {
@@ -22,6 +24,7 @@ ROLE_PERMISSIONS: dict[str, set[Permission]] = {
         Permission.ACCOUNT_SELF_READ,
         Permission.ADMIN_ACCESS,
         Permission.MODERATION_ACCESS,
+        Permission.FINANCIAL_ACCESS,
     },
     "super_admin": set(Permission),
 }

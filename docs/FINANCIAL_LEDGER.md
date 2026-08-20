@@ -128,3 +128,11 @@ Do not tightly couple domain logic to a single payment processor. Implement prov
 - Payout state machine
 - Refund and dispute workflows
 - Processor errors isolated from entitlement state until payment certainty exists
+
+# Phase 3 implementation notes
+
+Phase 3 records PPV purchases in integer minor units with an explicit ISO currency. A purchase snapshots its commission basis points, platform fee, and creator amount before payment completion; later commission changes cannot alter that history.
+
+The development payment adapter is available only outside production. It signs development webhook payloads with `FANBACKSTAGE_PAYMENT_WEBHOOK_SECRET`; payment completion, webhook replay protection, ledger posting, and entitlement issuance all use the same webhook-processing path. Production startup rejects the development adapter.
+
+`ledger_transactions` and `ledger_entries` are append-only at the database layer. Refunds create reversal entries and revoke the purchase entitlement; they never edit or delete the original purchase entries. Migration `20260820_0004` has a destructive downgrade for local development only. A deployed rollback must use a forward corrective migration.

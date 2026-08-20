@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.content import AccessPolicy
 
@@ -21,6 +21,19 @@ class GalleryCreate(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=5000)
     access_policy: AccessPolicy = AccessPolicy.free
+    price_amount_minor: int | None = Field(default=None, gt=0, le=2_147_483_647)
+    price_currency: str | None = Field(default=None, min_length=3, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_ppv_price(self):
+        has_price = self.price_amount_minor is not None or self.price_currency is not None
+        if self.access_policy is AccessPolicy.ppv and (
+            self.price_amount_minor is None or self.price_currency is None
+        ):
+            raise ValueError("PPV content requires a price and currency")
+        if self.access_policy is not AccessPolicy.ppv and has_price:
+            raise ValueError("Prices are only valid for PPV content")
+        return self
 
 
 class VideoCreate(GalleryCreate):
@@ -51,6 +64,8 @@ class ContentUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=5000)
     access_policy: AccessPolicy | None = None
+    price_amount_minor: int | None = Field(default=None, gt=0, le=2_147_483_647)
+    price_currency: str | None = Field(default=None, min_length=3, max_length=3)
 
 
 class VideoPreviewUpdate(BaseModel):
@@ -73,4 +88,6 @@ class ContentResponse(BaseModel):
     access_policy: str
     has_access: bool
     locked: bool
+    price_amount_minor: int | None = None
+    price_currency: str | None = None
     previews: list[ContentPreview] = Field(default_factory=list)

@@ -1,0 +1,166 @@
+from uuid import UUID
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from sqlalchemy import select
+
+from app.api.deps import CurrentIdentity, Db
+from app.audit.service import record_event
+from app.finance import service
+from app.media.service import approved_creator
+from app.models.finance import CommissionRule, PaymentAttempt, Purchase
+from app.permissions.policies import Permission, authorize
+from app.schemas.finance import (
+    CommissionUpdate,
+    CreatorEarningsResponse,
+    PurchaseResponse,
+    RefundRequest,
+)
+
+router = APIRouter(tags=["finance"])
+
+
+def purchase_response(purchase: Purchase) -> PurchaseResponse:
+    return PurchaseResponse(
+        id=purchase.id,
+        content_id=purchase.content_id,
+        status=purchase.status.value,
+        gross_amount_minor=purchase.gross_amount_minor,
+        platform_fee_minor=purchase.platform_fee_minor,
+        creator_amount_minor=purchase.creator_amount_minor,
+        currency=purchase.currency,
+        payment_attempt_id=purchase.payment_attempt_id,
+    )
+
+
+@router.post("/purchases/content/{content_id}", response_model=PurchaseResponse)
+async def start_purchase(
+    content_id: UUID,
+    identity: CurrentIdentity,
+    db: Db,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> PurchaseResponse:
+    try:
+        purchase = await service.initiate_purchase(
+            db, identity[0], content_id, idempotency_key or ""
+        )
+        await db.commit()
+        return purchase_response(purchase)
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/purchases/mine", response_model=list[PurchaseResponse])
+async def my_purchases(identity: CurrentIdentity, db: Db) -> list[PurchaseResponse]:
+    rows = (
+        await db.scalars(
+            select(Purchase)
+            .where(Purchase.buyer_user_id == identity[0].id)
+            .order_by(Purchase.created_at.desc())
+        )
+    ).all()
+    return [purchase_response(row) for row in rows]
+
+
+@router.post("/payments/development/{payment_attempt_id}/complete", response_model=PurchaseResponse)
+async def complete_development_payment(
+    payment_attempt_id: UUID, identity: CurrentIdentity, db: Db
+) -> PurchaseResponse:
+    attempt = await db.get(PaymentAttempt, payment_attempt_id)
+    if not attempt or attempt.buyer_user_id != identity[0].id:
+        raise HTTPException(status_code=404, detail="Payment attempt not found")
+    if attempt.provider != "development":
+        raise HTTPException(status_code=404, detail="Development payment is unavailable")
+    payload, signature = service.development_webhook_payload(attempt)
+    try:
+        purchase = await service.process_development_webhook(db, payload, signature)
+        await db.commit()
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if purchase is None:
+        purchase = await db.scalar(
+            select(Purchase).where(Purchase.payment_attempt_id == attempt.id)
+        )
+    if not purchase:
+        raise HTTPException(status_code=409, detail="Payment was already processed")
+    return purchase_response(purchase)
+
+
+@router.post("/payments/webhooks/development", status_code=204)
+async def development_webhook(request: Request, db: Db) -> None:
+    payload = await request.body()
+    try:
+        await service.process_development_webhook(
+            db, payload, request.headers.get("X-Payment-Signature")
+        )
+        await db.commit()
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/finance/creator/earnings", response_model=CreatorEarningsResponse)
+async def creator_earnings(identity: CurrentIdentity, db: Db) -> CreatorEarningsResponse:
+    creator = await approved_creator(db, identity[0])
+    balances = await service.creator_balances(db, creator.id)
+    return CreatorEarningsResponse(**balances, currency="EUR")
+
+
+@router.post("/finance/creator/release", response_model=dict)
+async def release_earnings(identity: CurrentIdentity, db: Db) -> dict:
+    creator = await approved_creator(db, identity[0])
+    ledger = await service.release_creator_earnings(db, creator.id, "EUR")
+    await db.commit()
+    return {"released": bool(ledger), "ledger_transaction_id": str(ledger.id) if ledger else None}
+
+
+@router.get("/admin/finance/purchases", response_model=list[PurchaseResponse])
+async def admin_purchases(identity: CurrentIdentity, db: Db) -> list[PurchaseResponse]:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    rows = (await db.scalars(select(Purchase).order_by(Purchase.created_at.desc()))).all()
+    return [purchase_response(row) for row in rows]
+
+
+@router.post("/admin/finance/purchases/{purchase_id}/refund", response_model=PurchaseResponse)
+async def refund(
+    purchase_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
+) -> PurchaseResponse:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    purchase = await db.get(Purchase, purchase_id)
+    if not purchase:
+        raise HTTPException(status_code=404, detail="Purchase not found")
+    try:
+        purchase = await service.refund_purchase(db, purchase, identity[0], payload.reason)
+        await db.commit()
+        return purchase_response(purchase)
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/admin/finance/commission", response_model=dict)
+async def commission(identity: CurrentIdentity, db: Db) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    return {"basis_points": await service.ppv_commission(db)}
+
+
+@router.put("/admin/finance/commission", response_model=dict)
+async def set_commission(payload: CommissionUpdate, identity: CurrentIdentity, db: Db) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
+    rule = await db.scalar(select(CommissionRule).where(CommissionRule.revenue_type == "ppv"))
+    if not rule:
+        rule = CommissionRule(revenue_type="ppv", basis_points=payload.basis_points)
+        db.add(rule)
+    else:
+        rule.basis_points = payload.basis_points
+    await record_event(
+        db,
+        "finance.commission_updated",
+        actor_user_id=identity[0].id,
+        target_type="commission_rule",
+        target_id="ppv",
+        metadata={"basis_points": payload.basis_points},
+    )
+    await db.commit()
+    return {"basis_points": rule.basis_points}

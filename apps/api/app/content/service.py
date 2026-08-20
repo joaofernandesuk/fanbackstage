@@ -25,10 +25,28 @@ from app.models.content import (
 from app.models.identity import User
 
 
+def validate_ppv_price(
+    policy: AccessPolicy, price_amount_minor: int | None, price_currency: str | None
+) -> None:
+    if policy is AccessPolicy.ppv and (not price_amount_minor or not price_currency):
+        raise ValueError("PPV content requires a price and currency")
+    if policy is not AccessPolicy.ppv and (
+        price_amount_minor is not None or price_currency is not None
+    ):
+        raise ValueError("Prices are only valid for PPV content")
+
+
 async def create_gallery(
-    db: AsyncSession, user: User, title: str, description: str | None, policy: AccessPolicy
+    db: AsyncSession,
+    user: User,
+    title: str,
+    description: str | None,
+    policy: AccessPolicy,
+    price_amount_minor: int | None = None,
+    price_currency: str | None = None,
 ) -> ContentItem:
     creator = await approved_creator(db, user)
+    validate_ppv_price(policy, price_amount_minor, price_currency)
     content = ContentItem(
         owner_creator_id=creator.id,
         created_by_user_id=user.id,
@@ -36,6 +54,8 @@ async def create_gallery(
         title=title,
         description=description,
         access_policy=policy,
+        price_amount_minor=price_amount_minor,
+        price_currency=price_currency.upper() if price_currency else None,
     )
     content.gallery = Gallery()
     db.add(content)
@@ -71,8 +91,11 @@ async def create_video(
     policy: AccessPolicy,
     preview_start_seconds: int = 0,
     preview_duration_seconds: int = 20,
+    price_amount_minor: int | None = None,
+    price_currency: str | None = None,
 ) -> ContentItem:
     creator = await approved_creator(db, user)
+    validate_ppv_price(policy, price_amount_minor, price_currency)
     asset = await asset_for_owner(db, user, asset_id)
     if asset.media_type is not MediaType.video:
         raise ValueError("Videos require video assets")
@@ -84,6 +107,8 @@ async def create_video(
         title=title,
         description=description,
         access_policy=policy,
+        price_amount_minor=price_amount_minor,
+        price_currency=price_currency.upper() if price_currency else None,
         status=ContentStatus.processing,
     )
     content.video = VideoContent(
@@ -194,9 +219,14 @@ async def update_content(
     db: AsyncSession, user: User, content_id: UUID, values: dict[str, object]
 ) -> ContentItem:
     content = await owned_content(db, user, content_id)
-    for field in ("title", "description", "access_policy"):
+    target_policy = values.get("access_policy", content.access_policy)
+    target_amount = values.get("price_amount_minor", content.price_amount_minor)
+    target_currency = values.get("price_currency", content.price_currency)
+    validate_ppv_price(target_policy, target_amount, target_currency)
+    for field in ("title", "description", "access_policy", "price_amount_minor", "price_currency"):
         if field in values:
-            setattr(content, field, values[field])
+            value = values[field]
+            setattr(content, field, value.upper() if field == "price_currency" and value else value)
     return content
 
 

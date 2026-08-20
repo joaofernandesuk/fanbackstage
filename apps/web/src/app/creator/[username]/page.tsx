@@ -18,6 +18,9 @@ type Content = {
   title: string;
   description: string | null;
   locked: boolean;
+  access_policy: string;
+  price_amount_minor: number | null;
+  price_currency: string | null;
   previews: { derivative_id: string; delivery_path: string }[];
 };
 
@@ -27,6 +30,7 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   const [creator, setCreator] = useState<Creator | null>(null);
   const [content, setContent] = useState<Content[]>([]);
   const [error, setError] = useState("");
+  const [purchasing, setPurchasing] = useState<string | null>(null);
 
   useEffect(() => {
     params
@@ -46,6 +50,23 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   }
   if (!creator) {
     return <section className="card"><p>Loading creator profile…</p></section>;
+  }
+  async function purchase(contentId: string, creatorUsername: string) {
+    setPurchasing(contentId);
+    setError("");
+    try {
+      const started = await api<{ payment_attempt_id: string }>(`/purchases/content/${contentId}`, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      });
+      await api(`/payments/development/${started.payment_attempt_id}/complete`, { method: "POST" });
+      const publishedContent = await api<Content[]>(`/content/public/by-creator/${creatorUsername}`);
+      setContent(publishedContent);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Purchase could not be completed");
+    } finally {
+      setPurchasing(null);
+    }
   }
   return (
     <section className="card">
@@ -69,6 +90,11 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
             <p className="eyebrow">{item.content_type}{item.locked ? " · LOCKED" : ""}</p>
             <h3>{item.title}</h3>
             {item.description && <p>{item.description}</p>}
+            {item.locked && item.access_policy === "ppv" && item.price_amount_minor !== null && (
+              <button disabled={purchasing === item.id} onClick={() => purchase(item.id, creator.username)}>
+                {purchasing === item.id ? "Completing purchase…" : `Unlock for ${item.price_amount_minor} ${item.price_currency}`}
+              </button>
+            )}
           </article>
         ))}
       </div>
