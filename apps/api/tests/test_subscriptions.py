@@ -20,6 +20,7 @@ from app.models.subscription import (
     PromotionEligibility,
     PromotionRenewalScope,
     SubscriptionPeriod,
+    SubscriptionPlanPrice,
     SubscriptionPromotion,
     SubscriptionPromotionRule,
     SubscriptionStatus,
@@ -292,3 +293,51 @@ async def test_promotion_scheduling_and_overlap_are_deterministic(db_session):
         db_session, buyer, profile.id, "month_3", renewal=False
     )
     assert selected and selected.id == valid.id and bps == 3000
+
+
+@pytest.mark.asyncio
+async def test_period_price_and_promotion_snapshot_survive_later_edits(db_session):
+    _owner, profile = await creator(db_session, "history-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "history-buyer@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_1", "amount_minor": 999, "enabled": True}],
+    )
+    now = datetime.now(UTC)
+    promotion = SubscriptionPromotion(
+        creator_id=profile.id,
+        name="snapshot",
+        eligibility=PromotionEligibility.all_eligible,
+        renewal_scope=PromotionRenewalScope.initial_only,
+        start_at=now - timedelta(minutes=1),
+    )
+    db_session.add(promotion)
+    await db_session.flush()
+    rule = SubscriptionPromotionRule(
+        promotion_id=promotion.id, duration="month_1", discount_basis_points=2000
+    )
+    db_session.add(rule)
+    subscription = await subscriptions.create_subscription(
+        db_session, buyer, profile.id, "month_1", "snapshot-start"
+    )
+    period = await db_session.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_id == subscription.id)
+    )
+    assert period
+    price = await db_session.scalar(
+        select(SubscriptionPlanPrice).where(SubscriptionPlanPrice.plan_id == subscription.plan_id)
+    )
+    assert price
+    price.amount_minor = 1999
+    rule.discount_basis_points = 5000
+    await db_session.flush()
+    assert (
+        period.base_amount_minor,
+        period.discount_basis_points,
+        period.charged_amount_minor,
+    ) == (999, 2000, 800)
