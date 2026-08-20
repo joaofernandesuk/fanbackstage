@@ -9,7 +9,7 @@
     "lint": "tsc --noEmit --tsBuildInfoFile /tmp/fanbackstage-tsconfig.tsbuildinfo",
     "typecheck": "tsc --noEmit --tsBuildInfoFile /tmp/fanbackstage-tsconfig.tsbuildinfo",
     "test": "vitest run src",
-    "test:e2e": "playwright test"
+    "test:e2e": "node scripts/run-e2e.mjs"
   },
   "dependencies": {
     "next": "16.3.1",

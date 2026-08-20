@@ -9,7 +9,7 @@ FanBackstage.com is a modular creator entertainment platform. This repository im
 3. Run `make dev` to start PostgreSQL, Redis, Mailpit, MinIO and the local LiveKit scaffold. Mailpit is available at `http://localhost:8025` by default; it receives development verification and password-reset emails.
 4. Run `make migrate`, then `make api`, `make worker`, and `make web` in separate terminals. The worker and MinIO are required for upload/processing flows.
 
-Development pins MinIO to `RELEASE.2025-09-07T16-13-09Z`. Its private bucket is never made public: direct browser PUTs are restricted with MinIO's server-level CORS allowlist (`http://localhost:3000` and the Playwright origin `http://127.0.0.1:31000`). CORS only permits the browser request; it grants no object-read permission.
+Development pins MinIO to `RELEASE.2025-09-07T16-13-09Z`. Its private bucket is never made public: direct browser PUTs are restricted with MinIO's server-level CORS allowlist (`http://localhost:3000` and the Playwright origins `http://127.0.0.1:31000` and `http://127.0.0.1:38181`). CORS only permits the browser request; it grants no object-read permission.
 
 The web app is at `http://localhost:3000`; the API is at `http://localhost:8000`; API documentation is at `/docs`.
 

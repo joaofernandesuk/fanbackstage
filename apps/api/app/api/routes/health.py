@@ -1,21 +1,26 @@
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.db.session import engine
-from app.schemas.auth import MessageResponse
+
+
+class HealthResponse(BaseModel):
+    message: str
+    service: str = "fanbackstage-api"
 
 router = APIRouter(tags=["health"])
 
 
-@router.get("/health", response_model=MessageResponse)
-async def health() -> MessageResponse:
-    return MessageResponse(message="ok")
+@router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return HealthResponse(message="ok")
 
 
-@router.get("/ready", response_model=MessageResponse)
-async def ready() -> MessageResponse:
+@router.get("/ready", response_model=HealthResponse)
+async def ready() -> HealthResponse:
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
@@ -24,4 +29,4 @@ async def ready() -> MessageResponse:
         await redis.aclose()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Dependencies unavailable") from exc
-    return MessageResponse(message="ready")
+    return HealthResponse(message="ready")

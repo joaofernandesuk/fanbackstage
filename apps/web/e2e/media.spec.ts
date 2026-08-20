@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { securityLink } from "./mailpit";
 
 const apiBase =
-  process.env.E2E_API_URL ?? process.env.NEXT_PUBLIC_FANBACKSTAGE_API_URL ?? "http://127.0.0.1:8000";
+  process.env.E2E_API_URL ?? process.env.NEXT_PUBLIC_FANBACKSTAGE_API_URL ?? "http://127.0.0.1:38180";
 const admin = { email: "phase2-e2e-admin@example.com", password: "phase2-e2e-admin-password" };
 const image = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -231,7 +231,7 @@ test("creator media travels through the real private processing stack", async ({
   expect(earnings.body).toMatchObject({ pending_amount_minor: 1440, ppv_gross_amount_minor: 999, platform_fee_amount_minor: 199, creator_net_amount_minor: 800, currency: "EUR" });
   const anonymous = await browser.newContext();
   const anonymousPage = await anonymous.newPage();
-  await anonymousPage.goto(`http://127.0.0.1:31000/creator/${username}`);
+  await anonymousPage.goto(`${process.env.E2E_WEB_URL ?? "http://127.0.0.1:38181"}/creator/${username}`);
   await expect(anonymousPage.getByText(galleryTitle)).toBeVisible();
   await expect(anonymousPage.locator("img")).toHaveCount(2);
   for (const previewUrl of await anonymousPage.locator("img").evaluateAll(images =>
