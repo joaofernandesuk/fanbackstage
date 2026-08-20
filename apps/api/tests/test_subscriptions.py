@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 
 from app.accounts import service as accounts
 from app.content.access import can_access_content
+from app.core.config import Settings
 from app.creators import service as creators
 from app.finance import service as finance
 from app.models.audit import AuditEvent
@@ -310,6 +311,70 @@ async def test_cancelled_subscription_does_not_retry_pending_renewal(db_session)
     count = await db_session.scalar(select(func.count()).select_from(PaymentAttempt))
     assert await subscriptions.retry_failed_subscription_renewals(db_session) == 0
     assert await db_session.scalar(select(func.count()).select_from(PaymentAttempt)) == count
+
+
+@pytest.mark.asyncio
+async def test_renewal_retry_exhaustion_is_terminal_and_replay_safe(db_session, monkeypatch):
+    monkeypatch.setattr(
+        subscriptions,
+        "get_settings",
+        lambda: Settings(subscription_renewal_retry_limit=1, subscription_grace_period_days=0),
+    )
+    owner, profile = await creator(db_session, "retry-exhaust-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "retry-exhaust-buyer@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_1", "amount_minor": 1000, "enabled": True}],
+    )
+    subscription = await subscriptions.create_subscription(
+        db_session, buyer, profile.id, "month_1", "retry-exhaust"
+    )
+    paid = await db_session.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_id == subscription.id)
+    )
+    assert paid
+    first = await db_session.get(PaymentAttempt, paid.payment_attempt_id)
+    assert first
+    payload, signature = finance.development_webhook_payload(first)
+    await finance.process_development_webhook(db_session, payload, signature)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="retry exhaustion",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.subscription,
+    )
+    db_session.add(content)
+    subscription.current_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.renew_due_subscriptions(db_session) == 1
+    renewal = await db_session.scalar(
+        select(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_id == subscription.id, SubscriptionPeriod.sequence == 2
+        )
+    )
+    assert renewal
+    failed = await db_session.get(PaymentAttempt, renewal.payment_attempt_id)
+    assert failed
+    failed.status = PaymentStatus.failed
+    await subscriptions.fail_payment_attempt(db_session, failed)
+    attempt_count = await db_session.scalar(select(func.count()).select_from(PaymentAttempt))
+    assert await subscriptions.retry_failed_subscription_renewals(db_session) == 0
+    assert await subscriptions.retry_failed_subscription_renewals(db_session) == 0
+    assert (
+        await db_session.scalar(select(func.count()).select_from(PaymentAttempt)) == attempt_count
+    )
+    assert renewal.ledger_transaction_id is None and renewal.entitlement_id is None
+    subscription.grace_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.finalize_expired_subscriptions(db_session) == 1
+    assert subscription.status is SubscriptionStatus.expired
+    assert not await can_access_content(db_session, content, buyer)
 
 
 @pytest.mark.asyncio
