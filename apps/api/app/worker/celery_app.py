@@ -22,4 +22,7 @@ celery_app.conf.task_queues = tuple(
         "scheduled",
     )
 )
-celery_app.conf.task_routes = {"app.worker.tasks.*": {"queue": "default"}}
+celery_app.conf.task_routes = {
+    "app.worker.tasks.process_media_asset": {"queue": "media"},
+    "app.worker.tasks.*": {"queue": "default"},
+}

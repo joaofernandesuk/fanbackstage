@@ -13,6 +13,14 @@ services:
   mailpit:
     image: axllent/mailpit:latest
     ports: ["${FANBACKSTAGE_MAILPIT_UI_PORT:-8025}:8025", "${FANBACKSTAGE_SMTP_PORT:-1025}:1025"]
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: fanbackstage
+      MINIO_ROOT_PASSWORD: fanbackstage-development-only
+    ports: ["${FANBACKSTAGE_MINIO_PORT:-9000}:9000", "${FANBACKSTAGE_MINIO_CONSOLE_PORT:-9001}:9001"]
+    volumes: [minio_data:/data]
   livekit:
     image: livekit/livekit-server:latest
     command: --config /etc/livekit.yaml
@@ -20,3 +28,4 @@ services:
     volumes: [./infra/livekit/livekit.yaml:/etc/livekit.yaml:ro]
 volumes:
   postgres_data:
+  minio_data:

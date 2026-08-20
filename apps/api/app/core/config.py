@@ -22,6 +22,16 @@ class Settings(BaseSettings):
     smtp_port: int = 1025
     email_from: str = "no-reply@fanbackstage.local"
     kyc_provider: str = "development"
+    storage_endpoint_url: str = "http://localhost:9000"
+    storage_access_key: str = "fanbackstage"
+    storage_secret_key: str = "fanbackstage-development-only"
+    storage_bucket: str = "fanbackstage-private"
+    storage_region: str = "us-east-1"
+    media_url_ttl_seconds: int = 300
+    media_max_image_bytes: int = 20 * 1024 * 1024
+    media_max_video_bytes: int = 500 * 1024 * 1024
+    media_max_gallery_items: int = 100
+    media_max_video_duration_seconds: int = 3600
 
     def validate_production(self) -> None:
         if (

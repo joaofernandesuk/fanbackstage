@@ -26,6 +26,7 @@ app/integrations/email.py
 app/integrations/streaming.py
 app/models/__init__.py
 app/models/audit.py
+app/models/content.py
 app/models/creator.py
 app/models/identity.py
 app/permissions/__init__.py
