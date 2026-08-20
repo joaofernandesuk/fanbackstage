@@ -26,3 +26,16 @@ class CreatorEarningsResponse(BaseModel):
     pending_amount_minor: int
     available_amount_minor: int
     currency: str
+    ppv_gross_amount_minor: int = 0
+    platform_fee_amount_minor: int = 0
+    creator_net_amount_minor: int = 0
+
+
+class PurchaseHistoryResponse(BaseModel):
+    id: UUID
+    content_id: UUID
+    content_title: str
+    creator_username: str
+    gross_amount_minor: int
+    currency: str
+    status: str
