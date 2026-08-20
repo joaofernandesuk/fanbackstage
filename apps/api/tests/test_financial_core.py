@@ -12,6 +12,7 @@ from app.models.finance import (
     LedgerDirection,
     LedgerEntry,
     PaymentAttempt,
+    PaymentStatus,
     PaymentWebhookEvent,
     PurchaseStatus,
 )
@@ -117,3 +118,36 @@ async def test_full_refund_reverses_value_and_revokes_entitlement(db_session):
 def test_commission_uses_integer_minor_units_without_rounding_drift():
     assert finance.commission_amount(101, 2000) == (20, 81)
     assert finance.commission_amount(1, 9999) == (0, 1)
+
+
+def test_payment_webhook_signature_is_required_and_verified():
+    payload = b'{"id":"event","type":"payment.succeeded","payment_reference":"ref"}'
+    with pytest.raises(finance.FinancialError, match="signature"):
+        finance.verify_development_webhook(payload, "invalid")
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_settles_a_succeeded_attempt_without_duplicate_entries(db_session):
+    owner, profile = await approved_creator(db_session, "reconcile-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "reconcile-buyer@example.com", "strong-password-123", None
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Recoverable PPV",
+        status=ContentStatus.published,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=500,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    purchase = await finance.initiate_purchase(db_session, buyer, content.id, "recover-settlement")
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    assert attempt
+    attempt.status = PaymentStatus.succeeded
+    assert await finance.reconcile_succeeded_payments(db_session) == 1
+    assert purchase.status is PurchaseStatus.paid
+    assert await finance.reconcile_succeeded_payments(db_session) == 0

@@ -65,3 +65,18 @@ def render_video_preview(self, content_id: str) -> dict[str, str]:
 
     run_async(run())
     return {"content_id": content_id, "status": "ready"}
+
+
+@celery_app.task
+def reconcile_financial_settlement() -> dict[str, int]:
+    """Replay-safe settlement recovery for payment confirmations."""
+    from app.db.session import SessionLocal
+    from app.finance.service import reconcile_succeeded_payments
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            reconciled = await reconcile_succeeded_payments(session)
+            await session.commit()
+            return reconciled
+
+    return {"reconciled": run_async(run())}

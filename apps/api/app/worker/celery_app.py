@@ -24,5 +24,6 @@ celery_app.conf.task_queues = tuple(
 )
 celery_app.conf.task_routes = {
     "app.worker.tasks.process_media_asset": {"queue": "media"},
+    "app.worker.tasks.reconcile_financial_settlement": {"queue": "financial"},
     "app.worker.tasks.*": {"queue": "default"},
 }

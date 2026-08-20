@@ -318,6 +318,32 @@ async def settle_purchase(db: AsyncSession, purchase: Purchase) -> Purchase:
     return purchase
 
 
+async def reconcile_succeeded_payments(db: AsyncSession, limit: int = 100) -> int:
+    """Recover payment successes whose webhook transaction stopped before settlement."""
+    attempts = (
+        await db.scalars(
+            select(PaymentAttempt)
+            .join(Purchase, Purchase.payment_attempt_id == PaymentAttempt.id)
+            .where(
+                PaymentAttempt.status == PaymentStatus.succeeded,
+                Purchase.status == PurchaseStatus.awaiting_payment,
+            )
+            .order_by(PaymentAttempt.completed_at, PaymentAttempt.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    reconciled = 0
+    for attempt in attempts:
+        purchase = await db.scalar(
+            select(Purchase).where(Purchase.payment_attempt_id == attempt.id).with_for_update()
+        )
+        if purchase and purchase.status is PurchaseStatus.awaiting_payment:
+            await settle_purchase(db, purchase)
+            reconciled += 1
+    return reconciled
+
+
 async def creator_balances(db: AsyncSession, creator_id: UUID) -> dict[str, int]:
     rows = await db.execute(
         select(
@@ -346,6 +372,19 @@ async def creator_balances(db: AsyncSession, creator_id: UUID) -> dict[str, int]
 async def release_creator_earnings(
     db: AsyncSession, creator_id: UUID, currency: str
 ) -> LedgerTransaction | None:
+    settlement_seconds = get_settings().creator_earnings_settlement_seconds
+    if settlement_seconds > 0:
+        cutoff = datetime.now(UTC).timestamp() - settlement_seconds
+        has_unsettled_purchase = await db.scalar(
+            select(Purchase.id).where(
+                Purchase.seller_creator_id == creator_id,
+                Purchase.currency == currency,
+                Purchase.status == PurchaseStatus.paid,
+                Purchase.purchased_at > datetime.fromtimestamp(cutoff, UTC),
+            )
+        )
+        if has_unsettled_purchase:
+            return None
     pending = await _account(db, LedgerAccountKind.creator_pending, currency, creator_id)
     available = await _account(db, LedgerAccountKind.creator_available, currency, creator_id)
     balance = await db.scalar(
