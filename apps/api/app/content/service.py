@@ -225,7 +225,7 @@ async def update_content(
     target_amount = values.get("price_amount_minor", content.price_amount_minor)
     target_currency = values.get("price_currency", content.price_currency)
     validate_ppv_price(target_policy, target_amount, target_currency)
-    for field in ("title", "description", "access_policy", "price_amount_minor", "price_currency"):
+    for field in ("title", "description", "access_policy", "price_amount_minor", "price_currency", "feed_announcement_override"):
         if field in values:
             value = values[field]
             setattr(content, field, value.upper() if field == "price_currency" and value else value)

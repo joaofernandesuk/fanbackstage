@@ -1,11 +1,12 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import func, select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.content.access import can_access_content
+from app.core.rate_limit import enforce_social_rate_limit
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
 from app.models.social import (
@@ -53,14 +54,16 @@ async def post_response(db: Db, post: FeedPost, user) -> FeedPostResponse:
     return FeedPostResponse(id=post.id, creator_id=post.creator_id, creator_username=creator.username or "", creator_name=creator.display_name or creator.username or "", post_type=post.post_type.value, body=post.body if allowed else None, status=post.status.value, access_policy=post.access_policy.value, locked=not allowed, published_at=post.published_at, pinned_at=post.pinned_at, comments_enabled=post.comments_enabled and allowed, reactions_enabled=post.reactions_enabled and allowed, reaction_count=reactions, comment_count=comments, viewer_reaction=viewer_reaction, media=media, content_reference=reference)
 
 @router.post("/creator/{creator_id}/follow")
-async def follow(creator_id: UUID, identity: CurrentIdentity, db: Db):
+async def follow(creator_id: UUID, request: Request, identity: CurrentIdentity, db: Db):
     try:
+        await enforce_social_rate_limit(request, str(identity[0].id), "follow")
         created = await service.follow(db, identity[0], creator_id); await db.commit(); return {"following": True, "created": created}
     except (PermissionError, ValueError) as exc:
         await db.rollback(); raise HTTPException(404 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 @router.delete("/creator/{creator_id}/follow")
-async def unfollow(creator_id: UUID, identity: CurrentIdentity, db: Db):
+async def unfollow(creator_id: UUID, request: Request, identity: CurrentIdentity, db: Db):
+    await enforce_social_rate_limit(request, str(identity[0].id), "follow")
     removed = await service.unfollow(db, identity[0], creator_id); await db.commit(); return {"following": False, "removed": removed}
 
 @router.get("/creator/{creator_id}/follow-state")
@@ -69,8 +72,9 @@ async def follow_state(creator_id: UUID, identity: OptionalIdentity, db: Db):
     return {"following": await db.scalar(select(service.Follow.id).where(service.Follow.user_id == identity[0].id, service.Follow.creator_id == creator_id)) is not None}
 
 @router.post("/posts", response_model=FeedPostResponse)
-async def create(payload: FeedPostInput, identity: CurrentIdentity, db: Db):
+async def create(payload: FeedPostInput, request: Request, identity: CurrentIdentity, db: Db):
     try:
+        await enforce_social_rate_limit(request, str(identity[0].id), "post")
         post = await service.create_post(db, identity[0], payload.model_dump()); await db.commit(); return await post_response(db, post, identity[0])
     except (PermissionError, ValueError) as exc:
         await db.rollback(); raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
@@ -112,6 +116,12 @@ async def following(identity: CurrentIdentity, db: Db, cursor: str | None = None
     try: rows, next_cursor = await service.feed_posts(db, identity[0], "following", None, cursor, min(max(limit, 1), 50)); return FeedPage(items=[await post_response(db, x, identity[0]) for x in rows], next_cursor=next_cursor)
     except ValueError as exc: raise HTTPException(400, str(exc)) from exc
 
+@router.get("/mine", response_model=FeedPage)
+async def mine(identity: CurrentIdentity, db: Db, cursor: str | None = None, limit: int = 20):
+    creator = await service.approved_creator(db, identity[0])
+    rows = (await db.scalars(select(FeedPost).where(FeedPost.creator_id == creator.id).order_by(FeedPost.created_at.desc()).limit(min(max(limit, 1), 50)))).all()
+    return FeedPage(items=[await post_response(db, x, identity[0]) for x in rows], next_cursor=None)
+
 @router.get("/discover", response_model=FeedPage)
 async def discover(identity: OptionalIdentity, db: Db, cursor: str | None = None, limit: int = 20):
     try: rows, next_cursor = await service.feed_posts(db, identity[0] if identity else None, "discover", None, cursor, min(max(limit, 1), 50)); return FeedPage(items=[await post_response(db, x, identity[0] if identity else None) for x in rows], next_cursor=next_cursor)
@@ -129,7 +139,8 @@ async def detail(post_id: UUID, identity: OptionalIdentity, db: Db):
     return await post_response(db, post, identity[0] if identity else None)
 
 @router.put("/posts/{post_id}/reaction")
-async def react(post_id: UUID, payload: ReactionInput, identity: CurrentIdentity, db: Db):
+async def react(post_id: UUID, payload: ReactionInput, request: Request, identity: CurrentIdentity, db: Db):
+    await enforce_social_rate_limit(request, str(identity[0].id), "reaction")
     post = await db.get(FeedPost, post_id)
     if not post or not await service.can_access_post(db, post, identity[0]) or not post.reactions_enabled: raise HTTPException(403, "Reactions are unavailable")
     try: kind = ReactionType(payload.reaction_type)
@@ -140,19 +151,29 @@ async def react(post_id: UUID, payload: ReactionInput, identity: CurrentIdentity
     await db.commit(); return {"reaction_type": kind.value}
 
 @router.delete("/posts/{post_id}/reaction")
-async def unreact(post_id: UUID, identity: CurrentIdentity, db: Db):
+async def unreact(post_id: UUID, request: Request, identity: CurrentIdentity, db: Db):
+    await enforce_social_rate_limit(request, str(identity[0].id), "reaction")
     item = await db.scalar(select(PostReaction).where(PostReaction.post_id == post_id, PostReaction.user_id == identity[0].id))
     if item: await db.delete(item)
     await db.commit(); return {"removed": bool(item)}
 
 @router.post("/posts/{post_id}/comments")
-async def comment(post_id: UUID, payload: CommentInput, identity: CurrentIdentity, db: Db):
+async def comment(post_id: UUID, payload: CommentInput, request: Request, identity: CurrentIdentity, db: Db):
+    await enforce_social_rate_limit(request, str(identity[0].id), "comment")
     post = await db.get(FeedPost, post_id)
     if not post or not post.comments_enabled or not await service.can_access_post(db, post, identity[0]): raise HTTPException(403, "Comments are unavailable")
     if payload.parent_id:
         parent = await db.get(PostComment, payload.parent_id)
         if not parent or parent.post_id != post_id or parent.parent_id is not None: raise HTTPException(400, "Invalid reply parent")
     value = PostComment(post_id=post_id, user_id=identity[0].id, parent_id=payload.parent_id, body=payload.body); db.add(value); await db.commit(); return {"id": str(value.id), "parent_id": str(value.parent_id) if value.parent_id else None, "body": value.body}
+
+@router.get("/posts/{post_id}/comments")
+async def comments(post_id: UUID, identity: OptionalIdentity, db: Db):
+    post = await db.get(FeedPost, post_id)
+    user = identity[0] if identity else None
+    if not post or not await service.can_access_post(db, post, user): raise HTTPException(404, "Post not found")
+    rows = (await db.scalars(select(PostComment).where(PostComment.post_id == post_id, PostComment.deleted_at.is_(None), PostComment.hidden_at.is_(None)).order_by(PostComment.created_at))).all()
+    return [{"id": str(row.id), "user_id": str(row.user_id), "parent_id": str(row.parent_id) if row.parent_id else None, "body": row.body, "created_at": row.created_at} for row in rows]
 
 @router.delete("/comments/{comment_id}")
 async def remove_comment(comment_id: UUID, identity: CurrentIdentity, db: Db):
@@ -167,7 +188,8 @@ async def remove_comment(comment_id: UUID, identity: CurrentIdentity, db: Db):
     value.deleted_at = datetime.now(UTC); await db.commit(); return {"deleted": True}
 
 @router.post("/reports/{target_type}/{target_id}")
-async def report(target_type: str, target_id: UUID, payload: ReportInput, identity: CurrentIdentity, db: Db):
+async def report(target_type: str, target_id: UUID, payload: ReportInput, request: Request, identity: CurrentIdentity, db: Db):
+    await enforce_social_rate_limit(request, str(identity[0].id), "report")
     if target_type not in {"post", "comment"}: raise HTTPException(400, "Invalid report target")
     target = await db.get(FeedPost if target_type == "post" else PostComment, target_id)
     if not target: raise HTTPException(404, "Target not found")

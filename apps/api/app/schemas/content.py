@@ -66,6 +66,7 @@ class ContentUpdate(BaseModel):
     access_policy: AccessPolicy | None = None
     price_amount_minor: int | None = Field(default=None, gt=0, le=2_147_483_647)
     price_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    feed_announcement_override: bool | None = None
 
 
 class VideoPreviewUpdate(BaseModel):

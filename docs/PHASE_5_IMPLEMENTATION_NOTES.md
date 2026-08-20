@@ -8,4 +8,6 @@ Posts use explicit `draft`, `scheduled`, `published`, `archived`, and `removed` 
 
 Reactions have one active enum value per user/post. Comments are one-level threaded; deleted comments are soft deleted. Mention and hashtag indexing is server-side and only indexes public approved creators. Reports retain stable post/comment target identifiers; full moderation-case workflow remains Phase 13.
 
-Creator settings control gallery/video announcements. Approval invokes the feed domain and `source_content_id` uniqueness makes announcement replay idempotent. Per-publication override and creator UI for media/reference posts remain follow-up polish within this phase; no new media upload or PPV pipeline was introduced.
+Creator settings control gallery/video announcements. Approval invokes the feed domain and `source_content_id` uniqueness makes announcement replay idempotent. A nullable `feed_announcement_override` on existing content has precedence over creator defaults. The creator studio supports text/media/reference composition, scheduling, post pin/archive controls, and access-aware viewer cards; no new media upload or PPV pipeline was introduced.
+
+Social writes have a Redis-backed, configurable rate limit partitioned by action (follow, post, reaction, comment and report). The throttle is applied in addition to — never instead of — server-side ownership and access checks. Moderators can inspect, dismiss, and remove/hide report targets with audit events; full case workflow remains deferred.

@@ -69,3 +69,10 @@ async def test_scheduling_and_auto_posts_are_replay_safe(db_session):
     assert await social.auto_post_content(db_session, content)
     assert await social.auto_post_content(db_session, content) is None
     assert await db_session.scalar(select(func.count()).select_from(FeedPost).where(FeedPost.source_content_id == content.id)) == 1
+    disabled = ContentItem(owner_creator_id=profile.id, created_by_user_id=owner.id, content_type=ContentType.gallery, title="No announcement", status=ContentStatus.published, access_policy=AccessPolicy.free, feed_announcement_override=False)
+    db_session.add(disabled); await db_session.flush()
+    assert await social.auto_post_content(db_session, disabled) is None
+    enabled = ContentItem(owner_creator_id=profile.id, created_by_user_id=owner.id, content_type=ContentType.gallery, title="Forced announcement", status=ContentStatus.published, access_policy=AccessPolicy.free, feed_announcement_override=True)
+    db_session.add(enabled); await db_session.flush()
+    settings.auto_post_galleries = False
+    assert await social.auto_post_content(db_session, enabled)

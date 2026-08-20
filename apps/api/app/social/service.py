@@ -198,7 +198,8 @@ async def auto_post_content(db: AsyncSession, content: ContentItem) -> FeedPost 
     if content.status is not ContentStatus.published:
         return None
     settings = await settings_for_creator(db, content.owner_creator_id)
-    enabled = settings.auto_post_galleries if content.content_type.value == "gallery" else settings.auto_post_videos
+    default_enabled = settings.auto_post_galleries if content.content_type.value == "gallery" else settings.auto_post_videos
+    enabled = content.feed_announcement_override if content.feed_announcement_override is not None else default_enabled
     if not enabled or await db.scalar(select(FeedPost.id).where(FeedPost.source_content_id == content.id)):
         return None
     post = FeedPost(creator_id=content.owner_creator_id, created_by_user_id=content.created_by_user_id, post_type=FeedPostType.gallery_reference if content.content_type.value == "gallery" else FeedPostType.video_reference, body=f"New {content.content_type.value} just dropped", status=FeedPostStatus.published, access_policy=AccessPolicy.free, published_at=content.published_at or datetime.now(UTC), source_content_id=content.id)
