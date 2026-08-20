@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import secrets
 from datetime import UTC, datetime
 from uuid import UUID
@@ -14,7 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
 from app.core.config import get_settings
-from app.models.content import AccessPolicy, ContentEntitlement, ContentItem, EntitlementStatus
+from app.finance.providers import PaymentProviderError, payment_provider
+from app.models.content import (
+    AccessPolicy,
+    ContentEntitlement,
+    ContentItem,
+    ContentStatus,
+    EntitlementStatus,
+    ModerationStatus,
+)
 from app.models.finance import (
     CommissionRule,
     LedgerAccount,
@@ -142,6 +147,11 @@ async def initiate_purchase(
     )
     if not content or content.access_policy is not AccessPolicy.ppv:
         raise FinancialError("PPV content not found")
+    if (
+        content.status is not ContentStatus.published
+        or content.moderation_status is not ModerationStatus.approved
+    ):
+        raise FinancialError("PPV content is not available for purchase")
     if content.created_by_user_id == buyer.id:
         raise FinancialError("Creators cannot purchase their own content")
     if not content.price_amount_minor or not content.price_currency:
@@ -193,35 +203,22 @@ async def initiate_purchase(
 
 
 def development_webhook_payload(attempt: PaymentAttempt) -> tuple[bytes, str]:
-    payload = json.dumps(
-        {
-            "id": f"dev_event_{attempt.id}",
-            "type": "payment.succeeded",
-            "payment_reference": attempt.provider_reference,
-        },
-        separators=(",", ":"),
-    ).encode()
-    signature = hmac.new(
-        get_settings().payment_webhook_secret.encode(), payload, hashlib.sha256
-    ).hexdigest()
-    return payload, signature
+    provider = payment_provider()
+    if not hasattr(provider, "payment_succeeded_payload"):
+        raise FinancialError("Development payment flow is unavailable")
+    return provider.payment_succeeded_payload(attempt)
 
 
 def verify_development_webhook(payload: bytes, signature: str | None) -> dict[str, str]:
-    expected = hmac.new(
-        get_settings().payment_webhook_secret.encode(), payload, hashlib.sha256
-    ).hexdigest()
-    if not signature or not hmac.compare_digest(expected, signature):
-        raise FinancialError("Invalid payment webhook signature")
     try:
-        event = json.loads(payload)
-        if not all(
-            isinstance(event.get(field), str) for field in ("id", "type", "payment_reference")
-        ):
-            raise ValueError
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise FinancialError("Invalid payment webhook payload") from exc
-    return event
+        event = payment_provider().verify_webhook(payload, signature)
+    except PaymentProviderError as exc:
+        raise FinancialError(str(exc)) from exc
+    return {
+        "id": event.external_event_id,
+        "type": event.event_type,
+        "payment_reference": event.payment_reference,
+    }
 
 
 async def process_development_webhook(
@@ -344,7 +341,8 @@ async def reconcile_succeeded_payments(db: AsyncSession, limit: int = 100) -> in
     return reconciled
 
 
-async def creator_balances(db: AsyncSession, creator_id: UUID) -> dict[str, int]:
+async def creator_balances(db: AsyncSession, creator_id: UUID, currency: str) -> dict[str, int]:
+    currency = currency_code(currency)
     rows = await db.execute(
         select(
             LedgerAccount.kind,
@@ -359,13 +357,37 @@ async def creator_balances(db: AsyncSession, creator_id: UUID) -> dict[str, int]
             ),
         )
         .join(LedgerEntry, LedgerEntry.ledger_account_id == LedgerAccount.id)
-        .where(LedgerAccount.owner_creator_id == creator_id)
+        .where(LedgerAccount.owner_creator_id == creator_id, LedgerAccount.currency == currency)
         .group_by(LedgerAccount.kind)
     )
     values = {kind.value: int(amount) for kind, amount in rows}
     return {
         "pending_amount_minor": values.get(LedgerAccountKind.creator_pending.value, 0),
         "available_amount_minor": values.get(LedgerAccountKind.creator_available.value, 0),
+    }
+
+
+async def creator_financial_summary(
+    db: AsyncSession, creator_id: UUID, currency: str
+) -> dict[str, int]:
+    currency = currency_code(currency)
+    balances = await creator_balances(db, creator_id, currency)
+    gross, fees, net = await db.execute(
+        select(
+            func.coalesce(func.sum(Purchase.gross_amount_minor), 0),
+            func.coalesce(func.sum(Purchase.platform_fee_minor), 0),
+            func.coalesce(func.sum(Purchase.creator_amount_minor), 0),
+        ).where(
+            Purchase.seller_creator_id == creator_id,
+            Purchase.currency == currency,
+            Purchase.status.in_([PurchaseStatus.paid, PurchaseStatus.refunded]),
+        )
+    ).one()
+    return {
+        **balances,
+        "ppv_gross_amount_minor": int(gross),
+        "platform_fee_amount_minor": int(fees),
+        "creator_net_amount_minor": int(net),
     }
 
 

@@ -169,3 +169,6 @@ Bundle price: €49
 ```
 
 Bundle purchase grants entitlement to each included asset according to bundle rules and retains purchase provenance for refunds/accounting.
+# Phase 3 PPV integration
+
+PPV access is granted only by an active `ContentEntitlement` whose purchase source references the settled purchase. A payment attempt, client success message, or ledger record alone never grants content access. A full PPV refund revokes that entitlement without deleting it.

@@ -83,3 +83,6 @@ requested -> review/queued -> processing -> paid
 - Story previews/teasers linking to PPV content never expose the original locked media asset.
 - Realtime live filters can be disabled/degraded without interrupting the underlying broadcast or billing session.
 - Story and Live effects operate on derivatives/processing instructions and do not silently overwrite original creator media.
+# Phase 3 financial core
+
+The Phase 3 financial tables are `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `commission_rules`, `payment_attempts`, `purchases`, and `payment_webhook_events`. Purchases snapshot their allocation and point to their payment attempt, entitlement, and original ledger transaction. Ledger entries are currency-specific, positive minor-unit postings and must balance by transaction.

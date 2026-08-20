@@ -164,3 +164,6 @@ Business rules must live in backend domain/application services, not duplicated 
 - Privacy: minimise exposure of addresses, identity data and private content metadata.
 - Accessibility: core UI designed with keyboard/screen-reader considerations.
 - Internationalisation: text, currency and timezone foundations prepared for multiple markets.
+# Phase 3 financial boundary
+
+The finance domain owns payment-attempt orchestration, verified webhook processing, allocation, ledger posting, reconciliation, and refund reversals. Content access continues to resolve only through the existing entitlement/access service. Provider-specific signing remains at the integration boundary and does not leak into content or ledger domain logic.

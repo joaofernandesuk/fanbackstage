@@ -7,11 +7,14 @@ from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.finance import service
 from app.media.service import approved_creator
+from app.models.content import ContentItem
+from app.models.creator import CreatorProfile
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
 from app.permissions.policies import Permission, authorize
 from app.schemas.finance import (
     CommissionUpdate,
     CreatorEarningsResponse,
+    PurchaseHistoryResponse,
     PurchaseResponse,
     RefundRequest,
 )
@@ -50,16 +53,29 @@ async def start_purchase(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/purchases/mine", response_model=list[PurchaseResponse])
-async def my_purchases(identity: CurrentIdentity, db: Db) -> list[PurchaseResponse]:
+@router.get("/purchases/mine", response_model=list[PurchaseHistoryResponse])
+async def my_purchases(identity: CurrentIdentity, db: Db) -> list[PurchaseHistoryResponse]:
     rows = (
-        await db.scalars(
-            select(Purchase)
+        await db.execute(
+            select(Purchase, ContentItem.title, CreatorProfile.username)
+            .join(ContentItem, ContentItem.id == Purchase.content_id)
+            .join(CreatorProfile, CreatorProfile.id == Purchase.seller_creator_id)
             .where(Purchase.buyer_user_id == identity[0].id)
             .order_by(Purchase.created_at.desc())
         )
     ).all()
-    return [purchase_response(row) for row in rows]
+    return [
+        PurchaseHistoryResponse(
+            id=purchase.id,
+            content_id=purchase.content_id,
+            content_title=title,
+            creator_username=username,
+            gross_amount_minor=purchase.gross_amount_minor,
+            currency=purchase.currency,
+            status=purchase.status.value,
+        )
+        for purchase, title, username in rows
+    ]
 
 
 @router.post("/payments/development/{payment_attempt_id}/complete", response_model=PurchaseResponse)
@@ -101,16 +117,26 @@ async def development_webhook(request: Request, db: Db) -> None:
 
 
 @router.get("/finance/creator/earnings", response_model=CreatorEarningsResponse)
-async def creator_earnings(identity: CurrentIdentity, db: Db) -> CreatorEarningsResponse:
+async def creator_earnings(
+    identity: CurrentIdentity, db: Db, currency: str = "EUR"
+) -> CreatorEarningsResponse:
     creator = await approved_creator(db, identity[0])
-    balances = await service.creator_balances(db, creator.id)
-    return CreatorEarningsResponse(**balances, currency="EUR")
+    summary = await service.creator_financial_summary(db, creator.id, currency)
+    return CreatorEarningsResponse(**summary, currency=currency.upper())
 
 
 @router.post("/finance/creator/release", response_model=dict)
 async def release_earnings(identity: CurrentIdentity, db: Db) -> dict:
     creator = await approved_creator(db, identity[0])
     ledger = await service.release_creator_earnings(db, creator.id, "EUR")
+    if ledger:
+        await record_event(
+            db,
+            "creator.earnings_released",
+            actor_user_id=identity[0].id,
+            target_type="ledger_transaction",
+            target_id=str(ledger.id),
+        )
     await db.commit()
     return {"released": bool(ledger), "ledger_transaction_id": str(ledger.id) if ledger else None}
 

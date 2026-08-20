@@ -118,3 +118,6 @@ Use capability-based permissions with object scope where needed. Group-manager p
 | Change revenue split | Accept/reject proposal | Propose only | No | View/exception workflow |
 | Moderate reported content | No | No | Yes | Yes |
 | Change platform commission | No | No | No | Restricted admin permission |
+# Phase 3 financial permissions
+
+Financial inspection requires `financial.access`; changing the platform commission requires `financial.configure` and remains limited to `super_admin`. Buyer history is limited to the authenticated buyer, and creator balances are limited to the approved creator who owns them.

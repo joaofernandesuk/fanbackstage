@@ -6,7 +6,13 @@ from app.accounts import service as accounts
 from app.content.access import can_access_content
 from app.creators import service as creators
 from app.finance import service as finance
-from app.models.content import AccessPolicy, ContentItem, ContentStatus, ContentType
+from app.models.content import (
+    AccessPolicy,
+    ContentItem,
+    ContentStatus,
+    ContentType,
+    ModerationStatus,
+)
 from app.models.creator import CreatorStatus
 from app.models.finance import (
     LedgerDirection,
@@ -42,6 +48,7 @@ async def test_paid_ppv_is_idempotent_balanced_and_entitles_buyer(db_session):
         content_type=ContentType.gallery,
         title="PPV",
         status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
         access_policy=AccessPolicy.ppv,
         price_amount_minor=999,
         price_currency="EUR",
@@ -95,6 +102,7 @@ async def test_full_refund_reverses_value_and_revokes_entitlement(db_session):
         content_type=ContentType.video,
         title="Refundable PPV",
         status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
         access_policy=AccessPolicy.ppv,
         price_amount_minor=1000,
         price_currency="EUR",
@@ -138,6 +146,7 @@ async def test_reconciliation_settles_a_succeeded_attempt_without_duplicate_entr
         content_type=ContentType.gallery,
         title="Recoverable PPV",
         status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
         access_policy=AccessPolicy.ppv,
         price_amount_minor=500,
         price_currency="EUR",
@@ -151,3 +160,70 @@ async def test_reconciliation_settles_a_succeeded_attempt_without_duplicate_entr
     assert await finance.reconcile_succeeded_payments(db_session) == 1
     assert purchase.status is PurchaseStatus.paid
     assert await finance.reconcile_succeeded_payments(db_session) == 0
+
+
+@pytest.mark.asyncio
+async def test_purchase_requires_published_approved_ppv_content(db_session):
+    owner, profile = await approved_creator(db_session, "unpublished-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "unpublished-buyer@example.com", "strong-password-123", None
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Not yet published",
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=999,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    with pytest.raises(finance.FinancialError, match="not available"):
+        await finance.initiate_purchase(db_session, buyer, content.id, "not-published")
+
+
+@pytest.mark.asyncio
+async def test_commission_snapshot_does_not_change_after_rule_update(db_session):
+    owner, profile = await approved_creator(db_session, "commission-owner@example.com")
+    buyer_one, _ = await accounts.register(
+        db_session, "commission-one@example.com", "strong-password-123", None
+    )
+    buyer_two, _ = await accounts.register(
+        db_session, "commission-two@example.com", "strong-password-123", None
+    )
+    first = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="First rate",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=999,
+        price_currency="EUR",
+    )
+    second = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Second rate",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=999,
+        price_currency="EUR",
+    )
+    db_session.add_all([first, second])
+    await db_session.flush()
+    initial = await finance.initiate_purchase(db_session, buyer_one, first.id, "rate-one")
+    rule = await db_session.scalar(
+        select(finance.CommissionRule).where(finance.CommissionRule.revenue_type == "ppv")
+    )
+    assert rule
+    rule.basis_points = 2500
+    later = await finance.initiate_purchase(db_session, buyer_two, second.id, "rate-two")
+    assert initial.commission_basis_points == 2000
+    assert initial.platform_fee_minor == 199
+    assert later.commission_basis_points == 2500
+    assert later.platform_fee_minor == 249
