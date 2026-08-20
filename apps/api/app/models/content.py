@@ -229,11 +229,20 @@ class ContentPerformer(Base):
 
 class ContentEntitlement(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "content_entitlements"
+    __table_args__ = (
+        CheckConstraint(
+            "(content_id IS NOT NULL AND creator_id IS NULL) OR (content_id IS NULL AND creator_id IS NOT NULL)",
+            name="ck_entitlement_single_scope",
+        ),
+    )
     subject_user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    content_id: Mapped[UUID] = mapped_column(
+    content_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("content_items.id", ondelete="CASCADE"), index=True
+    )
+    creator_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="CASCADE"), index=True
     )
     source_type: Mapped[str] = mapped_column(String(64))
     source_reference: Mapped[str | None] = mapped_column(String(255))

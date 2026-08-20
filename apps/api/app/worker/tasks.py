@@ -80,3 +80,18 @@ def reconcile_financial_settlement() -> dict[str, int]:
             return reconciled
 
     return {"reconciled": run_async(run())}
+
+
+@celery_app.task
+def process_subscription_renewals() -> dict[str, int]:
+    """Create one replay-safe renewal attempt per due subscription period."""
+    from app.db.session import SessionLocal
+    from app.subscriptions.service import renew_due_subscriptions
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            value = await renew_due_subscriptions(session)
+            await session.commit()
+            return value
+
+    return {"created": run_async(run())}

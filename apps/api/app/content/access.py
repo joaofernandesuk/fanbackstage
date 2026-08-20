@@ -43,10 +43,13 @@ async def can_access_content(db: AsyncSession, content: ContentItem, user: User 
     if not user:
         return False
     now = datetime.now(UTC)
+    scope = ContentEntitlement.content_id == content.id
+    if content.access_policy is AccessPolicy.subscription:
+        scope = ContentEntitlement.creator_id == content.owner_creator_id
     entitlement = await db.scalar(
         select(ContentEntitlement.id).where(
             ContentEntitlement.subject_user_id == user.id,
-            ContentEntitlement.content_id == content.id,
+            scope,
             ContentEntitlement.status == EntitlementStatus.active,
             ContentEntitlement.valid_from <= now,
             or_(ContentEntitlement.valid_until.is_(None), ContentEntitlement.valid_until > now),

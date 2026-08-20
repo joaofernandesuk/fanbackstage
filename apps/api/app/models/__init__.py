@@ -18,6 +18,14 @@ from app.models.finance import (
     Purchase,
 )
 from app.models.identity import Role, SecurityToken, User, UserRole, UserSession
+from app.models.subscription import (
+    Subscription,
+    SubscriptionPeriod,
+    SubscriptionPlan,
+    SubscriptionPlanPrice,
+    SubscriptionPromotion,
+    SubscriptionPromotionRule,
+)
 
 __all__ = [
     "AuditEvent",
@@ -37,6 +45,12 @@ __all__ = [
     "Purchase",
     "Role",
     "SecurityToken",
+    "Subscription",
+    "SubscriptionPeriod",
+    "SubscriptionPlan",
+    "SubscriptionPlanPrice",
+    "SubscriptionPromotion",
+    "SubscriptionPromotionRule",
     "User",
     "UserRole",
     "UserSession",

@@ -260,6 +260,10 @@ async def process_development_webhook(
     )
     if purchase and purchase.status is PurchaseStatus.awaiting_payment:
         await settle_purchase(db, purchase)
+    elif not purchase:
+        from app.subscriptions.service import settle_payment_attempt
+
+        await settle_payment_attempt(db, attempt)
     webhook_event.processed_at = datetime.now(UTC)
     return purchase
 
