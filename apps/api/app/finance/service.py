@@ -351,6 +351,35 @@ async def reconcile_succeeded_payments(db: AsyncSession, limit: int = 100) -> in
         if purchase and purchase.status is PurchaseStatus.awaiting_payment:
             await settle_purchase(db, purchase)
             reconciled += 1
+    # Subscription renewals share PaymentAttempt but not Purchase.  Reconcile
+    # their provider-confirmed success through the subscription settlement
+    # idempotency key; this never initiates another provider charge.
+    from app.models.subscription import SubscriptionPeriod, SubscriptionRenewalAttempt
+    from app.subscriptions.service import settle_payment_attempt
+
+    subscription_attempts = (
+        await db.scalars(
+            select(PaymentAttempt)
+            .join(
+                SubscriptionRenewalAttempt,
+                SubscriptionRenewalAttempt.payment_attempt_id == PaymentAttempt.id,
+            )
+            .join(
+                SubscriptionPeriod,
+                SubscriptionPeriod.id == SubscriptionRenewalAttempt.subscription_period_id,
+            )
+            .where(
+                PaymentAttempt.status == PaymentStatus.succeeded,
+                SubscriptionPeriod.status == "pending",
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    for attempt in subscription_attempts:
+        subscription = await settle_payment_attempt(db, attempt)
+        if subscription:
+            reconciled += 1
     return reconciled
 
 
