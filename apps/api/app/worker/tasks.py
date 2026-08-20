@@ -95,3 +95,18 @@ def process_subscription_renewals() -> dict[str, int]:
             return value
 
     return {"created": run_async(run())}
+
+
+@celery_app.task
+def finalize_subscription_expirations() -> dict[str, int]:
+    """End expired or exhausted-grace subscriptions without mutating ledger history."""
+    from app.db.session import SessionLocal
+    from app.subscriptions.service import finalize_expired_subscriptions
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            value = await finalize_expired_subscriptions(session)
+            await session.commit()
+            return value
+
+    return {"expired": run_async(run())}

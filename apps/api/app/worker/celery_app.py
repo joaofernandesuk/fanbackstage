@@ -26,5 +26,6 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.process_media_asset": {"queue": "media"},
     "app.worker.tasks.reconcile_financial_settlement": {"queue": "financial"},
     "app.worker.tasks.process_subscription_renewals": {"queue": "scheduled"},
+    "app.worker.tasks.finalize_subscription_expirations": {"queue": "scheduled"},
     "app.worker.tasks.*": {"queue": "default"},
 }

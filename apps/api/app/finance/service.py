@@ -252,6 +252,9 @@ async def process_development_webhook(
     webhook_event.payment_attempt_id = attempt.id
     if event["type"] != "payment.succeeded":
         attempt.status = PaymentStatus.failed
+        from app.subscriptions.service import fail_payment_attempt
+
+        await fail_payment_attempt(db, attempt)
         webhook_event.processed_at = datetime.now(UTC)
         return None
     attempt.status, attempt.completed_at = PaymentStatus.succeeded, datetime.now(UTC)

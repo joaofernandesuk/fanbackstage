@@ -2,7 +2,7 @@
 
 import secrets
 from calendar import monthrange
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -358,6 +358,52 @@ async def set_auto_renew(
         metadata={"auto_renew": enabled},
     )
     return subscription
+
+
+async def fail_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> Subscription | None:
+    """Record a failed initial/renewal charge without extending entitlement."""
+    period = await db.scalar(
+        select(SubscriptionPeriod)
+        .where(SubscriptionPeriod.payment_attempt_id == attempt.id)
+        .with_for_update()
+    )
+    if not period:
+        return None
+    subscription = await db.scalar(
+        select(Subscription).where(Subscription.id == period.subscription_id).with_for_update()
+    )
+    assert subscription
+    period.status = SubscriptionPeriodStatus.failed
+    if subscription.current_period_end and subscription.current_period_end <= datetime.now(UTC):
+        subscription.status = SubscriptionStatus.grace_period
+        subscription.grace_period_end = datetime.now(UTC) + timedelta(
+            days=get_settings().subscription_grace_period_days
+        )
+    else:
+        subscription.status = SubscriptionStatus.payment_failed
+    return subscription
+
+
+async def finalize_expired_subscriptions(db: AsyncSession) -> int:
+    now = datetime.now(UTC)
+    rows = (
+        await db.scalars(
+            select(Subscription)
+            .where(
+                (Subscription.status == SubscriptionStatus.grace_period)
+                & (Subscription.grace_period_end <= now)
+                | (
+                    (Subscription.status == SubscriptionStatus.active)
+                    & (Subscription.auto_renew.is_(False))
+                    & (Subscription.current_period_end <= now)
+                )
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    for subscription in rows:
+        subscription.status, subscription.ended_at = SubscriptionStatus.expired, now
+    return len(rows)
 
 
 async def renew_due_subscriptions(db: AsyncSession) -> int:
