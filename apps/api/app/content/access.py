@@ -20,6 +20,7 @@ from app.models.content import (
 )
 from app.models.creator import CreatorProfile
 from app.models.identity import User
+from app.models.social import Follow
 
 
 async def can_access_content(db: AsyncSession, content: ContentItem, user: User | None) -> bool:
@@ -42,6 +43,10 @@ async def can_access_content(db: AsyncSession, content: ContentItem, user: User 
         return True
     if not user:
         return False
+    if content.access_policy is AccessPolicy.followers:
+        return await db.scalar(
+            select(Follow.id).where(Follow.user_id == user.id, Follow.creator_id == content.owner_creator_id)
+        ) is not None
     now = datetime.now(UTC)
     scope = ContentEntitlement.content_id == content.id
     if content.access_policy is AccessPolicy.subscription:

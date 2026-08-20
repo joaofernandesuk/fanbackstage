@@ -118,6 +118,8 @@ Use capability-based permissions with object scope where needed. Group-manager p
 | Change revenue split | Accept/reject proposal | Propose only | No | View/exception workflow |
 | Moderate reported content | No | No | Yes | Yes |
 | Change platform commission | No | No | No | Restricted admin permission |
+
+Phase 5 feed commands are server-authorized: only an approved creator owns its posts/settings, viewers can react/comment only after post access resolves, and public follows target only approved public creators.
 # Phase 3 financial permissions
 
 Financial inspection requires `financial.access`; changing the platform commission requires `financial.configure` and remains limited to `super_admin`. Buyer history is limited to the authenticated buyer, and creator balances are limited to the approved creator who owns them.

@@ -61,6 +61,9 @@ Use a consistent event taxonomy from the beginning so product/financial analytic
 
 - profile_view
 - follow_created
+- post_published
+- post_reaction_created
+- post_comment_created
 - subscription_checkout_started
 - subscription_purchased
 - subscription_renewed

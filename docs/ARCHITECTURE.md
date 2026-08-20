@@ -138,6 +138,7 @@ Business rules must live in backend domain/application services, not duplicated 
 - Promotion engine decides eligibility and effective subscription price.
 - Media service produces preview/transcoded derivatives.
 - Moderation service controls content review, publish/restrict status. Phase 2 provides only the minimal approve/reject queue required to enforce content lifecycle transitions; case management remains a later boundary.
+- Feed service owns post lifecycle, social interactions and cursor queries; it delegates all asset/content authorization to the existing access resolver.
 
 # 39. Security Requirements
 

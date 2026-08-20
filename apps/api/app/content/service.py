@@ -191,6 +191,8 @@ async def approve(db: AsyncSession, content: ContentItem, actor: User) -> Conten
         target_type="content_item",
         target_id=str(content.id),
     )
+    from app.social.service import auto_post_content
+    await auto_post_content(db, content)
     return content
 
 

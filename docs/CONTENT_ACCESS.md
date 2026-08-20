@@ -78,6 +78,8 @@ The feed combines creator social posting with monetisation and discovery.
 
 Every post can independently be Free, Followers, Subscribers, PPV or other supported entitlement type.
 
+Phase 5 resolves feed access through the same server-side entitlement boundary: followers access requires a persisted follow, subscription access requires the existing creator-scoped subscription entitlement, and PPV content references retain their independent purchase entitlement. Locked feed representations must omit protected post body and attached media.
+
 
 ## 13.1 Automatic feed promotion
 

@@ -125,3 +125,16 @@ def retry_subscription_renewals() -> dict[str, int]:
             return value
 
     return {"created": run_async(run())}
+
+
+@celery_app.task
+def publish_scheduled_posts() -> dict[str, int]:
+    """Publish due feed posts durably and replay-safely."""
+    from app.db.session import SessionLocal
+    from app.social.service import publish_due_posts
+    async def run() -> int:
+        async with SessionLocal() as session:
+            count = await publish_due_posts(session)
+            await session.commit()
+            return count
+    return {"published": run_async(run())}

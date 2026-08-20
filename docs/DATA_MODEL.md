@@ -21,6 +21,7 @@ Canonical domain entities and state relationships. Detailed fields belong in mig
 | Referral | ReferralProgramme, ReferralCode, Attribution, ReferralEarning |
 | Moderation | Report, ModerationCase, ModerationAction, Appeal |
 | Audit | AuditEvent |
+| Social | Follow, CreatorFeedSettings, FeedPost, FeedPostMedia, PostReaction, PostComment, PostMention, Hashtag, SocialReport |
 
 # 37. Important State Machines
 

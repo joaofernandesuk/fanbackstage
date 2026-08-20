@@ -6,6 +6,8 @@ Age/identity/performer consent, reporting, moderation, admin access, audit and s
 
 Every user-visible content surface must expose a Report action where technically meaningful: profile, photo, video, gallery, post, comment, message, live, marketplace item and blog.
 
+Phase 5 provides stable post/comment report targets and append-oriented report rows. A report is not a moderation decision; full cases and appeals remain the Trust & Safety expansion phase.
+
 
 ## 29.1 Moderation queue
 
