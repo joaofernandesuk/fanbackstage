@@ -99,7 +99,7 @@ async def create_promotion(payload: PromotionInput, identity: CurrentIdentity, d
             target_id=str(promotion.id),
         )
         await db.commit()
-    except (ValueError, Exception) as exc:
+    except ValueError as exc:
         await db.rollback()
         raise HTTPException(400, "Invalid promotion") from exc
     return {"id": str(promotion.id)}

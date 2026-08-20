@@ -140,3 +140,47 @@ async def test_new_and_reactivation_promotions_are_server_resolved(db_session):
         db_session, buyer, profile.id, "month_1", "reactivate"
     )
     assert second.id != first.id
+
+
+@pytest.mark.asyncio
+async def test_cancel_preserves_access_and_renewal_keeps_selected_duration(db_session):
+    _owner, profile = await creator(db_session, "renew-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "renew-buyer@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_3", "amount_minor": 3000, "enabled": True}],
+    )
+    subscription = await subscriptions.create_subscription(
+        db_session, buyer, profile.id, "month_3", "renew-start"
+    )
+    period = await db_session.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_id == subscription.id)
+    )
+    assert period
+    attempt = await db_session.get(PaymentAttempt, period.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    await subscriptions.set_auto_renew(db_session, buyer, subscription.id, False)
+    assert subscription.cancel_at_period_end and subscription.status is SubscriptionStatus.active
+    assert await subscriptions.renew_due_subscriptions(db_session) == 0
+    await subscriptions.set_auto_renew(db_session, buyer, subscription.id, True)
+    subscription.current_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.renew_due_subscriptions(db_session) == 1
+    renewal = await db_session.scalar(
+        select(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_id == subscription.id,
+            SubscriptionPeriod.sequence == 2,
+        )
+    )
+    assert renewal and renewal.duration.value == "month_3"
+    renewal_attempt = await db_session.get(PaymentAttempt, renewal.payment_attempt_id)
+    assert renewal_attempt
+    renewal_payload, renewal_signature = finance.development_webhook_payload(renewal_attempt)
+    await finance.process_development_webhook(db_session, renewal_payload, renewal_signature)
+    assert renewal.status.value == "active" and subscription.status is SubscriptionStatus.active
