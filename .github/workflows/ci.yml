@@ -56,4 +56,4 @@ jobs:
       - run: docker compose up -d
       - run: cd apps/api && uv sync --all-groups
       - run: cd apps/web && pnpm install --no-frozen-lockfile && pnpm exec playwright install --with-deps chromium
-      - run: cd apps/web && pnpm test:e2e
+      - run: cd apps/web && E2E_MAILPIT_URL=http://127.0.0.1:8025 pnpm test:e2e
