@@ -106,10 +106,22 @@ async def _process_video(
             raise ValueError("Video stream is missing")
         asset.width, asset.height = int(stream["width"]), int(stream["height"])
         asset.duration_seconds = max(1, round(float(metadata["format"]["duration"])))
-        poster = Path(directory) / "poster.webp"
+        poster = Path(directory) / "poster.jpg"
         playback = Path(directory) / "playback.mp4"
         preview = Path(directory) / "preview.mp4"
-        _run("ffmpeg", "-y", "-ss", "0", "-i", str(source), "-frames:v", "1", str(poster))
+        _run(
+            "ffmpeg",
+            "-y",
+            "-ss",
+            "0",
+            "-i",
+            str(source),
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            str(poster),
+        )
         _run(
             "ffmpeg",
             "-y",
@@ -146,9 +158,9 @@ async def _process_video(
             db,
             asset,
             DerivativeType.poster,
-            f"derivative/{asset.id}/poster.webp",
+            f"derivative/{asset.id}/poster.jpg",
             poster.read_bytes(),
-            "image/webp",
+            "image/jpeg",
             asset.width,
             asset.height,
             provider=provider,

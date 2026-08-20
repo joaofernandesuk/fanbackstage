@@ -1,4 +1,7 @@
+import asyncio
 import io
+import subprocess
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -100,3 +103,49 @@ async def test_image_processing_generates_private_derivatives_idempotently(db_se
     assert all(row.storage_key.startswith(f"derivative/{asset.id}/") for row in derivatives)
     await process_media_asset(db_session, asset.id, storage)
     assert len((await db_session.scalars(select(MediaDerivative))).all()) == 3
+
+
+@pytest.mark.asyncio
+async def test_video_processing_generates_poster_preview_and_playback(db_session, tmp_path: Path):
+    _, profile = await approved_creator(db_session, "video-processing@example.com")
+    source = tmp_path / "fixture.mp4"
+    await asyncio.to_thread(
+        subprocess.run,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=32x24:d=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.video,
+        status=MediaStatus.queued,
+        storage_key="original/private-video",
+        original_filename="fixture.mp4",
+        mime_type="video/mp4",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    storage = MemoryStorage({asset.storage_key: (source.read_bytes(), "video/mp4")})
+    await process_media_asset(db_session, asset.id, storage)
+    await db_session.flush()
+    derivatives = (await db_session.scalars(select(MediaDerivative))).all()
+    assert asset.status is MediaStatus.ready
+    assert (asset.width, asset.height, asset.duration_seconds) == (32, 24, 1)
+    assert {row.derivative_type for row in derivatives} == {
+        DerivativeType.poster,
+        DerivativeType.preview_clip,
+        DerivativeType.playback,
+    }
+    assert all(row.storage_key.startswith(f"derivative/{asset.id}/") for row in derivatives)
