@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.content import service
 from app.content.access import can_access_content
+from app.media.service import approved_creator
 from app.models.content import (
     ContentItem,
     ContentStatus,
@@ -42,6 +43,19 @@ def response(item: ContentItem, has_access: bool = True) -> ContentResponse:
         has_access=has_access,
         locked=not has_access,
     )
+
+
+@router.get("/mine", response_model=list[ContentResponse])
+async def my_content(identity: CurrentIdentity, db: Db) -> list[ContentResponse]:
+    creator = await approved_creator(db, identity[0])
+    items = (
+        await db.scalars(
+            select(ContentItem)
+            .where(ContentItem.owner_creator_id == creator.id)
+            .order_by(ContentItem.created_at.desc())
+        )
+    ).all()
+    return [response(item) for item in items]
 
 
 async def public_response(db: Db, item: ContentItem, has_access: bool) -> ContentResponse:

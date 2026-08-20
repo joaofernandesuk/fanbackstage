@@ -25,7 +25,12 @@ async def initiate_upload(
             db, identity[0], payload.filename, payload.mime_type
         )
         await db.commit()
-        return UploadResponse(id=asset.id, status=asset.status.value, upload_url=upload_url)
+        return UploadResponse(
+            id=asset.id,
+            status=asset.status.value,
+            media_type=asset.media_type.value,
+            upload_url=upload_url,
+        )
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(
@@ -40,7 +45,9 @@ async def finalize_upload(asset_id: UUID, identity: CurrentIdentity, db: Db) -> 
         await db.commit()
         if asset.status.value == "queued":
             process_media_asset.delay(str(asset.id))
-        return UploadResponse(id=asset.id, status=asset.status.value)
+        return UploadResponse(
+            id=asset.id, status=asset.status.value, media_type=asset.media_type.value
+        )
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(
@@ -56,7 +63,10 @@ async def my_media(identity: CurrentIdentity, db: Db) -> list[UploadResponse]:
     rows = (
         await db.scalars(select(MediaAsset).where(MediaAsset.owner_creator_id == creator.id))
     ).all()
-    return [UploadResponse(id=row.id, status=row.status.value) for row in rows]
+    return [
+        UploadResponse(id=row.id, status=row.status.value, media_type=row.media_type.value)
+        for row in rows
+    ]
 
 
 @router.get("/derivatives/{derivative_id}")

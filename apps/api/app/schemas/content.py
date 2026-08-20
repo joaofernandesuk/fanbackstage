@@ -13,6 +13,7 @@ class UploadIntent(BaseModel):
 class UploadResponse(BaseModel):
     id: UUID
     status: str
+    media_type: str | None = None
     upload_url: str | None = None
 
 

@@ -41,6 +41,22 @@ class S3StorageProvider:
             self.client.head_bucket(Bucket=self.bucket)
         except ClientError:
             self.client.create_bucket(Bucket=self.bucket)
+        settings = get_settings()
+        if settings.environment != "production":
+            self.client.put_bucket_cors(
+                Bucket=self.bucket,
+                CORSConfiguration={
+                    "CORSRules": [
+                        {
+                            "AllowedHeaders": ["content-type"],
+                            "AllowedMethods": ["PUT"],
+                            "AllowedOrigins": [settings.web_origin],
+                            "ExposeHeaders": [],
+                            "MaxAgeSeconds": 300,
+                        }
+                    ]
+                },
+            )
 
     def create_upload_url(self, key: str, content_type: str, expires_in: int) -> str:
         self.ensure_bucket()
