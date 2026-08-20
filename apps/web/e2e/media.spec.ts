@@ -188,16 +188,11 @@ test("creator media travels through the real private processing stack", async ({
   expect(subscription.status).toBe(200);
   expect(subscription.body).toHaveLength(1);
   expect(subscription.body[0]).toMatchObject({ duration: "month_1", status: "active", auto_renew: true });
-  const cancel = await subscriberPage.evaluate(async ({ apiBase, id }) => {
-    const response = await fetch(`${apiBase}/api/v1/subscriptions/${id}/auto-renew`, { method: "PATCH", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false }) });
-    return { status: response.status, body: await response.json() };
-  }, { apiBase, id: subscription.body[0].id });
-  expect(cancel.body).toMatchObject({ status: "active", cancel_at_period_end: true });
-  const reactivate = await subscriberPage.evaluate(async ({ apiBase, id }) => {
-    const response = await fetch(`${apiBase}/api/v1/subscriptions/${id}/auto-renew`, { method: "PATCH", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: true }) });
-    return { status: response.status, body: await response.json() };
-  }, { apiBase, id: subscription.body[0].id });
-  expect(reactivate.body).toMatchObject({ status: "active", auto_renew: true, cancel_at_period_end: false });
+  await subscriberPage.goto("/subscriptions");
+  await subscriberPage.getByRole("button", { name: "Cancel at period end" }).click();
+  await expect(subscriberPage.getByText("Subscription will remain active until the current period ends.")).toBeVisible();
+  await subscriberPage.getByRole("button", { name: "Reactivate subscription" }).click();
+  await expect(subscriberPage.getByText("Subscription reactivated.")).toBeVisible();
   const lockedPpv = await subscriberPage.evaluate(async ({ apiBase, contentId }) => {
     const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
     return response.json();
