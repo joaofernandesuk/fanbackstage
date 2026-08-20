@@ -246,3 +246,49 @@ async def test_one_promotion_can_price_each_duration_independently(db_session):
             prices[duration] - subscriptions.discount_amount(prices[duration], basis_points)
             == charged
         )
+
+
+@pytest.mark.asyncio
+async def test_promotion_scheduling_and_overlap_are_deterministic(db_session):
+    _owner, profile = await creator(db_session, "overlap-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "overlap-buyer@example.com", "strong-password-123", None
+    )
+    now = datetime.now(UTC)
+    valid = SubscriptionPromotion(
+        creator_id=profile.id,
+        name="all durations",
+        eligibility=PromotionEligibility.all_eligible,
+        renewal_scope=PromotionRenewalScope.initial_only,
+        start_at=now - timedelta(minutes=1),
+    )
+    future = SubscriptionPromotion(
+        creator_id=profile.id,
+        name="future",
+        eligibility=PromotionEligibility.all_eligible,
+        renewal_scope=PromotionRenewalScope.initial_only,
+        start_at=now + timedelta(minutes=1),
+    )
+    db_session.add_all([valid, future])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            SubscriptionPromotionRule(
+                promotion_id=valid.id, duration="month_1", discount_basis_points=3000
+            ),
+            SubscriptionPromotionRule(
+                promotion_id=valid.id, duration="month_3", discount_basis_points=3000
+            ),
+            SubscriptionPromotionRule(
+                promotion_id=future.id, duration="month_1", discount_basis_points=9000
+            ),
+        ]
+    )
+    selected, bps = await subscriptions._promotion(
+        db_session, buyer, profile.id, "month_1", renewal=False
+    )
+    assert selected and selected.id == valid.id and bps == 3000
+    selected, bps = await subscriptions._promotion(
+        db_session, buyer, profile.id, "month_3", renewal=False
+    )
+    assert selected and selected.id == valid.id and bps == 3000
