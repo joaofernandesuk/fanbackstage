@@ -20,7 +20,10 @@ test("creator can register, verify, and submit an identity application", async (
   await page.getByLabel("Username").fill(`creator${Date.now()}`);
   await page.getByLabel("Display name").fill("Creator Example");
   await page.getByLabel("Bio").fill("A public creator profile.");
-  await page.getByRole("button", { name: "Save profile" }).click();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/api/v1/creators/me") && response.request().method() === "PATCH" && response.ok()),
+    page.getByRole("button", { name: "Save profile" }).click(),
+  ]);
   await page.getByRole("button", { name: "Submit application" }).click();
   await expect(page.getByText("pending verification")).toBeVisible();
   await page.getByRole("button", { name: "Complete development verification" }).click();
