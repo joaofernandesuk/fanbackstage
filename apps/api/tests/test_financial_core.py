@@ -120,8 +120,11 @@ async def test_full_refund_reverses_value_and_revokes_entitlement(db_session):
     await db_session.flush()
     assert refunded.status is PurchaseStatus.refunded
     assert not await can_access_content(db_session, content, buyer)
-    with pytest.raises(finance.FinancialError):
+    entry_count = await db_session.scalar(select(func.count()).select_from(LedgerEntry))
+    assert (
         await finance.refund_purchase(db_session, refunded, admin, "duplicate")
+    ).id == refunded.id
+    assert await db_session.scalar(select(func.count()).select_from(LedgerEntry)) == entry_count
 
 
 def test_commission_uses_integer_minor_units_without_rounding_drift():
@@ -238,3 +241,101 @@ async def test_commission_snapshot_does_not_change_after_rule_update(db_session)
     assert initial.platform_fee_minor == 199
     assert later.commission_basis_points == 2500
     assert later.platform_fee_minor == 249
+
+
+@pytest.mark.asyncio
+async def test_creator_summary_excludes_refunded_sales_and_keeps_currency_isolated(db_session):
+    owner, profile = await approved_creator(db_session, "summary-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "summary-buyer@example.com", "strong-password-123", None
+    )
+    admin, _ = await accounts.register(
+        db_session, "summary-admin@example.com", "strong-password-123", None
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Summary",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=101,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    purchase = await finance.initiate_purchase(db_session, buyer, content.id, "summary")
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    settled = await finance.process_development_webhook(db_session, payload, signature)
+    assert settled
+    summary = await finance.creator_financial_summary(db_session, profile.id, "EUR")
+    assert summary == {
+        "pending_amount_minor": 81,
+        "available_amount_minor": 0,
+        "ppv_gross_amount_minor": 101,
+        "platform_fee_amount_minor": 20,
+        "creator_net_amount_minor": 81,
+    }
+    await finance.refund_purchase(db_session, settled, admin, "support")
+    assert (await finance.creator_financial_summary(db_session, profile.id, "EUR"))[
+        "ppv_gross_amount_minor"
+    ] == 0
+    assert await finance.creator_balances(db_session, profile.id, "USD") == {
+        "pending_amount_minor": 0,
+        "available_amount_minor": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_earnings_release_is_balanced_and_does_not_reuse_a_previous_balance_key(
+    db_session, monkeypatch
+):
+    owner, profile = await approved_creator(db_session, "release-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "release-buyer@example.com", "strong-password-123", None
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Release",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=100,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    purchase = await finance.initiate_purchase(db_session, buyer, content.id, "release")
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    assert await finance.process_development_webhook(db_session, payload, signature)
+    monkeypatch.setattr(
+        finance, "get_settings", lambda: Settings(creator_earnings_settlement_seconds=0)
+    )
+    release = await finance.release_creator_earnings(db_session, profile.id, "EUR")
+    assert release and release.transaction_type.value == "earnings_release"
+    assert await finance.creator_balances(db_session, profile.id, "EUR") == {
+        "pending_amount_minor": 0,
+        "available_amount_minor": 80,
+    }
+    assert await finance.release_creator_earnings(db_session, profile.id, "EUR") is None
+    second_buyer, _ = await accounts.register(
+        db_session, "release-buyer-two@example.com", "strong-password-123", None
+    )
+    second = await finance.initiate_purchase(db_session, second_buyer, content.id, "release-two")
+    second_attempt = await db_session.get(PaymentAttempt, second.payment_attempt_id)
+    assert second_attempt
+    second_payload, second_signature = finance.development_webhook_payload(second_attempt)
+    assert await finance.process_development_webhook(db_session, second_payload, second_signature)
+    second_release = await finance.release_creator_earnings(db_session, profile.id, "EUR")
+    assert second_release and second_release.id != release.id
+    assert await finance.creator_balances(db_session, profile.id, "EUR") == {
+        "pending_amount_minor": 0,
+        "available_amount_minor": 160,
+    }

@@ -24,11 +24,11 @@ The financial worker reconciles succeeded attempts that remain awaiting settleme
 
 A full refund records a compensating ledger transaction, preserves the original purchase, and revokes its entitlement. Payment and purchase state enums retain dispute/chargeback states for later provider event handling; Phase 3 does not implement a dispute-management workflow.
 
-Creator revenue starts in `creator_pending`. A ledger transfer moves it to `creator_available`; configured settlement windows conservatively prevent release while a newer paid purchase remains in its settlement period. Payout execution is intentionally out of scope.
+Creator revenue starts in `creator_pending`. A ledger transfer moves it to `creator_available`; configured settlement windows conservatively prevent release while a newer paid purchase remains in its settlement period. Release idempotency uses a per-creator, per-currency release sequence, so a later identical balance cannot collide with an earlier transfer. Payout execution is intentionally out of scope.
 
 ## Migration policy
 
-Migration `20260820_0004` is forward from Phase 2 and creates the financial tables, constraints, indexes, and immutability trigger. Its downgrade is destructive and only appropriate for empty local/test financial data. Production corrections must use a forward migration.
+Migration `20260820_0004` is forward from Phase 2 and creates the financial tables, constraints, indexes, and immutability trigger. `20260820_0005` reserves the immutable-ledger `chargeback` event type without adding a dispute-management workflow. The financial-table downgrade is destructive and only appropriate for empty local/test financial data; the enum migration downgrades as a no-op because PostgreSQL enum values cannot be safely removed. Production corrections must use a forward migration.
 
 ## Known limitations
 

@@ -161,6 +161,12 @@ test("creator media travels through the real private processing stack", async ({
   }, { apiBase, contentId: content.id });
   expect(buyerContent.has_access).toBe(true);
   await buyerContext.close();
+  const earnings = await page.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/finance/creator/earnings?currency=EUR`, { credentials: "include" });
+    return { status: response.status, body: await response.json() };
+  }, { apiBase });
+  expect(earnings.status).toBe(200);
+  expect(earnings.body).toMatchObject({ pending_amount_minor: 800, ppv_gross_amount_minor: 999, platform_fee_amount_minor: 199, creator_net_amount_minor: 800, currency: "EUR" });
   const anonymous = await browser.newContext();
   const anonymousPage = await anonymous.newPage();
   await anonymousPage.goto(`http://127.0.0.1:31000/creator/${username}`);

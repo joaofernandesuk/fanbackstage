@@ -372,7 +372,7 @@ async def creator_financial_summary(
 ) -> dict[str, int]:
     currency = currency_code(currency)
     balances = await creator_balances(db, creator_id, currency)
-    gross, fees, net = await db.execute(
+    result = await db.execute(
         select(
             func.coalesce(func.sum(Purchase.gross_amount_minor), 0),
             func.coalesce(func.sum(Purchase.platform_fee_minor), 0),
@@ -380,9 +380,10 @@ async def creator_financial_summary(
         ).where(
             Purchase.seller_creator_id == creator_id,
             Purchase.currency == currency,
-            Purchase.status.in_([PurchaseStatus.paid, PurchaseStatus.refunded]),
+            Purchase.status == PurchaseStatus.paid,
         )
-    ).one()
+    )
+    gross, fees, net = result.one()
     return {
         **balances,
         "ppv_gross_amount_minor": int(gross),
@@ -424,12 +425,22 @@ async def release_creator_earnings(
     )
     if not balance or balance <= 0:
         return None
+    release_number = await db.scalar(
+        select(func.count())
+        .select_from(LedgerTransaction)
+        .where(
+            LedgerTransaction.transaction_type == LedgerTransactionType.earnings_release,
+            LedgerTransaction.currency == currency,
+            LedgerTransaction.metadata_json["creator_id"].astext == str(creator_id),
+        )
+    )
+    release_key = f"release:{creator_id}:{currency}:{int(release_number or 0) + 1}"
     return await post_entries(
         db,
         transaction_type=LedgerTransactionType.earnings_release,
         currency=currency,
-        idempotency_key=f"release:{creator_id}:{currency}:{int(balance)}",
-        reference=f"earnings_release:{creator_id}:{currency}:{int(balance)}",
+        idempotency_key=release_key,
+        reference=release_key,
         entries=[
             (pending, LedgerDirection.debit, int(balance)),
             (available, LedgerDirection.credit, int(balance)),
@@ -443,6 +454,8 @@ async def refund_purchase(
 ) -> Purchase:
     purchase = await db.scalar(select(Purchase).where(Purchase.id == purchase.id).with_for_update())
     assert purchase
+    if purchase.status is PurchaseStatus.refunded:
+        return purchase
     if purchase.status is not PurchaseStatus.paid or not purchase.ledger_transaction_id:
         raise FinancialError("Only settled purchases can be refunded")
     entitlement = await db.get(ContentEntitlement, purchase.entitlement_id)
