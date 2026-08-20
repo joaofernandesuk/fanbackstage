@@ -27,3 +27,22 @@ async def enforce_auth_rate_limit(request: Request, subject: str = "anonymous") 
             )
     finally:
         await redis.aclose()
+
+
+async def enforce_media_rate_limit(request: Request, subject: str = "anonymous") -> None:
+    """Bound upload and delivery authorization work by client and authenticated subject."""
+    settings = get_settings()
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"fanbackstage:rate-limit:media:{_key(f'{client_ip}:{subject}')}"
+    redis = Redis.from_url(settings.redis_url)
+    try:
+        attempts = await redis.incr(key)
+        if attempts == 1:
+            await redis.expire(key, settings.media_rate_limit_window_seconds)
+        if attempts > settings.media_rate_limit_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many media requests. Please try again later.",
+            )
+    finally:
+        await redis.aclose()

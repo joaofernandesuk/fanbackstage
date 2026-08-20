@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 24
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
+    media_rate_limit_attempts: int = 30
+    media_rate_limit_window_seconds: int = 60
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "no-reply@fanbackstage.local"

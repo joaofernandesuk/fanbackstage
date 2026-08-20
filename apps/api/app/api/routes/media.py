@@ -1,12 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.content.access import can_access_asset, can_access_preview
 from app.core.config import get_settings
+from app.core.rate_limit import enforce_media_rate_limit
 from app.media import service
 from app.media.storage import storage_provider
 from app.models.content import MediaAsset, MediaDerivative
@@ -18,8 +19,9 @@ router = APIRouter(prefix="/media", tags=["media"])
 
 @router.post("/uploads", response_model=UploadResponse)
 async def initiate_upload(
-    payload: UploadIntent, identity: CurrentIdentity, db: Db
+    payload: UploadIntent, request: Request, identity: CurrentIdentity, db: Db
 ) -> UploadResponse:
+    await enforce_media_rate_limit(request, str(identity[0].id))
     try:
         asset, upload_url = await service.begin_upload(
             db, identity[0], payload.filename, payload.mime_type
@@ -39,7 +41,10 @@ async def initiate_upload(
 
 
 @router.post("/{asset_id}/finalize", response_model=UploadResponse)
-async def finalize_upload(asset_id: UUID, identity: CurrentIdentity, db: Db) -> UploadResponse:
+async def finalize_upload(
+    asset_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> UploadResponse:
+    await enforce_media_rate_limit(request, str(identity[0].id))
     try:
         asset = await service.finalize_upload(db, identity[0], asset_id)
         await db.commit()
@@ -71,8 +76,9 @@ async def my_media(identity: CurrentIdentity, db: Db) -> list[UploadResponse]:
 
 @router.get("/derivatives/{derivative_id}")
 async def derivative_delivery(
-    derivative_id: UUID, identity: OptionalIdentity, db: Db
+    derivative_id: UUID, request: Request, identity: OptionalIdentity, db: Db
 ) -> RedirectResponse:
+    await enforce_media_rate_limit(request, str(identity[0].id) if identity else "anonymous")
     derivative = await db.get(MediaDerivative, derivative_id)
     if (
         not derivative
@@ -90,7 +96,8 @@ async def derivative_delivery(
 
 
 @router.get("/previews/{derivative_id}")
-async def preview_delivery(derivative_id: UUID, db: Db) -> RedirectResponse:
+async def preview_delivery(derivative_id: UUID, request: Request, db: Db) -> RedirectResponse:
+    await enforce_media_rate_limit(request)
     derivative = await db.get(MediaDerivative, derivative_id)
     if not derivative or not await can_access_preview(db, derivative):
         raise HTTPException(status_code=404, detail="Media not found")
