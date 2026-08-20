@@ -70,6 +70,33 @@ async def test_content_access_is_free_only_by_default_and_entitlement_is_explici
 
 
 @pytest.mark.asyncio
+async def test_non_free_policies_deny_without_an_entitlement(db_session):
+    owner, profile = await creator(db_session, "policy-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session, "policy-viewer@example.com", "strong-password-123", None
+    )
+    for policy in (
+        AccessPolicy.followers,
+        AccessPolicy.subscription,
+        AccessPolicy.ppv,
+        AccessPolicy.private,
+    ):
+        content = ContentItem(
+            owner_creator_id=profile.id,
+            created_by_user_id=owner.id,
+            content_type=ContentType.gallery,
+            title=f"{policy.value} gallery",
+            status=ContentStatus.published,
+            access_policy=policy,
+        )
+        db_session.add(content)
+        await db_session.flush()
+        assert not await can_access_content(db_session, content, None)
+        assert not await can_access_content(db_session, content, viewer)
+        assert await can_access_content(db_session, content, owner)
+
+
+@pytest.mark.asyncio
 async def test_preview_requires_published_ready_configured_gallery_media(db_session):
     owner, profile = await creator(db_session, "preview-owner@example.com")
     asset = MediaAsset(
