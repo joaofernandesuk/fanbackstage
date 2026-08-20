@@ -64,8 +64,12 @@ async def derivative_delivery(
     derivative_id: UUID, identity: OptionalIdentity, db: Db
 ) -> RedirectResponse:
     derivative = await db.get(MediaDerivative, derivative_id)
-    if not derivative or not await can_access_asset(
-        db, derivative.media_asset_id, identity[0] if identity else None
+    if (
+        not derivative
+        or derivative.status.value != "ready"
+        or not await can_access_asset(
+            db, derivative.media_asset_id, identity[0] if identity else None
+        )
     ):
         raise HTTPException(status_code=404, detail="Media not found")
     return RedirectResponse(

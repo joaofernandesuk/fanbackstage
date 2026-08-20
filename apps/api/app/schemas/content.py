@@ -46,6 +46,12 @@ class ContentUpdate(BaseModel):
     access_policy: AccessPolicy | None = None
 
 
+class ContentPreview(BaseModel):
+    derivative_id: UUID
+    media_type: str
+    delivery_path: str
+
+
 class ContentResponse(BaseModel):
     id: UUID
     content_type: str
@@ -55,3 +61,4 @@ class ContentResponse(BaseModel):
     access_policy: str
     has_access: bool
     locked: bool
+    previews: list[ContentPreview] = Field(default_factory=list)

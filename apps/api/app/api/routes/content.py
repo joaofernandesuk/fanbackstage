@@ -6,8 +6,19 @@ from sqlalchemy import select
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.content import service
 from app.content.access import can_access_content
-from app.models.content import ContentItem
+from app.models.content import (
+    ContentItem,
+    ContentStatus,
+    DerivativeType,
+    Gallery,
+    GalleryItem,
+    MediaDerivative,
+    MediaStatus,
+    VideoContent,
+)
+from app.models.creator import CreatorProfile, CreatorStatus
 from app.schemas.content import (
+    ContentPreview,
     ContentResponse,
     ContentUpdate,
     GalleryCreate,
@@ -31,6 +42,67 @@ def response(item: ContentItem, has_access: bool = True) -> ContentResponse:
         has_access=has_access,
         locked=not has_access,
     )
+
+
+async def public_response(db: Db, item: ContentItem, has_access: bool) -> ContentResponse:
+    result = response(item, has_access)
+    gallery = await db.scalar(select(Gallery).where(Gallery.content_id == item.id))
+    if gallery:
+        gallery_items = (
+            await db.scalars(
+                select(GalleryItem)
+                .where(GalleryItem.gallery_id == gallery.id)
+                .order_by(GalleryItem.position)
+            )
+        ).all()
+        preview_asset_ids = [
+            gallery_item.media_asset_id
+            for gallery_item in gallery_items
+            if gallery_item.is_preview or gallery_item.position < gallery.preview_count
+        ]
+        if not preview_asset_ids:
+            return result
+        derivatives = (
+            await db.scalars(
+                select(MediaDerivative)
+                .where(
+                    MediaDerivative.media_asset_id.in_(preview_asset_ids),
+                    MediaDerivative.derivative_type == DerivativeType.blurred_preview,
+                    MediaDerivative.status == MediaStatus.ready,
+                )
+                .order_by(MediaDerivative.created_at)
+            )
+        ).all()
+        derivatives_by_asset = {derivative.media_asset_id: derivative for derivative in derivatives}
+        result.previews = [
+            ContentPreview(
+                derivative_id=derivative.id,
+                media_type="image",
+                delivery_path=f"/media/previews/{derivative.id}",
+            )
+            for asset_id in preview_asset_ids
+            if (derivative := derivatives_by_asset.get(asset_id))
+        ]
+        return result
+    video = await db.scalar(select(VideoContent).where(VideoContent.content_id == item.id))
+    if not video:
+        return result
+    derivative = await db.scalar(
+        select(MediaDerivative).where(
+            MediaDerivative.media_asset_id == video.source_media_asset_id,
+            MediaDerivative.derivative_type == DerivativeType.poster,
+            MediaDerivative.status == MediaStatus.ready,
+        )
+    )
+    if derivative:
+        result.previews = [
+            ContentPreview(
+                derivative_id=derivative.id,
+                media_type="image",
+                delivery_path=f"/media/previews/{derivative.id}",
+            )
+        ]
+    return result
 
 
 @router.post("/galleries", response_model=ContentResponse)
@@ -162,4 +234,33 @@ async def public_content(content_id: UUID, identity: OptionalIdentity, db: Db) -
     if not item or item.status.value != "published":
         raise HTTPException(status_code=404, detail="Content not found")
     has_access = await can_access_content(db, item, identity[0] if identity else None)
-    return response(item, has_access)
+    return await public_response(db, item, has_access)
+
+
+@router.get("/public/by-creator/{username}", response_model=list[ContentResponse])
+async def public_creator_content(
+    username: str, identity: OptionalIdentity, db: Db
+) -> list[ContentResponse]:
+    items = (
+        (
+            await db.scalars(
+                select(ContentItem)
+                .join(CreatorProfile, CreatorProfile.id == ContentItem.owner_creator_id)
+                .where(
+                    CreatorProfile.username == username.lower(),
+                    CreatorProfile.status == CreatorStatus.approved,
+                    CreatorProfile.is_public.is_(True),
+                    ContentItem.status == ContentStatus.published,
+                )
+                .order_by(ContentItem.published_at.desc(), ContentItem.created_at.desc())
+            )
+        )
+        .unique()
+        .all()
+    )
+    return [
+        await public_response(
+            db, item, await can_access_content(db, item, identity[0] if identity else None)
+        )
+        for item in items
+    ]

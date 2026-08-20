@@ -24,7 +24,11 @@ from app.models.identity import User
 
 async def can_access_content(db: AsyncSession, content: ContentItem, user: User | None) -> bool:
     """Fail closed for all non-free policies; routes must use this resolver."""
-    if content.status is not ContentStatus.published:
+    if content.status is not ContentStatus.published or content.moderation_status.name in {
+        "flagged",
+        "rejected",
+        "removed",
+    }:
         return False
     if user:
         owner = await db.scalar(select(CreatorProfile.id).where(CreatorProfile.user_id == user.id))
@@ -53,19 +57,36 @@ async def can_access_content(db: AsyncSession, content: ContentItem, user: User 
 
 async def can_access_asset(db: AsyncSession, asset_id: UUID, user: User | None) -> bool:
     """Only an owning or entitled published content item can authorize full media."""
-    content = await db.scalar(
-        select(ContentItem)
-        .outerjoin(VideoContent, VideoContent.content_id == ContentItem.id)
-        .outerjoin(Gallery, Gallery.content_id == ContentItem.id)
-        .outerjoin(GalleryItem, GalleryItem.gallery_id == Gallery.id)
-        .where(
-            or_(
-                VideoContent.source_media_asset_id == asset_id,
-                GalleryItem.media_asset_id == asset_id,
+    asset = await db.get(MediaAsset, asset_id)
+    if (
+        not asset
+        or asset.status is not MediaStatus.ready
+        or asset.deleted_at is not None
+        or asset.moderation_status.name in {"flagged", "rejected", "removed"}
+    ):
+        return False
+    contents = (
+        (
+            await db.scalars(
+                select(ContentItem)
+                .outerjoin(VideoContent, VideoContent.content_id == ContentItem.id)
+                .outerjoin(Gallery, Gallery.content_id == ContentItem.id)
+                .outerjoin(GalleryItem, GalleryItem.gallery_id == Gallery.id)
+                .where(
+                    or_(
+                        VideoContent.source_media_asset_id == asset_id,
+                        GalleryItem.media_asset_id == asset_id,
+                    )
+                )
             )
         )
+        .unique()
+        .all()
     )
-    return bool(content and await can_access_content(db, content, user))
+    for content in contents:
+        if await can_access_content(db, content, user):
+            return True
+    return False
 
 
 async def can_access_preview(db: AsyncSession, derivative: MediaDerivative) -> bool:
@@ -73,7 +94,12 @@ async def can_access_preview(db: AsyncSession, derivative: MediaDerivative) -> b
     if derivative.status is not MediaStatus.ready:
         return False
     asset = await db.get(MediaAsset, derivative.media_asset_id)
-    if not asset or asset.status is not MediaStatus.ready:
+    if (
+        not asset
+        or asset.status is not MediaStatus.ready
+        or asset.deleted_at is not None
+        or asset.moderation_status.name in {"flagged", "rejected", "removed"}
+    ):
         return False
     video = await db.scalar(
         select(VideoContent).where(VideoContent.source_media_asset_id == asset.id)

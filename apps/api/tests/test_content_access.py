@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.accounts import service as accounts
+from app.api.routes.content import public_response
 from app.content.access import can_access_content, can_access_preview
 from app.creators import service as creators
 from app.models.content import (
@@ -18,6 +19,7 @@ from app.models.content import (
     MediaDerivative,
     MediaStatus,
     MediaType,
+    ModerationStatus,
 )
 from app.models.creator import CreatorStatus
 
@@ -101,3 +103,44 @@ async def test_preview_requires_published_ready_configured_gallery_media(db_sess
     assert not await can_access_preview(db_session, derivative)
     content.status = ContentStatus.published
     assert await can_access_preview(db_session, derivative)
+    asset.moderation_status = ModerationStatus.rejected
+    assert not await can_access_preview(db_session, derivative)
+
+
+@pytest.mark.asyncio
+async def test_public_content_response_only_includes_configured_derivative_paths(db_session):
+    owner, profile = await creator(db_session, "response-owner@example.com")
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        storage_key="original/must-not-leak",
+        original_filename="private.png",
+        mime_type="image/png",
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Published gallery",
+        status=ContentStatus.published,
+    )
+    content.gallery = Gallery(preview_count=1)
+    db_session.add_all([asset, content])
+    await db_session.flush()
+    db_session.add(GalleryItem(gallery_id=content.gallery.id, media_asset_id=asset.id, position=0))
+    db_session.add(
+        MediaDerivative(
+            media_asset_id=asset.id,
+            derivative_type=DerivativeType.blurred_preview,
+            status=MediaStatus.ready,
+            storage_key="derivative/private-preview",
+            mime_type="image/webp",
+        )
+    )
+    await db_session.flush()
+    payload = (await public_response(db_session, content, True)).model_dump(mode="json")
+    assert payload["previews"]
+    assert payload["previews"][0]["delivery_path"].startswith("/media/previews/")
+    assert "original/must-not-leak" not in str(payload)
+    assert "derivative/private-preview" not in str(payload)
