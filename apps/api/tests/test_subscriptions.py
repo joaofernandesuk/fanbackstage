@@ -7,6 +7,7 @@ from app.accounts import service as accounts
 from app.content.access import can_access_content
 from app.creators import service as creators
 from app.finance import service as finance
+from app.models.audit import AuditEvent
 from app.models.content import (
     AccessPolicy,
     ContentItem,
@@ -15,7 +16,7 @@ from app.models.content import (
     ModerationStatus,
 )
 from app.models.creator import CreatorStatus
-from app.models.finance import LedgerTransaction, PaymentAttempt, PaymentStatus
+from app.models.finance import LedgerEntry, LedgerTransaction, PaymentAttempt, PaymentStatus
 from app.models.subscription import (
     PromotionEligibility,
     PromotionRenewalScope,
@@ -253,6 +254,105 @@ async def test_failed_renewal_enters_grace_and_preserves_subscription_access(db_
     assert await subscriptions.finalize_expired_subscriptions(db_session) == 1
     assert subscription.status is SubscriptionStatus.expired
     assert not await can_access_content(db_session, content, buyer)
+
+
+@pytest.mark.asyncio
+async def test_subscription_period_refund_reverses_once_and_only_revokes_the_selected_period(
+    db_session,
+):
+    owner, profile = await creator(db_session, "subscription-refund-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "subscription-refund-buyer@example.com", "strong-password-123", None
+    )
+    admin, _ = await accounts.register(
+        db_session, "subscription-refund-admin@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_1", "amount_minor": 1000, "enabled": True}],
+    )
+    subscription = await subscriptions.create_subscription(
+        db_session, buyer, profile.id, "month_1", "subscription-refund-start"
+    )
+    first = await db_session.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_id == subscription.id)
+    )
+    assert first
+    first_attempt = await db_session.get(PaymentAttempt, first.payment_attempt_id)
+    assert first_attempt
+    payload, signature = finance.development_webhook_payload(first_attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    subscription.current_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.renew_due_subscriptions(db_session) == 1
+    second = await db_session.scalar(
+        select(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_id == subscription.id,
+            SubscriptionPeriod.sequence == 2,
+        )
+    )
+    assert second
+    second_attempt = await db_session.get(PaymentAttempt, second.payment_attempt_id)
+    assert second_attempt
+    payload, signature = finance.development_webhook_payload(second_attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Subscription refund access",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.subscription,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    assert await can_access_content(db_session, content, buyer)
+
+    original_charge = first.ledger_transaction_id
+    assert original_charge
+    await finance.refund_subscription_period(db_session, first, admin, "Historical correction")
+    await db_session.flush()
+    assert first.status.value == "refunded"
+    assert first.ledger_transaction_id == original_charge
+    assert subscription.status is SubscriptionStatus.active
+    assert subscription.auto_renew and await can_access_content(db_session, content, buyer)
+
+    await finance.refund_subscription_period(db_session, second, admin, "Current-period refund")
+    await db_session.flush()
+    assert second.status.value == "refunded"
+    assert subscription.status is SubscriptionStatus.expired
+    assert not subscription.auto_renew
+    assert not await can_access_content(db_session, content, buyer)
+    assert await finance.creator_balances(db_session, profile.id, "EUR") == {
+        "pending_amount_minor": 0,
+        "available_amount_minor": 0,
+    }
+    reversal_count = await db_session.scalar(
+        select(func.count())
+        .select_from(LedgerTransaction)
+        .where(LedgerTransaction.idempotency_key == f"subscription-refund:{second.id}")
+    )
+    entry_count = await db_session.scalar(select(func.count()).select_from(LedgerEntry))
+    assert (
+        await finance.refund_subscription_period(db_session, second, admin, "duplicate") is second
+    )
+    assert await db_session.scalar(select(func.count()).select_from(LedgerEntry)) == entry_count
+    assert reversal_count == 1
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(
+                AuditEvent.event_type == "subscription.period_refunded",
+                AuditEvent.actor_user_id == admin.id,
+                AuditEvent.target_id == str(second.id),
+            )
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio

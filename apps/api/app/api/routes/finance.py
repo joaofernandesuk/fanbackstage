@@ -10,6 +10,7 @@ from app.media.service import approved_creator
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
+from app.models.subscription import SubscriptionPeriod
 from app.permissions.policies import Permission, authorize
 from app.schemas.finance import (
     CommissionUpdate,
@@ -160,6 +161,23 @@ async def refund(
         purchase = await service.refund_purchase(db, purchase, identity[0], payload.reason)
         await db.commit()
         return purchase_response(purchase)
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/finance/subscription-periods/{period_id}/refund", response_model=dict)
+async def refund_subscription_period(
+    period_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    period = await db.get(SubscriptionPeriod, period_id)
+    if not period:
+        raise HTTPException(status_code=404, detail="Subscription period not found")
+    try:
+        period = await service.refund_subscription_period(db, period, identity[0], payload.reason)
+        await db.commit()
+        return {"id": str(period.id), "status": period.status.value}
     except service.FinancialError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc

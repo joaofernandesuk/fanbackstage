@@ -35,6 +35,12 @@ from app.models.finance import (
     PurchaseStatus,
 )
 from app.models.identity import User
+from app.models.subscription import (
+    Subscription,
+    SubscriptionPeriod,
+    SubscriptionPeriodStatus,
+    SubscriptionStatus,
+)
 
 
 class FinancialError(ValueError):
@@ -523,3 +529,94 @@ async def refund_purchase(
         metadata={"refund_transaction_id": str(refund.id), "reason": reason},
     )
     return purchase
+
+
+async def refund_subscription_period(
+    db: AsyncSession, period: SubscriptionPeriod, actor: User, reason: str
+) -> SubscriptionPeriod:
+    """Reverse one settled subscription period and revoke only its entitlement.
+
+    A refund is a new immutable ledger transaction.  It deliberately does not
+    delete or rewrite the commercial snapshot or its original charge.
+    """
+    period = await db.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.id == period.id).with_for_update()
+    )
+    assert period
+    if period.status is SubscriptionPeriodStatus.refunded:
+        return period
+    if period.status is not SubscriptionPeriodStatus.active or not period.ledger_transaction_id:
+        raise FinancialError("Only settled subscription periods can be refunded")
+    subscription = await db.scalar(
+        select(Subscription).where(Subscription.id == period.subscription_id).with_for_update()
+    )
+    assert subscription
+    entitlement = await db.get(ContentEntitlement, period.entitlement_id)
+    if not entitlement:
+        raise FinancialError("Subscription entitlement is missing")
+    clearing = await _account(db, LedgerAccountKind.platform_clearing, period.currency)
+    revenue = await _account(db, LedgerAccountKind.platform_revenue, period.currency)
+    pending = await _account(
+        db, LedgerAccountKind.creator_pending, period.currency, subscription.creator_id
+    )
+    available = await _account(
+        db, LedgerAccountKind.creator_available, period.currency, subscription.creator_id
+    )
+    pending_balance = await db.scalar(
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (LedgerEntry.direction == LedgerDirection.credit, LedgerEntry.amount_minor),
+                        else_=-LedgerEntry.amount_minor,
+                    )
+                ),
+                0,
+            )
+        ).where(LedgerEntry.ledger_account_id == pending.id)
+    )
+    pending_reversal = min(max(int(pending_balance or 0), 0), period.creator_amount_minor)
+    available_reversal = period.creator_amount_minor - pending_reversal
+    entries = [
+        (clearing, LedgerDirection.credit, period.charged_amount_minor),
+        (revenue, LedgerDirection.debit, period.platform_fee_minor),
+    ]
+    if pending_reversal:
+        entries.append((pending, LedgerDirection.debit, pending_reversal))
+    if available_reversal:
+        entries.append((available, LedgerDirection.debit, available_reversal))
+    refund = await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.refund,
+        currency=period.currency,
+        idempotency_key=f"subscription-refund:{period.id}",
+        reference=f"subscription_refund:{period.id}",
+        reversal_of_transaction_id=period.ledger_transaction_id,
+        entries=entries,
+        metadata={"subscription_period_id": str(period.id), "reason": reason},
+    )
+    period.status = SubscriptionPeriodStatus.refunded
+    entitlement.status = EntitlementStatus.revoked
+    entitlement.valid_until = datetime.now(UTC)
+    attempt = await db.get(PaymentAttempt, period.payment_attempt_id)
+    if attempt:
+        attempt.status = PaymentStatus.refunded
+    # Historical periods are independent.  Only a refund of the currently
+    # authoritative period ends the logical subscription and its future renewal.
+    if (
+        subscription.current_period_start == period.period_start
+        and subscription.current_period_end == period.period_end
+    ):
+        subscription.status = SubscriptionStatus.expired
+        subscription.auto_renew = False
+        subscription.cancel_at_period_end = True
+        subscription.ended_at = datetime.now(UTC)
+    await record_event(
+        db,
+        "subscription.period_refunded",
+        actor_user_id=actor.id,
+        target_type="subscription_period",
+        target_id=str(period.id),
+        metadata={"refund_transaction_id": str(refund.id), "reason": reason},
+    )
+    return period
