@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException
 from sqlalchemy import select
 
-from app.api.deps import CurrentIdentity, Db
+from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.audit.service import record_event
 from app.finance import service as finance
 from app.media.service import approved_creator
@@ -12,6 +12,7 @@ from app.models.subscription import (
     PromotionEligibility,
     PromotionRenewalScope,
     Subscription,
+    SubscriptionPeriod,
     SubscriptionPlanPrice,
     SubscriptionPromotion,
     SubscriptionPromotionRule,
@@ -106,7 +107,7 @@ async def create_promotion(payload: PromotionInput, identity: CurrentIdentity, d
 
 @router.get("/creators/{username}/subscription-options", response_model=list[PublicPlanResponse])
 async def public_options(
-    username: str, db: Db, identity: CurrentIdentity | None = None
+    username: str, db: Db, identity: OptionalIdentity
 ) -> list[PublicPlanResponse]:
     creator = await db.scalar(select(CreatorProfile).where(CreatorProfile.username == username))
     if not creator:
@@ -174,6 +175,33 @@ async def complete(attempt_id: UUID, identity: CurrentIdentity, db: Db) -> Subsc
     await db.commit()
     if not subscription:
         raise HTTPException(404, "Subscription not found")
+    return response(subscription)
+
+
+@router.post(
+    "/subscriptions/{subscription_id}/complete-development", response_model=SubscriptionResponse
+)
+async def complete_subscription(
+    subscription_id: UUID, identity: CurrentIdentity, db: Db
+) -> SubscriptionResponse:
+    period = await db.scalar(
+        select(SubscriptionPeriod)
+        .join(Subscription)
+        .where(
+            SubscriptionPeriod.subscription_id == subscription_id,
+            Subscription.subscriber_user_id == identity[0].id,
+            SubscriptionPeriod.status == "pending",
+        )
+    )
+    if not period:
+        raise HTTPException(404, "Pending subscription payment not found")
+    attempt = await db.get(finance.PaymentAttempt, period.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db, payload, signature)
+    subscription = await service.settle_payment_attempt(db, attempt)
+    await db.commit()
+    assert subscription
     return response(subscription)
 
 

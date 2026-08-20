@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 
 import { api, ApiError } from "../../../lib/api";
+import { SubscriptionOptions } from "../../../components/subscription-options";
 
 type Creator = {
+  id: string;
   display_name: string;
   username: string;
   bio: string | null;
@@ -75,6 +77,7 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
       <p>@{creator.username}</p>
       {creator.bio && <p>{creator.bio}</p>}
       {creator.location && <p>{creator.location}</p>}
+      <SubscriptionOptions username={creator.username} creatorId={creator.id} />
       <h2>Published content</h2>
       {content.length === 0 && <p>No content published yet.</p>}
       <div>
