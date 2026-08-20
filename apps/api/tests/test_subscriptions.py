@@ -184,3 +184,65 @@ async def test_cancel_preserves_access_and_renewal_keeps_selected_duration(db_se
     renewal_payload, renewal_signature = finance.development_webhook_payload(renewal_attempt)
     await finance.process_development_webhook(db_session, renewal_payload, renewal_signature)
     assert renewal.status.value == "active" and subscription.status is SubscriptionStatus.active
+
+
+@pytest.mark.asyncio
+async def test_one_promotion_can_price_each_duration_independently(db_session):
+    _owner, profile = await creator(db_session, "duration-promo-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "duration-promo-buyer@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [
+            {"duration": "month_1", "amount_minor": 1000, "enabled": True},
+            {"duration": "month_3", "amount_minor": 3000, "enabled": True},
+            {"duration": "month_6", "amount_minor": 6000, "enabled": True},
+            {"duration": "month_12", "amount_minor": 12000, "enabled": True},
+        ],
+    )
+    now = datetime.now(UTC)
+    promotion = SubscriptionPromotion(
+        creator_id=profile.id,
+        name="Every duration",
+        eligibility=PromotionEligibility.all_eligible,
+        renewal_scope=PromotionRenewalScope.initial_and_renewal,
+        start_at=now - timedelta(minutes=1),
+    )
+    db_session.add(promotion)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            SubscriptionPromotionRule(
+                promotion_id=promotion.id, duration="month_1", discount_basis_points=2000
+            ),
+            SubscriptionPromotionRule(
+                promotion_id=promotion.id, duration="month_3", discount_basis_points=2500
+            ),
+            SubscriptionPromotionRule(
+                promotion_id=promotion.id, duration="month_6", discount_basis_points=3500
+            ),
+            SubscriptionPromotionRule(
+                promotion_id=promotion.id, duration="month_12", discount_basis_points=4500
+            ),
+        ]
+    )
+    prices = {"month_1": 1000, "month_3": 3000, "month_6": 6000, "month_12": 12000}
+    expected = {
+        "month_1": (2000, 800),
+        "month_3": (2500, 2250),
+        "month_6": (3500, 3900),
+        "month_12": (4500, 6600),
+    }
+    for duration, (expected_bps, charged) in expected.items():
+        promotion_row, basis_points = await subscriptions._promotion(
+            db_session, buyer, profile.id, duration, renewal=False
+        )
+        assert promotion_row and basis_points == expected_bps
+        assert (
+            prices[duration] - subscriptions.discount_amount(prices[duration], basis_points)
+            == charged
+        )
