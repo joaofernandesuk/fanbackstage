@@ -527,3 +527,88 @@ async def test_period_price_and_promotion_snapshot_survive_later_edits(db_sessio
         period.discount_basis_points,
         period.charged_amount_minor,
     ) == (999, 2000, 800)
+
+
+@pytest.mark.asyncio
+async def test_retry_success_is_single_settlement_and_reconciliation_is_replay_safe(db_session):
+    _owner, profile = await creator(db_session, "retry-success-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "retry-success-buyer@example.com", "strong-password-123", None
+    )
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_1", "amount_minor": 1000, "enabled": True}],
+    )
+    subscription = await subscriptions.create_subscription(
+        db_session, buyer, profile.id, "month_1", "retry-success-initial"
+    )
+    initial = await db_session.scalar(
+        select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_id == subscription.id)
+    )
+    assert initial
+    attempt = await db_session.get(PaymentAttempt, initial.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    subscription.current_period_end = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.renew_due_subscriptions(db_session) == 1
+    renewal = await db_session.scalar(
+        select(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_id == subscription.id, SubscriptionPeriod.sequence == 2
+        )
+    )
+    assert renewal
+    first = await db_session.get(PaymentAttempt, renewal.payment_attempt_id)
+    assert first
+    first.status = PaymentStatus.failed
+    await subscriptions.fail_payment_attempt(db_session, first)
+    record = await db_session.scalar(
+        select(SubscriptionRenewalAttempt).where(
+            SubscriptionRenewalAttempt.subscription_period_id == renewal.id
+        )
+    )
+    assert record
+    record.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert await subscriptions.retry_failed_subscription_renewals(db_session) == 1
+    assert await subscriptions.retry_failed_subscription_renewals(db_session) == 0
+    retry = await db_session.scalar(
+        select(PaymentAttempt)
+        .join(SubscriptionRenewalAttempt)
+        .where(
+            SubscriptionRenewalAttempt.subscription_period_id == renewal.id,
+            SubscriptionRenewalAttempt.attempt_number == 2,
+        )
+    )
+    assert retry and retry.id != first.id
+    retry.status = PaymentStatus.succeeded
+    retry.completed_at = datetime.now(UTC)
+    assert await finance.reconcile_succeeded_payments(db_session) == 1
+    assert renewal.status.value == "active" and subscription.status is SubscriptionStatus.active
+    assert await finance.reconcile_succeeded_payments(db_session) == 0
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(SubscriptionPeriod)
+            .where(SubscriptionPeriod.subscription_id == subscription.id)
+        )
+        == 2
+    )
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(LedgerTransaction)
+            .where(LedgerTransaction.idempotency_key == f"subscription-period:{renewal.id}")
+        )
+        == 1
+    )
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(SubscriptionRenewalAttempt)
+            .where(SubscriptionRenewalAttempt.subscription_period_id == renewal.id)
+        )
+        == 2
+    )
