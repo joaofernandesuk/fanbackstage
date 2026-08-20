@@ -31,6 +31,15 @@ class GalleryItemCreate(BaseModel):
     is_preview: bool = False
 
 
+class GalleryPreviewUpdate(BaseModel):
+    preview_count: int = Field(ge=0, le=100)
+    preview_asset_ids: list[UUID] = Field(default_factory=list, max_length=100)
+
+
+class GalleryOrderUpdate(BaseModel):
+    media_asset_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+
 class ContentResponse(BaseModel):
     id: UUID
     content_type: str

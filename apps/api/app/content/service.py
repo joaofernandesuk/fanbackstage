@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.media.service import approved_creator, asset_for_owner
@@ -115,4 +116,42 @@ async def publish(db: AsyncSession, user: User, content_id: UUID) -> ContentItem
 async def archive(db: AsyncSession, user: User, content_id: UUID) -> ContentItem:
     content = await owned_content(db, user, content_id)
     content.status = ContentStatus.archived
+    return content
+
+
+async def configure_gallery_preview(
+    db: AsyncSession, user: User, content_id: UUID, preview_count: int, preview_asset_ids: set[UUID]
+) -> ContentItem:
+    content = await owned_content(db, user, content_id, ContentType.gallery)
+    assert content.gallery
+    items = (
+        await db.scalars(select(GalleryItem).where(GalleryItem.gallery_id == content.gallery.id))
+    ).all()
+    if preview_count < 0 or preview_count > len(items):
+        raise ValueError("Preview count is invalid")
+    item_asset_ids = {item.media_asset_id for item in items}
+    if not preview_asset_ids <= item_asset_ids:
+        raise ValueError("Preview media must belong to the gallery")
+    content.gallery.preview_count = preview_count
+    for item in items:
+        item.is_preview = item.media_asset_id in preview_asset_ids
+    return content
+
+
+async def reorder_gallery(
+    db: AsyncSession, user: User, content_id: UUID, asset_ids: list[UUID]
+) -> ContentItem:
+    content = await owned_content(db, user, content_id, ContentType.gallery)
+    assert content.gallery
+    items = (
+        await db.scalars(select(GalleryItem).where(GalleryItem.gallery_id == content.gallery.id))
+    ).all()
+    by_asset = {item.media_asset_id: item for item in items}
+    if len(asset_ids) != len(items) or set(asset_ids) != set(by_asset):
+        raise ValueError("Gallery order must include every gallery item exactly once")
+    for position, asset_id in enumerate(asset_ids):
+        by_asset[asset_id].position = position + len(items)
+    await db.flush()
+    for position, asset_id in enumerate(asset_ids):
+        by_asset[asset_id].position = position
     return content

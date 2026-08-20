@@ -7,7 +7,14 @@ from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.content import service
 from app.content.access import can_access_content
 from app.models.content import ContentItem
-from app.schemas.content import ContentResponse, GalleryCreate, GalleryItemCreate, VideoCreate
+from app.schemas.content import (
+    ContentResponse,
+    GalleryCreate,
+    GalleryItemCreate,
+    GalleryOrderUpdate,
+    GalleryPreviewUpdate,
+    VideoCreate,
+)
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -68,6 +75,38 @@ async def create_video(payload: VideoCreate, identity: CurrentIdentity, db: Db) 
             payload.media_asset_id,
             payload.access_policy,
         )
+        await db.commit()
+        return response(item)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
+
+
+@router.patch("/galleries/{content_id}/preview", response_model=ContentResponse)
+async def configure_preview(
+    content_id: UUID, payload: GalleryPreviewUpdate, identity: CurrentIdentity, db: Db
+) -> ContentResponse:
+    try:
+        item = await service.configure_gallery_preview(
+            db, identity[0], content_id, payload.preview_count, set(payload.preview_asset_ids)
+        )
+        await db.commit()
+        return response(item)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
+        ) from exc
+
+
+@router.patch("/galleries/{content_id}/order", response_model=ContentResponse)
+async def reorder(
+    content_id: UUID, payload: GalleryOrderUpdate, identity: CurrentIdentity, db: Db
+) -> ContentResponse:
+    try:
+        item = await service.reorder_gallery(db, identity[0], content_id, payload.media_asset_ids)
         await db.commit()
         return response(item)
     except (PermissionError, ValueError) as exc:
