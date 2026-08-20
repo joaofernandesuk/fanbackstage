@@ -9,6 +9,7 @@ from app.content.access import can_access_content
 from app.models.content import ContentItem
 from app.schemas.content import (
     ContentResponse,
+    ContentUpdate,
     GalleryCreate,
     GalleryItemCreate,
     GalleryOrderUpdate,
@@ -133,6 +134,21 @@ async def publish(content_id: UUID, identity: CurrentIdentity, db: Db) -> Conten
 async def archive(content_id: UUID, identity: CurrentIdentity, db: Db) -> ContentResponse:
     try:
         item = await service.archive(db, identity[0], content_id)
+        await db.commit()
+        return response(item)
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.patch("/{content_id}", response_model=ContentResponse)
+async def update_content(
+    content_id: UUID, payload: ContentUpdate, identity: CurrentIdentity, db: Db
+) -> ContentResponse:
+    try:
+        item = await service.update_content(
+            db, identity[0], content_id, payload.model_dump(exclude_unset=True)
+        )
         await db.commit()
         return response(item)
     except PermissionError as exc:

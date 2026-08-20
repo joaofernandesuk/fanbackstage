@@ -40,6 +40,12 @@ class GalleryOrderUpdate(BaseModel):
     media_asset_ids: list[UUID] = Field(min_length=1, max_length=100)
 
 
+class ContentUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=5000)
+    access_policy: AccessPolicy | None = None
+
+
 class ContentResponse(BaseModel):
     id: UUID
     content_type: str

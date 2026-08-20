@@ -119,6 +119,16 @@ async def archive(db: AsyncSession, user: User, content_id: UUID) -> ContentItem
     return content
 
 
+async def update_content(
+    db: AsyncSession, user: User, content_id: UUID, values: dict[str, object]
+) -> ContentItem:
+    content = await owned_content(db, user, content_id)
+    for field in ("title", "description", "access_policy"):
+        if field in values:
+            setattr(content, field, values[field])
+    return content
+
+
 async def configure_gallery_preview(
     db: AsyncSession, user: User, content_id: UUID, preview_count: int, preview_asset_ids: set[UUID]
 ) -> ContentItem:
