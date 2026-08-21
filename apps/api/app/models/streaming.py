@@ -80,6 +80,19 @@ class LiveChatKind(str, enum.Enum):
     system = "system"
 
 
+class LiveReportStatus(str, enum.Enum):
+    open = "open"
+    reviewed = "reviewed"
+    dismissed = "dismissed"
+
+
+class LiveRecordingStatus(str, enum.Enum):
+    requested = "requested"
+    recording = "recording"
+    completed = "completed"
+    failed = "failed"
+
+
 class LiveRoom(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "live_rooms"
     __table_args__ = (
@@ -143,6 +156,53 @@ class LiveBan(UUIDPrimaryKey, Timestamped, Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     reason: Mapped[str] = mapped_column(String(500))
+
+
+class LiveReport(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "live_reports"
+    __table_args__ = (
+        Index("ix_live_reports_status_created", "status", "created_at", "id"),
+        UniqueConstraint(
+            "reporter_user_id",
+            "live_room_id",
+            "live_chat_message_id",
+            "reason",
+            name="uq_live_report_reporter_target_reason",
+        ),
+    )
+    reporter_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    live_room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("live_rooms.id", ondelete="RESTRICT"), index=True
+    )
+    live_chat_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_chat_messages.id", ondelete="SET NULL"), index=True
+    )
+    reason: Mapped[str] = mapped_column(String(120))
+    details: Mapped[str | None] = mapped_column(String(1000))
+    status: Mapped[LiveReportStatus] = mapped_column(
+        Enum(LiveReportStatus, name="live_report_status"),
+        default=LiveReportStatus.open,
+        nullable=False,
+        index=True,
+    )
+
+
+class LiveRecording(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "live_recordings"
+    live_room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("live_rooms.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    status: Mapped[LiveRecordingStatus] = mapped_column(
+        Enum(LiveRecordingStatus, name="live_recording_status"),
+        default=LiveRecordingStatus.requested,
+        nullable=False,
+        index=True,
+    )
+    provider_egress_id: Mapped[str | None] = mapped_column(String(255), unique=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CreatorLiveSettings(UUIDPrimaryKey, Timestamped, Base):

@@ -33,6 +33,9 @@ from app.models.streaming import (
     LiveChatMessage,
     LiveParticipant,
     LiveParticipantRole,
+    LiveRecording,
+    LiveRecordingStatus,
+    LiveReport,
     LiveRoom,
     LiveRoomStatus,
     PrivateRequestStatus,
@@ -229,6 +232,148 @@ async def post_chat(db: AsyncSession, actor: User, room_id: UUID, body: str) -> 
     db.add(message)
     await db.flush()
     return message
+
+
+async def ban_live_viewer(
+    db: AsyncSession, actor: User, room_id: UUID, viewer_id: UUID, reason: str
+) -> LiveBan:
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    creator = await approved_creator(db, actor)
+    if room is None or room.creator_id != creator.id or viewer_id == actor.id:
+        raise PermissionError("Live room not found")
+    ban = await db.scalar(
+        select(LiveBan)
+        .where(LiveBan.live_room_id == room_id, LiveBan.user_id == viewer_id)
+        .with_for_update()
+    )
+    if ban is None:
+        ban = LiveBan(
+            live_room_id=room_id, user_id=viewer_id, actor_user_id=actor.id, reason=reason
+        )
+        db.add(ban)
+        participant = await db.scalar(
+            select(LiveParticipant).where(
+                LiveParticipant.live_room_id == room_id, LiveParticipant.user_id == viewer_id
+            )
+        )
+        if participant and participant.left_at is None:
+            participant.left_at = datetime.now(UTC)
+            room.viewer_count = max(0, room.viewer_count - 1)
+        await record_event(
+            db,
+            "live.viewer_banned",
+            actor_user_id=actor.id,
+            target_type="live_room",
+            target_id=str(room_id),
+            metadata={"viewer_user_id": str(viewer_id), "reason": reason},
+        )
+    return ban
+
+
+async def report_live(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    reason: str,
+    details: str | None = None,
+    chat_message_id: UUID | None = None,
+) -> LiveReport:
+    room = await db.get(LiveRoom, room_id)
+    if room is None:
+        raise PermissionError("Live room not found")
+    if chat_message_id and not await db.scalar(
+        select(LiveChatMessage).where(
+            LiveChatMessage.id == chat_message_id, LiveChatMessage.live_room_id == room_id
+        )
+    ):
+        raise ValueError("Live chat message does not belong to this room")
+    report = await db.scalar(
+        select(LiveReport).where(
+            LiveReport.reporter_user_id == actor.id,
+            LiveReport.live_room_id == room_id,
+            LiveReport.live_chat_message_id == chat_message_id,
+            LiveReport.reason == reason.strip(),
+        )
+    )
+    if report is None:
+        report = LiveReport(
+            reporter_user_id=actor.id,
+            live_room_id=room_id,
+            live_chat_message_id=chat_message_id,
+            reason=reason.strip(),
+            details=details.strip() if details else None,
+        )
+        db.add(report)
+        await db.flush()
+        await record_event(
+            db,
+            "live.reported",
+            actor_user_id=actor.id,
+            target_type="live_room",
+            target_id=str(room_id),
+            metadata={"chat_message_id": str(chat_message_id) if chat_message_id else None},
+        )
+    return report
+
+
+async def moderator_live_report_context(
+    db: AsyncSession, actor: User, report_id: UUID, reason: str
+) -> dict:
+    report = await db.get(LiveReport, report_id)
+    if report is None:
+        raise PermissionError("Live report not found")
+    message = (
+        await db.get(LiveChatMessage, report.live_chat_message_id)
+        if report.live_chat_message_id
+        else None
+    )
+    await record_event(
+        db,
+        "live_report.moderator_accessed",
+        actor_user_id=actor.id,
+        target_type="live_report",
+        target_id=str(report.id),
+        metadata={"reason": reason},
+    )
+    return {
+        "id": str(report.id),
+        "room_id": str(report.live_room_id),
+        "reason": report.reason,
+        "details": report.details,
+        "status": report.status.value,
+        "chat": {"id": str(message.id), "body": message.body} if message else None,
+    }
+
+
+async def request_public_recording(db: AsyncSession, actor: User, room_id: UUID) -> LiveRecording:
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    creator = await approved_creator(db, actor)
+    if (
+        room is None
+        or room.creator_id != creator.id
+        or room.access_mode is not LiveAccessMode.public
+    ):
+        raise PermissionError("Only an owned public live room can be recorded")
+    recording = await db.scalar(
+        select(LiveRecording).where(LiveRecording.live_room_id == room.id).with_for_update()
+    )
+    if recording is None:
+        # Egress execution remains a worker/provider concern. Private sessions
+        # intentionally have no recording command or model association.
+        recording = LiveRecording(
+            live_room_id=room.id,
+            status=LiveRecordingStatus.requested,
+        )
+        db.add(recording)
+        await db.flush()
+        await record_event(
+            db,
+            "live.recording_requested",
+            actor_user_id=actor.id,
+            target_type="live_room",
+            target_id=str(room.id),
+        )
+    return recording
 
 
 async def request_private_session(

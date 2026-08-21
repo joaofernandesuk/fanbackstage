@@ -1,13 +1,22 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
 from app.core.rate_limit import enforce_streaming_rate_limit
-from app.models.streaming import LiveAccessMode, LiveChatMessage, LiveRoom, PrivateSessionMode
+from app.models.streaming import (
+    LiveAccessMode,
+    LiveChatMessage,
+    LiveReport,
+    LiveRoom,
+    PrivateSessionMode,
+)
+from app.permissions.policies import Permission, authorize
 from app.schemas.streaming import (
     ChatInput,
+    LiveBanInput,
+    LiveReportInput,
     LiveRoomResponse,
     LiveStartInput,
     PrivateRequestInput,
@@ -147,6 +156,81 @@ async def chat_history(room_id: UUID, identity: CurrentIdentity, db: Db) -> list
             )
         ).all()
     ]
+
+
+@router.post("/rooms/{room_id}/ban/{viewer_id}")
+async def ban_viewer(
+    room_id: UUID,
+    viewer_id: UUID,
+    payload: LiveBanInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    try:
+        ban = await service.ban_live_viewer(db, identity[0], room_id, viewer_id, payload.reason)
+        await db.commit()
+        return {"id": str(ban.id), "room_id": str(ban.live_room_id), "user_id": str(ban.user_id)}
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.post("/rooms/{room_id}/reports")
+async def report_room(
+    room_id: UUID, payload: LiveReportInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    try:
+        report = await service.report_live(
+            db, identity[0], room_id, payload.reason, payload.details, payload.chat_message_id
+        )
+        await db.commit()
+        return {"id": str(report.id), "status": report.status.value}
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/rooms/{room_id}/recording")
+async def request_recording(room_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
+    try:
+        recording = await service.request_public_recording(db, identity[0], room_id)
+        await db.commit()
+        return {"id": str(recording.id), "status": recording.status.value}
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.get("/admin/reports")
+async def live_reports(identity: CurrentIdentity, db: Db) -> list[dict]:
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    reports = (await db.scalars(select(LiveReport).order_by(LiveReport.created_at.desc()))).all()
+    return [
+        {
+            "id": str(report.id),
+            "room_id": str(report.live_room_id),
+            "reason": report.reason,
+            "status": report.status.value,
+        }
+        for report in reports
+    ]
+
+
+@router.get("/admin/reports/{report_id}/context")
+async def live_report_context(
+    report_id: UUID,
+    identity: CurrentIdentity,
+    db: Db,
+    reason: str = Query(min_length=3, max_length=500),
+) -> dict:
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    try:
+        result = await service.moderator_live_report_context(db, identity[0], report_id, reason)
+        await db.commit()
+        return result
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/creators/{creator_id}/private-requests", response_model=PrivateRequestResponse)

@@ -39,6 +39,8 @@ def upgrade() -> None:
         "private_session_status": "awaiting_payment_authorization, ready, connecting, active, reconnecting, ending, ended, settled, failed, cancelled, disputed",
         "session_participant_role": "creator, payer, invited_viewer",
         "live_chat_kind": "text, system",
+        "live_report_status": "open, reviewed, dismissed",
+        "live_recording_status": "requested, recording, completed, failed",
     }.items():
         quoted = ", ".join(f"'{value.strip()}'" for value in values.split(","))
         op.execute(f"CREATE TYPE {name} AS ENUM ({quoted})")
@@ -315,11 +317,72 @@ def upgrade() -> None:
         *_timestamps(),
         sa.UniqueConstraint("provider", "external_event_id", name="uq_provider_live_event"),
     )
+    op.create_table(
+        "live_reports",
+        sa.Column(
+            "reporter_user_id",
+            sa.Uuid(),
+            sa.ForeignKey("users.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column(
+            "live_room_id",
+            sa.Uuid(),
+            sa.ForeignKey("live_rooms.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column(
+            "live_chat_message_id",
+            sa.Uuid(),
+            sa.ForeignKey("live_chat_messages.id", ondelete="SET NULL"),
+        ),
+        sa.Column("reason", sa.String(120), nullable=False),
+        sa.Column("details", sa.String(1000)),
+        sa.Column(
+            "status",
+            postgresql.ENUM(name="live_report_status", create_type=False),
+            nullable=False,
+            server_default="open",
+        ),
+        *_timestamps(),
+        sa.UniqueConstraint(
+            "reporter_user_id",
+            "live_room_id",
+            "live_chat_message_id",
+            "reason",
+            name="uq_live_report_reporter_target_reason",
+        ),
+    )
+    op.create_index(
+        "ix_live_reports_status_created", "live_reports", ["status", "created_at", "id"]
+    )
+    op.create_table(
+        "live_recordings",
+        sa.Column(
+            "live_room_id",
+            sa.Uuid(),
+            sa.ForeignKey("live_rooms.id", ondelete="RESTRICT"),
+            nullable=False,
+            unique=True,
+        ),
+        sa.Column(
+            "status",
+            postgresql.ENUM(name="live_recording_status", create_type=False),
+            nullable=False,
+            server_default="requested",
+        ),
+        sa.Column("provider_egress_id", sa.String(255), unique=True),
+        sa.Column("started_at", sa.DateTime(timezone=True)),
+        sa.Column("completed_at", sa.DateTime(timezone=True)),
+        *_timestamps(),
+    )
 
 
 def downgrade() -> None:
     for table in [
         "provider_live_events",
+        "live_recordings",
+        "live_reports",
         "private_session_settlements",
         "private_session_participants",
         "private_sessions",
@@ -330,8 +393,13 @@ def downgrade() -> None:
         "live_rooms",
         "creator_live_settings",
     ]:
-        op.drop_table(table)
+        # Phase 7 is unreleased and this revision may be refined locally.  The
+        # guard also lets a database that ran an earlier provisional 0011
+        # downgrade cleanly before it is re-upgraded with the final schema.
+        op.execute(f"DROP TABLE IF EXISTS {table}")
     for name in [
+        "live_recording_status",
+        "live_report_status",
         "live_chat_kind",
         "session_participant_role",
         "private_session_status",

@@ -20,6 +20,16 @@ class ChatInput(BaseModel):
     body: str = Field(min_length=1, max_length=1000)
 
 
+class LiveBanInput(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class LiveReportInput(BaseModel):
+    reason: str = Field(min_length=1, max_length=120)
+    details: str | None = Field(default=None, max_length=1000)
+    chat_message_id: UUID | None = None
+
+
 class LiveRoomResponse(BaseModel):
     id: UUID
     public_id: str

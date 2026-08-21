@@ -7,7 +7,15 @@ from app.accounts import service as accounts
 from app.creators import service as creators
 from app.models.creator import CreatorStatus
 from app.models.finance import LedgerTransaction
-from app.models.streaming import PrivateSession, PrivateSessionMode, PrivateSessionStatus
+from app.models.streaming import (
+    LiveAccessMode,
+    LiveRecording,
+    LiveRecordingStatus,
+    LiveReport,
+    PrivateSession,
+    PrivateSessionMode,
+    PrivateSessionStatus,
+)
 from app.streaming import service as streaming
 
 
@@ -253,3 +261,21 @@ async def test_private_settlement_uses_seconds_minimum_cap_and_is_idempotent(db_
             )
         )
     ).all().__len__() == 1
+
+
+@pytest.mark.asyncio
+async def test_live_report_moderation_access_is_audited_and_public_recording_only(db_session):
+    owner, _ = await creator(db_session, "report-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session, "report-viewer@example.com", "strong-password-123", None
+    )
+    room = await streaming.start_live(db_session, owner, "Reportable", LiveAccessMode.public)
+    await streaming.join_live(db_session, viewer, room.id)
+    chat = await streaming.post_chat(db_session, viewer, room.id, "Please review")
+    report = await streaming.report_live(db_session, viewer, room.id, "abuse", "context", chat.id)
+    assert isinstance(report, LiveReport)
+    context = await streaming.moderator_live_report_context(db_session, owner, report.id, "review")
+    assert context["chat"] == {"id": str(chat.id), "body": "Please review"}
+    recording = await streaming.request_public_recording(db_session, owner, room.id)
+    assert isinstance(recording, LiveRecording)
+    assert recording.status is LiveRecordingStatus.requested
