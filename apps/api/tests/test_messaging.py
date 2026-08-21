@@ -38,6 +38,12 @@ from app.models.messaging import (
     UserBlock,
 )
 from app.models.social import Follow
+from app.models.subscription import (
+    Subscription,
+    SubscriptionDuration,
+    SubscriptionPlan,
+    SubscriptionStatus,
+)
 
 
 async def creator(db, email):
@@ -332,6 +338,123 @@ async def test_campaign_snapshots_recipients_and_replay_respects_later_blocks(db
     assert (
         await db_session.scalar(
             select(func.count()).select_from(Message).where(Message.body == "Campaign announcement")
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_campaign_segments_use_authoritative_history_and_exclude_blocks(db_session):
+    owner, profile = await creator(db_session, "campaign-segments-owner@example.com")
+    follower, _ = await accounts.register(
+        db_session, "campaign-segments-follower@example.com", "strong-password-123", None
+    )
+    active, _ = await accounts.register(
+        db_session, "campaign-segments-active@example.com", "strong-password-123", None
+    )
+    expired, _ = await accounts.register(
+        db_session, "campaign-segments-expired@example.com", "strong-password-123", None
+    )
+    purchaser, _ = await accounts.register(
+        db_session, "campaign-segments-purchaser@example.com", "strong-password-123", None
+    )
+    blocked, _ = await accounts.register(
+        db_session, "campaign-segments-blocked@example.com", "strong-password-123", None
+    )
+    db_session.add_all(
+        [
+            Follow(user_id=follower.id, creator_id=profile.id),
+            Follow(user_id=blocked.id, creator_id=profile.id),
+            ContentEntitlement(
+                subject_user_id=active.id,
+                creator_id=profile.id,
+                source_type="subscription",
+                source_reference="active-period",
+                valid_from=datetime.now(UTC) - timedelta(days=1),
+            ),
+            ContentEntitlement(
+                subject_user_id=blocked.id,
+                creator_id=profile.id,
+                source_type="subscription",
+                source_reference="blocked-period",
+                valid_from=datetime.now(UTC) - timedelta(days=1),
+            ),
+            UserBlock(blocker_user_id=owner.id, blocked_user_id=blocked.id),
+        ]
+    )
+    plan = SubscriptionPlan(creator_id=profile.id, currency="EUR", enabled=True)
+    db_session.add(plan)
+    await db_session.flush()
+    db_session.add(
+        Subscription(
+            subscriber_user_id=expired.id,
+            creator_id=profile.id,
+            plan_id=plan.id,
+            duration=SubscriptionDuration.month_1,
+            currency="EUR",
+            status=SubscriptionStatus.expired,
+        )
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Campaign PPV",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=500,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    purchase = await finance.initiate_purchase(
+        db_session, purchaser, content.id, "campaign-purchase"
+    )
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    for segment, expected in (
+        (AudienceSegment.followers, {follower.id}),
+        (AudienceSegment.active_subscribers, {active.id}),
+        (AudienceSegment.expired_subscribers, {expired.id}),
+        (AudienceSegment.previous_customers, {purchaser.id}),
+    ):
+        campaign = MassMessageCampaign(
+            creator_id=profile.id,
+            created_by_user_id=owner.id,
+            audience_segment=segment,
+            body=segment.value,
+            status=CampaignStatus.draft,
+        )
+        db_session.add(campaign)
+        await db_session.flush()
+        assert set(await messaging.campaign_recipients(db_session, campaign)) == expected
+
+
+@pytest.mark.asyncio
+async def test_due_campaign_worker_replay_cannot_duplicate_recipient_messages(db_session):
+    owner, profile = await creator(db_session, "campaign-worker-owner@example.com")
+    recipient, _ = await accounts.register(
+        db_session, "campaign-worker-recipient@example.com", "strong-password-123", None
+    )
+    db_session.add(Follow(user_id=recipient.id, creator_id=profile.id))
+    campaign = MassMessageCampaign(
+        creator_id=profile.id,
+        created_by_user_id=owner.id,
+        audience_segment=AudienceSegment.followers,
+        body="Worker replay safe",
+        status=CampaignStatus.scheduled,
+        scheduled_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    db_session.add(campaign)
+    await db_session.flush()
+    assert await messaging.snapshot_campaign_recipients(db_session, campaign) == 1
+    assert await messaging.execute_due_campaigns(db_session) == 1
+    assert await messaging.execute_due_campaigns(db_session) == 0
+    assert (
+        await db_session.scalar(
+            select(func.count()).select_from(Message).where(Message.body == "Worker replay safe")
         )
         == 1
     )
