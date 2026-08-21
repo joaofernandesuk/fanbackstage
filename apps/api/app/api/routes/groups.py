@@ -6,8 +6,10 @@ from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.content import service as content_service
 from app.creators import service as creator_service
+from app.finance import service as finance_service
 from app.finance.service import currency_code
 from app.groups import service
+from app.messaging import service as messaging_service
 from app.models.creator import CreatorProfile
 from app.models.groups import (
     Group,
@@ -17,6 +19,7 @@ from app.models.groups import (
     GroupManagerMembership,
     GroupPermission,
 )
+from app.models.messaging import MessagingPermission
 from app.permissions.policies import Permission, authorize
 from app.schemas.content import ContentUpdate
 from app.schemas.creator import CreatorProfileUpdate
@@ -30,8 +33,11 @@ from app.schemas.groups import (
     ManagedCreatorResponse,
     MembershipResponse,
 )
+from app.schemas.messaging import MessagingSettingsInput
 from app.schemas.streaming import CreatorLiveSettingsInput, CreatorLiveSettingsResponse
+from app.schemas.subscription import PlanInput
 from app.streaming import service as streaming_service
+from app.subscriptions import service as subscription_service
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -292,6 +298,58 @@ async def update_managed_creator_live_settings(
         minimum_minutes=settings.minimum_minutes,
         max_authorization_minor=settings.max_authorization_minor,
     )
+
+
+@router.put("/managed-creators/{creator_id}/subscription-plan")
+async def update_managed_subscription_plan(
+    creator_id: UUID, payload: PlanInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    if not await service.has_delegated_permission(
+        db, identity[0].id, creator_id, GroupPermission.manage_subscriptions
+    ):
+        raise HTTPException(status_code=403, detail="Delegated subscription permission denied")
+    try:
+        plan = await subscription_service.configure_plan(
+            db, creator_id, payload.currency, payload.enabled,
+            [price.model_dump() for price in payload.prices],
+        )
+        await record_event(db, "group_manager.subscription_plan_updated", actor_user_id=identity[0].id, target_type="subscription_plan", target_id=str(plan.id))
+        await db.commit()
+        return {"id": str(plan.id), "creator_id": str(creator_id), "actor_user_id": str(identity[0].id)}
+    except (subscription_service.SubscriptionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/managed-creators/{creator_id}/messaging-settings")
+async def update_managed_messaging_settings(
+    creator_id: UUID, payload: MessagingSettingsInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    if not await service.has_delegated_permission(
+        db, identity[0].id, creator_id, GroupPermission.manage_messaging
+    ):
+        raise HTTPException(status_code=403, detail="Delegated messaging permission denied")
+    settings = await messaging_service.settings_for_creator(db, creator_id)
+    settings.permission = MessagingPermission(payload.permission)
+    settings.send_fee_minor = payload.send_fee_minor
+    settings.send_fee_currency = payload.send_fee_currency.upper() if payload.send_fee_currency else None
+    settings.subscribers_free = payload.subscribers_free
+    if bool(settings.send_fee_minor) != bool(settings.send_fee_currency):
+        raise HTTPException(status_code=400, detail="A send-fee currency is required with a send fee")
+    await record_event(db, "group_manager.messaging_settings_updated", actor_user_id=identity[0].id, target_type="creator_profile", target_id=str(creator_id))
+    await db.commit()
+    return {"creator_id": str(creator_id), "actor_user_id": str(identity[0].id), "permission": settings.permission.value}
+
+
+@router.get("/managed-creators/{creator_id}/earnings")
+async def managed_creator_earnings(
+    creator_id: UUID, identity: CurrentIdentity, db: Db, currency: str = "EUR"
+) -> dict:
+    if not await service.has_delegated_permission(
+        db, identity[0].id, creator_id, GroupPermission.view_earnings
+    ):
+        raise HTTPException(status_code=403, detail="Delegated earnings permission denied")
+    return {**(await finance_service.creator_financial_summary(db, creator_id, currency)), "currency": currency_code(currency), "creator_id": str(creator_id), "actor_user_id": str(identity[0].id)}
 
 
 @router.get("/mine/memberships", response_model=list[MembershipResponse])
