@@ -115,6 +115,13 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
         ).where(LedgerEntry.ledger_account_id == group_pending.id)
     )
     assert group_balance == 0
+    dashboard = await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+    assert dashboard == {
+        "currency": "EUR",
+        "active_creators": 1,
+        "pending_amount_minor": 0,
+        "available_amount_minor": 0,
+    }
 
     # Defaults are future-only: Creator A's accepted 50/50 contract does not
     # change when the group offers 30/70 to a later creator.

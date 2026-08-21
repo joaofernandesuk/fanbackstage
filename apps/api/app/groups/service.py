@@ -6,7 +6,7 @@ import secrets
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
@@ -401,3 +401,44 @@ async def has_delegated_permission(
             )
         )
     )
+
+
+async def group_financial_dashboard(
+    db: AsyncSession, group_id: UUID, actor: User, currency: str
+) -> dict[str, int | str]:
+    """Return group-owned ledger projections; never recompute old contract terms."""
+    await require_group_manager(db, group_id, actor.id)
+    from app.models.finance import LedgerAccount, LedgerDirection, LedgerEntry
+
+    balances = await db.execute(
+        select(
+            LedgerAccount.kind,
+            func.coalesce(
+                func.sum(
+                    case(
+                        (LedgerEntry.direction == LedgerDirection.credit, LedgerEntry.amount_minor),
+                        else_=-LedgerEntry.amount_minor,
+                    )
+                ),
+                0,
+            ),
+        )
+        .join(LedgerEntry, LedgerEntry.ledger_account_id == LedgerAccount.id)
+        .where(LedgerAccount.owner_group_id == group_id, LedgerAccount.currency == currency.upper())
+        .group_by(LedgerAccount.kind)
+    )
+    values = {kind.value: int(amount) for kind, amount in balances}
+    active_creators = await db.scalar(
+        select(func.count())
+        .select_from(GroupCreatorMembership)
+        .where(
+            GroupCreatorMembership.group_id == group_id,
+            GroupCreatorMembership.status == GroupMembershipStatus.active,
+        )
+    )
+    return {
+        "currency": currency.upper(),
+        "active_creators": int(active_creators or 0),
+        "pending_amount_minor": values.get("group_pending", 0),
+        "available_amount_minor": values.get("group_available", 0),
+    }

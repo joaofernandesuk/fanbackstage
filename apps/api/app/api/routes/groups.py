@@ -218,6 +218,16 @@ async def update_managed_content(
         ) from exc
 
 
+@router.get("/{group_id}/dashboard")
+async def dashboard(
+    group_id: UUID, identity: CurrentIdentity, db: Db, currency: str = "EUR"
+) -> dict:
+    try:
+        return await service.group_financial_dashboard(db, group_id, identity[0], currency)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 @router.get("/{group_id}", response_model=GroupResponse)
 async def get_group(group_id: UUID, db: Db) -> GroupResponse:
     group = await db.get(Group, group_id)
