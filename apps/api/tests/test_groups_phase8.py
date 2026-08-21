@@ -2,10 +2,12 @@ import pytest
 from sqlalchemy import case, func, select
 
 from app.accounts import service as accounts
+from app.content import service as content_service
 from app.content.access import can_access_content
 from app.creators import service as creators
 from app.finance import service as finance
 from app.groups import service as groups
+from app.models.audit import AuditEvent
 from app.models.content import (
     AccessPolicy,
     ContentItem,
@@ -139,3 +141,63 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
         db_session, manager.id, creator.id, GroupPermission.manage_content
     )
     assert (await db_session.get(GroupContract, active.id)).status is GroupContractStatus.ended
+
+
+@pytest.mark.asyncio
+async def test_delegated_content_control_is_scoped_audited_and_revoked_immediately(db_session):
+    manager, _ = await accounts.register(
+        db_session, "scoped-manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "scoped-creator@example.com")
+    _, unrelated_creator = await approved_creator(db_session, "unrelated-creator@example.com")
+    group = await groups.create_group(db_session, manager, "Scoped", "scoped", 5_000, None)
+    membership = await groups.invite_creator(db_session, group.id, manager, creator.id, None, [])
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    content = ContentItem(
+        owner_creator_id=creator.id,
+        created_by_user_id=creator_user.id,
+        content_type=ContentType.gallery,
+        title="Owner content",
+        access_policy=AccessPolicy.free,
+    )
+    other = ContentItem(
+        owner_creator_id=unrelated_creator.id,
+        created_by_user_id=unrelated_creator.user_id,
+        content_type=ContentType.gallery,
+        title="Other content",
+        access_policy=AccessPolicy.free,
+    )
+    db_session.add_all([content, other])
+    await db_session.flush()
+    with pytest.raises(PermissionError):
+        await content_service.update_content_as_group_manager(
+            db_session, manager, content.id, {"title": "Denied"}
+        )
+    with pytest.raises(PermissionError):
+        await content_service.update_content_as_group_manager(
+            db_session, manager, other.id, {"title": "Denied"}
+        )
+    manager_membership = await groups.manager_membership(db_session, group.id, manager.id)
+    from app.models.groups import GroupPermissionGrant
+
+    db_session.add(
+        GroupPermissionGrant(
+            membership_id=membership.id,
+            manager_membership_id=manager_membership.id,
+            permission=GroupPermission.manage_content,
+        )
+    )
+    await db_session.flush()
+    updated = await content_service.update_content_as_group_manager(
+        db_session, manager, content.id, {"title": "Manager update"}
+    )
+    assert updated.owner_creator_id == creator.id and updated.created_by_user_id == creator_user.id
+    audit = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "group_manager.content_updated")
+    )
+    assert audit and audit.actor_user_id == manager.id
+    await groups.leave_membership(db_session, membership.id, creator_user)
+    with pytest.raises(PermissionError):
+        await content_service.update_content_as_group_manager(
+            db_session, manager, content.id, {"title": "Stale session blocked"}
+        )
