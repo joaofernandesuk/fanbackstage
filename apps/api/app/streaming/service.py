@@ -13,7 +13,7 @@ from app.audit.service import record_event
 from app.core.config import get_settings
 from app.finance import service as finance
 from app.finance.service import currency_code, ppv_commission
-from app.integrations.streaming import LiveKitStreamingProvider
+from app.integrations.streaming import LiveKitStreamingProvider, StreamingProviderError
 from app.media.service import approved_creator
 from app.models.creator import CreatorProfile
 from app.models.finance import (
@@ -763,6 +763,49 @@ async def reconcile_private_authorizations(db: AsyncSession, limit: int = 100) -
     return len(sessions)
 
 
+async def reconcile_private_provider_presence(db: AsyncSession, limit: int = 100) -> int:
+    """Repair missed leave events from LiveKit's authoritative room membership."""
+    sessions = (
+        await db.scalars(
+            select(PrivateSession)
+            .where(
+                PrivateSession.status.in_(
+                    [
+                        PrivateSessionStatus.ready,
+                        PrivateSessionStatus.connecting,
+                        PrivateSessionStatus.active,
+                        PrivateSessionStatus.reconnecting,
+                    ]
+                )
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    repaired = 0
+    provider = LiveKitStreamingProvider()
+    for session in sessions:
+        try:
+            identities = await provider.list_participant_identities(session.provider_room_name)
+        except StreamingProviderError:
+            continue
+        participants = (
+            await db.scalars(
+                select(SessionParticipant).where(
+                    SessionParticipant.private_session_id == session.id,
+                    SessionParticipant.left_at.is_(None),
+                )
+            )
+        ).all()
+        for participant in participants:
+            if str(participant.user_id) not in identities:
+                actor = await db.get(User, participant.user_id)
+                if actor:
+                    await private_participant_disconnected(db, actor, session.id)
+                    repaired += 1
+    return repaired
+
+
 async def process_private_provider_event(
     db: AsyncSession,
     *,
@@ -787,6 +830,9 @@ async def process_private_provider_event(
         processed_at=now or datetime.now(UTC),
     )
     db.add(event)
+    # The uniqueness record is deliberately flushed before participant state or
+    # billable time changes, so a retried provider callback is harmless.
+    await db.flush()
     actor = await db.get(User, user_id)
     if actor is None:
         raise PermissionError("Provider participant is unknown")
@@ -795,6 +841,84 @@ async def process_private_provider_event(
     if event_type == "participant_left":
         return await private_participant_disconnected(db, actor, session_id, now)
     raise StreamingError("Unsupported provider event")
+
+
+async def process_livekit_webhook(db: AsyncSession, event: dict) -> PrivateSession | None:
+    """Map a verified LiveKit event into persisted domain state without browser input."""
+    room_name = (event.get("room") or {}).get("name")
+    participant_identity = (event.get("participant") or {}).get("identity")
+    event_type = event.get("event")
+    if not room_name or not event_type:
+        raise StreamingError("LiveKit event is incomplete")
+    session = await db.scalar(
+        select(PrivateSession).where(PrivateSession.provider_room_name == room_name)
+    )
+    if session is None:
+        # Public room lifecycle has no billable participant transitions. Record
+        # it for audit/replay safety without allowing a provider event to reopen it.
+        room = await db.scalar(select(LiveRoom).where(LiveRoom.provider_room_name == room_name))
+        if room is None:
+            raise PermissionError("LiveKit room is unknown")
+        existing = await db.scalar(
+            select(ProviderLiveEvent).where(
+                ProviderLiveEvent.provider == "livekit",
+                ProviderLiveEvent.external_event_id == event["id"],
+            )
+        )
+        if existing:
+            return None
+        db.add(
+            ProviderLiveEvent(
+                provider="livekit",
+                external_event_id=event["id"],
+                event_type=event_type,
+                live_room_id=room.id,
+                processed_at=datetime.now(UTC),
+            )
+        )
+        await db.flush()
+        if event_type == "room_finished" and room.status is LiveRoomStatus.live:
+            room.status, room.ended_at = LiveRoomStatus.ended, datetime.now(UTC)
+        return None
+    if event_type == "room_finished":
+        existing = await db.scalar(
+            select(ProviderLiveEvent).where(
+                ProviderLiveEvent.provider == "livekit",
+                ProviderLiveEvent.external_event_id == event["id"],
+            )
+        )
+        if existing:
+            return None
+        db.add(
+            ProviderLiveEvent(
+                provider="livekit",
+                external_event_id=event["id"],
+                event_type=event_type,
+                private_session_id=session.id,
+                processed_at=datetime.now(UTC),
+            )
+        )
+        await db.flush()
+        return await end_private_session(db, None, session.id, "provider_room_finished")
+    if event_type not in {
+        "participant_joined",
+        "participant_left",
+        "participant_connection_aborted",
+    }:
+        return None
+    if not participant_identity:
+        raise StreamingError("LiveKit participant event is incomplete")
+    try:
+        user_id = UUID(participant_identity)
+    except ValueError as exc:
+        raise StreamingError("LiveKit participant identity is invalid") from exc
+    return await process_private_provider_event(
+        db,
+        event_id=event["id"],
+        event_type="participant_left" if event_type != "participant_joined" else event_type,
+        session_id=session.id,
+        user_id=user_id,
+    )
 
 
 def settlement_amount(session: PrivateSession) -> int:

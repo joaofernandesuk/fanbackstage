@@ -161,13 +161,22 @@ def process_scheduled_mass_messages() -> dict[str, int]:
 def reconcile_private_session_grace() -> dict[str, int]:
     """Reconcile private reconnect deadlines and verified payment authorization."""
     from app.db.session import SessionLocal
-    from app.streaming.service import expire_reconnect_grace, reconcile_private_authorizations
+    from app.streaming.service import (
+        expire_reconnect_grace,
+        reconcile_private_authorizations,
+        reconcile_private_provider_presence,
+    )
 
     async def run() -> dict[str, int]:
         async with SessionLocal() as session:
             ended = await expire_reconnect_grace(session)
             authorized = await reconcile_private_authorizations(session)
+            presence_repaired = await reconcile_private_provider_presence(session)
             await session.commit()
-            return {"ended": ended, "authorized": authorized}
+            return {
+                "ended": ended,
+                "authorized": authorized,
+                "presence_repaired": presence_repaired,
+            }
 
     return run_async(run())

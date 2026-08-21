@@ -1,10 +1,15 @@
+import json
+from base64 import b64encode, urlsafe_b64encode
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from hmac import new as hmac_new
 
 import pytest
 from sqlalchemy import select
 
 from app.accounts import service as accounts
 from app.creators import service as creators
+from app.integrations.streaming import LiveKitStreamingProvider
 from app.models.creator import CreatorStatus
 from app.models.finance import LedgerTransaction, PaymentAttempt, PaymentStatus
 from app.models.streaming import (
@@ -33,6 +38,36 @@ def test_second_level_billing_rounds_minor_units_deterministically(seconds, expe
         max_authorization_minor = 10_000
 
     assert streaming.settlement_amount(Session()) == expected
+
+
+def signed_livekit_webhook(body: bytes) -> str:
+    header = urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=").decode()
+    claims = {
+        "iss": "devkey",
+        "exp": int((datetime.now(UTC) + timedelta(minutes=1)).timestamp()),
+        "sha256": b64encode(sha256(body).digest()).decode(),
+    }
+    payload = (
+        urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).rstrip(b"=").decode()
+    )
+    signature = (
+        urlsafe_b64encode(hmac_new(b"secret", f"{header}.{payload}".encode(), sha256).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    return f"Bearer {header}.{payload}.{signature}"
+
+
+def test_livekit_webhook_requires_valid_signature_and_raw_body_hash():
+    body = b'{"id":"event-1","event":"participant_joined"}'
+    provider = LiveKitStreamingProvider()
+    assert provider.verify_webhook(body, signed_livekit_webhook(body))["id"] == "event-1"
+    with pytest.raises(ValueError, match="authorization"):
+        provider.verify_webhook(body, None)
+    with pytest.raises(ValueError, match="authorization"):
+        provider.verify_webhook(body, "Bearer invalid")
+    with pytest.raises(ValueError, match="hash"):
+        provider.verify_webhook(b"{}", signed_livekit_webhook(body))
 
 
 async def creator(db, email):

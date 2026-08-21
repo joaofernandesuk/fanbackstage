@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_streaming_rate_limit
+from app.integrations.streaming import LiveKitStreamingProvider
 from app.models.streaming import (
     LiveAccessMode,
     LiveChatMessage,
@@ -56,6 +57,21 @@ def private_session_response(session) -> PrivateSessionResponse:
         currency=session.currency,
         billable_seconds=session.billable_seconds,
     )
+
+
+@router.post("/webhooks/livekit", status_code=204)
+async def livekit_webhook(request: Request, db: Db) -> None:
+    """Accept only signed raw LiveKit events; the browser never reports presence."""
+    body = await request.body()
+    try:
+        event = LiveKitStreamingProvider().verify_webhook(
+            body, request.headers.get("Authorization")
+        )
+        await service.process_livekit_webhook(db, event)
+        await db.commit()
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(401, str(exc)) from exc
 
 
 @router.post("/rooms", response_model=LiveRoomResponse)
