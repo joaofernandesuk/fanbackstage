@@ -37,6 +37,7 @@ class MembershipResponse(BaseModel):
     creator_id: UUID
     status: str
     affiliation_public: bool
+    contracts: list["ContractResponse"] = Field(default_factory=list)
 
 
 class ContractResponse(BaseModel):

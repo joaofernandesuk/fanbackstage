@@ -239,7 +239,19 @@ async def my_memberships(identity: CurrentIdentity, db: Db) -> list[MembershipRe
             .order_by(GroupCreatorMembership.created_at.desc())
         )
     ).all()
-    return [membership_response(row) for row in rows]
+    result = []
+    for row in rows:
+        value = membership_response(row)
+        contracts = (
+            await db.scalars(
+                select(GroupContract)
+                .where(GroupContract.membership_id == row.id)
+                .order_by(GroupContract.version.desc())
+            )
+        ).all()
+        value.contracts = [contract_response(contract) for contract in contracts]
+        result.append(value)
+    return result
 
 
 @router.get("/mine/managed", response_model=list[GroupResponse])
