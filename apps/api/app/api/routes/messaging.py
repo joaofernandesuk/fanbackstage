@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -487,6 +488,12 @@ async def report_message(
 @router.post("/campaigns", response_model=dict)
 async def campaign(payload: CampaignInput, identity: CurrentIdentity, db: Db) -> dict:
     try:
+        if payload.scheduled_at and (
+            payload.scheduled_at.tzinfo is None
+            or payload.scheduled_at.utcoffset() is None
+            or payload.scheduled_at <= datetime.now(UTC)
+        ):
+            raise ValueError("Campaign schedules must be a future UTC timestamp")
         creator = await service.creator_for_user(db, identity[0])
         item = MassMessageCampaign(
             creator_id=creator.id,
