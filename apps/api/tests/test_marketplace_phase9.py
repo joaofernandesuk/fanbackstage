@@ -1,12 +1,18 @@
 """Permanent Phase 9 anti-abuse coverage for physical-order shipping treatment."""
 
+import secrets
+
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
 
 from app.accounts import service as accounts
+from app.api.routes import admin as admin_routes
 from app.creators import service as creators
 from app.finance import service as finance
 from app.groups import service as groups
 from app.marketplace import service as marketplace
+from app.models.audit import AuditEvent
 from app.models.content import ModerationStatus
 from app.models.creator import CreatorStatus
 from app.models.finance import CommissionRule, LedgerTransaction, PaymentAttempt
@@ -19,6 +25,7 @@ from app.models.marketplace import (
     MarketplaceShippingMode,
     ShippingAllowanceScope,
 )
+from app.schemas.marketplace import ShippingAllowanceInput
 
 
 async def approved_creator(db, email: str):
@@ -35,7 +42,7 @@ async def approved_creator(db, email: str):
 
 async def listing(db, creator, user, *, shipping: int) -> MarketplaceListing:
     row = MarketplaceListing(
-        public_id=f"listing-{shipping}",
+        public_id=f"listing-{shipping}-{secrets.token_hex(4)}",
         owner_creator_id=creator.id,
         created_by_user_id=user.id,
         title="Signed print",
@@ -55,16 +62,27 @@ async def listing(db, creator, user, *, shipping: int) -> MarketplaceListing:
     return row
 
 
-async def allowance(db, amount: int) -> MarketplaceShippingAllowance:
+async def allowance(db, amount: int, country_code: str = "PT") -> MarketplaceShippingAllowance:
     row = MarketplaceShippingAllowance(
         scope=ShippingAllowanceScope.country,
-        destination_code="PT",
+        destination_code=country_code,
+        country_code=country_code,
         currency="EUR",
         allowed_shipping_minor=amount,
     )
     db.add(row)
     await db.flush()
     return row
+
+
+async def marketplace_commission(db) -> None:
+    rule = await db.scalar(
+        select(CommissionRule).where(CommissionRule.revenue_type == "marketplace")
+    )
+    if rule:
+        rule.basis_points = 2_000
+    else:
+        db.add(CommissionRule(revenue_type="marketplace", basis_points=2_000))
 
 
 @pytest.mark.asyncio
@@ -103,13 +121,12 @@ async def test_checkout_snapshots_allowance_and_applies_group_only_to_shipping_e
         db_session, group.id, manager, creator.id, 5_000, [GroupPermission.manage_marketplace]
     )
     await groups.accept_invitation(db_session, membership.id, creator_user)
-    rule = CommissionRule(revenue_type="marketplace", basis_points=2_000)
-    db_session.add(rule)
-    configured_allowance = await allowance(db_session, 700)
+    await marketplace_commission(db_session)
+    configured_allowance = await allowance(db_session, 700, "AA")
     row = await listing(db_session, creator, creator_user, shipping=3_000)
 
     order = await marketplace.initiate_order(
-        db_session, buyer, row.id, 1, "PT", "marketplace-shipping-excess"
+        db_session, buyer, row.id, 1, "AA", "marketplace-shipping-excess"
     )
     # The creator only supplied the customer charge.  The configured allowance,
     # not any checkout payload, determines the non-commissionable component.
@@ -154,10 +171,10 @@ async def test_normal_shipping_has_no_group_split_and_allowance_is_not_a_creator
     buyer, _ = await accounts.register(
         db_session, "normal-market-buyer@example.com", "strong-password-123", None
     )
-    db_session.add(CommissionRule(revenue_type="marketplace", basis_points=2_000))
-    await allowance(db_session, 700)
+    await marketplace_commission(db_session)
+    await allowance(db_session, 700, "AB")
     row = await listing(db_session, creator, creator_user, shipping=600)
-    order = await marketplace.initiate_order(db_session, buyer, row.id, 1, "PT", "normal-shipping")
+    order = await marketplace.initiate_order(db_session, buyer, row.id, 1, "AB", "normal-shipping")
     assert order.shipping_pass_through_minor == 600
     assert order.shipping_excess_minor == 0
     assert order.commissionable_base_minor == 500
@@ -166,4 +183,113 @@ async def test_normal_shipping_has_no_group_split_and_allowance_is_not_a_creator
     # The public domain API accepts no allowance argument. A platform config is
     # the only source, and a missing config fails closed rather than trusting a creator.
     with pytest.raises(marketplace.MarketplaceError, match="Shipping is not configured"):
+        await marketplace.shipping_allowance_for(db_session, "US", "ZZZ")
+
+
+@pytest.mark.asyncio
+async def test_admin_allowance_precedence_authorization_and_audit(db_session):
+    admin, _ = await accounts.register(
+        db_session, "shipping-admin@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
+    creator, _ = await accounts.register(
+        db_session, "shipping-creator@example.com", "strong-password-123", None
+    )
+
+    with pytest.raises(HTTPException) as forbidden:
+        await admin_routes.configure_shipping_allowance(
+            ShippingAllowanceInput(currency="EUR", allowed_shipping_minor=100),
+            (creator, None),
+            db_session,
+        )
+    assert forbidden.value.status_code == 403
+
+    global_default = await admin_routes.configure_shipping_allowance(
+        ShippingAllowanceInput(currency="EUR", allowed_shipping_minor=100),
+        (admin, None),
+        db_session,
+    )
+    country_default = await admin_routes.configure_shipping_allowance(
+        ShippingAllowanceInput(country_code="AC", currency="EUR", allowed_shipping_minor=300),
+        (admin, None),
+        db_session,
+    )
+    region_override = await admin_routes.configure_shipping_allowance(
+        ShippingAllowanceInput(
+            country_code="AC", region_code="LIS", currency="EUR", allowed_shipping_minor=500
+        ),
+        (admin, None),
+        db_session,
+    )
+    assert global_default.scope == "global"
+    assert country_default.scope == "country"
+    assert region_override.scope == "country_region"
+    assert (
+        await marketplace.shipping_allowance_for(db_session, "AC", "EUR", "LIS")
+    ).id == region_override.id
+    assert (
+        await marketplace.shipping_allowance_for(db_session, "AC", "EUR", "POR")
+    ).id == country_default.id
+    assert (
         await marketplace.shipping_allowance_for(db_session, "US", "EUR")
+    ).id == global_default.id
+
+    events = (
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.target_id == str(region_override.id), AuditEvent.actor_user_id == admin.id
+            )
+        )
+    ).all()
+    assert len(events) == 1
+    assert events[0].event_type in {
+        "marketplace.shipping_allowance_created",
+        "marketplace.shipping_allowance_updated",
+    }
+    assert events[0].actor_user_id == admin.id
+    assert events[0].metadata_json["new"]["allowed_shipping_minor"] == 500
+
+
+@pytest.mark.asyncio
+async def test_admin_change_applies_only_to_new_checkout_snapshots(db_session):
+    admin, _ = await accounts.register(
+        db_session, "snapshot-admin@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
+    creator_user, creator = await approved_creator(db_session, "snapshot-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "snapshot-buyer@example.com", "strong-password-123", None
+    )
+    await marketplace_commission(db_session)
+    await admin_routes.configure_shipping_allowance(
+        ShippingAllowanceInput(country_code="AD", currency="EUR", allowed_shipping_minor=700),
+        (admin, None),
+        db_session,
+    )
+    first_listing = await listing(db_session, creator, creator_user, shipping=1_000)
+    first = await marketplace.initiate_order(
+        db_session, buyer, first_listing.id, 1, "AD", "allowance-snapshot-before"
+    )
+    first_attempt = await db_session.get(PaymentAttempt, first.payment_attempt_id)
+    assert first_attempt
+    payload, signature = finance.development_webhook_payload(first_attempt)
+    assert await finance.process_development_webhook(db_session, payload, signature) is None
+    first_ledger = await db_session.get(LedgerTransaction, first.ledger_transaction_id)
+    assert first_ledger
+
+    await admin_routes.configure_shipping_allowance(
+        ShippingAllowanceInput(country_code="AD", currency="EUR", allowed_shipping_minor=100),
+        (admin, None),
+        db_session,
+    )
+    second_listing = await listing(db_session, creator, creator_user, shipping=1_000)
+    second = await marketplace.initiate_order(
+        db_session, buyer, second_listing.id, 1, "AD", "allowance-snapshot-after"
+    )
+    assert first.shipping_allowance_minor == 700
+    assert first.shipping_pass_through_minor == 700
+    assert first.shipping_excess_minor == 300
+    assert first_ledger.metadata_json["shipping_allowance_minor"] == "700"
+    assert second.shipping_allowance_minor == 100
+    assert second.shipping_pass_through_minor == 100
+    assert second.shipping_excess_minor == 900

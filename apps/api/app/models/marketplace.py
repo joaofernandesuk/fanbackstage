@@ -47,6 +47,8 @@ class MarketplaceShippingMode(str, enum.Enum):
 class ShippingAllowanceScope(str, enum.Enum):
     country = "country"
     region = "region"
+    country_region = "country_region"
+    global_ = "global"
 
 
 class MarketplaceOrderStatus(str, enum.Enum):
@@ -136,9 +138,16 @@ class MarketplaceShippingAllowance(UUIDPrimaryKey, Timestamped, Base):
     )
 
     scope: Mapped[ShippingAllowanceScope] = mapped_column(
-        Enum(ShippingAllowanceScope, name="shipping_allowance_scope"), index=True
+        Enum(
+            ShippingAllowanceScope,
+            name="shipping_allowance_scope",
+            values_callable=lambda enum_class: [member.value for member in enum_class],
+        ),
+        index=True,
     )
     destination_code: Mapped[str] = mapped_column(String(16), index=True)
+    country_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    region_code: Mapped[str | None] = mapped_column(String(16), index=True)
     currency: Mapped[str] = mapped_column(String(3))
     allowed_shipping_minor: Mapped[int] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(default=True, nullable=False)

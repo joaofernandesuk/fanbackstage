@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import or_, select
 
@@ -5,15 +7,85 @@ from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.content import service as content_service
 from app.creators import service as creator_service
+from app.marketplace import service as marketplace_service
 from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import Group, GroupCreatorMembership
+from app.models.marketplace import MarketplaceShippingAllowance
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
 from app.permissions.policies import Permission, authorize
 from app.schemas.auth import MessageResponse
+from app.schemas.marketplace import ShippingAllowanceInput, ShippingAllowanceResponse
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def shipping_allowance_response(
+    allowance: MarketplaceShippingAllowance,
+) -> ShippingAllowanceResponse:
+    return ShippingAllowanceResponse(**marketplace_service.allowance_snapshot(allowance))
+
+
+@router.get("/marketplace/shipping-allowances", response_model=list[ShippingAllowanceResponse])
+async def list_shipping_allowances(
+    identity: CurrentIdentity,
+    db: Db,
+    country_code: str | None = None,
+    region_code: str | None = None,
+) -> list[ShippingAllowanceResponse]:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    query = select(MarketplaceShippingAllowance).order_by(
+        MarketplaceShippingAllowance.currency,
+        MarketplaceShippingAllowance.scope,
+        MarketplaceShippingAllowance.destination_code,
+    )
+    if country_code:
+        query = query.where(MarketplaceShippingAllowance.country_code == country_code.upper())
+    if region_code:
+        query = query.where(MarketplaceShippingAllowance.region_code == region_code.upper())
+    rows = (await db.scalars(query)).all()
+    return [shipping_allowance_response(row) for row in rows]
+
+
+@router.put("/marketplace/shipping-allowances", response_model=ShippingAllowanceResponse)
+async def configure_shipping_allowance(
+    payload: ShippingAllowanceInput, identity: CurrentIdentity, db: Db
+) -> ShippingAllowanceResponse:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    try:
+        allowance = await marketplace_service.configure_shipping_allowance(
+            db,
+            identity[0],
+            country_code=payload.country_code,
+            region_code=payload.region_code,
+            currency=payload.currency,
+            allowed_shipping_minor=payload.allowed_shipping_minor,
+            active=payload.active,
+        )
+        await db.commit()
+        return shipping_allowance_response(allowance)
+    except marketplace_service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete(
+    "/marketplace/shipping-allowances/{allowance_id}", response_model=ShippingAllowanceResponse
+)
+async def disable_shipping_allowance(
+    allowance_id: UUID, identity: CurrentIdentity, db: Db
+) -> ShippingAllowanceResponse:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    try:
+        allowance = await marketplace_service.disable_shipping_allowance(
+            db, identity[0], allowance_id
+        )
+        await db.commit()
+        return shipping_allowance_response(allowance)
+    except marketplace_service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/groups")

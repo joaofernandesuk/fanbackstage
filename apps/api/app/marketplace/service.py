@@ -43,47 +43,6 @@ class MarketplaceError(ValueError):
     pass
 
 
-# The table is intentionally able to hold regional allowances.  This small,
-# server-owned map is the Phase 9 implementation boundary; it can later be
-# replaced by a carrier/parcel-class service without accepting creator input.
-_EU_COUNTRIES = frozenset(
-    {
-        "AT",
-        "BE",
-        "BG",
-        "HR",
-        "CY",
-        "CZ",
-        "DK",
-        "EE",
-        "FI",
-        "FR",
-        "DE",
-        "GR",
-        "HU",
-        "IE",
-        "IT",
-        "LV",
-        "LT",
-        "LU",
-        "MT",
-        "NL",
-        "PL",
-        "PT",
-        "RO",
-        "SK",
-        "SI",
-        "ES",
-        "SE",
-    }
-)
-
-
-def shipping_region_for_country(country_code: str) -> str | None:
-    """Map a normalized destination country to the platform's bounded region set."""
-    return "EU" if country_code in _EU_COUNTRIES else None
-
-
 def shipping_treatment(
     item_subtotal_minor: int, charged_shipping_minor: int, allowed_shipping_minor: int
 ) -> dict[str, int]:
@@ -105,35 +64,178 @@ def shipping_treatment(
 
 
 async def shipping_allowance_for(
-    db: AsyncSession, destination_country_code: str, currency: str
+    db: AsyncSession,
+    destination_country_code: str,
+    currency: str,
+    destination_region_code: str | None = None,
 ) -> MarketplaceShippingAllowance:
     """Resolve the allowance from platform configuration, never customer/creator payloads."""
     country = destination_country_code.upper().strip()
     if len(country) != 2 or not country.isalpha():
         raise MarketplaceError("Destination country must be an ISO alpha-2 code")
     currency = currency_code(currency)
+    region = destination_region_code.upper().strip() if destination_region_code else None
+    if region and (not region.isalnum() or len(region) > 16):
+        raise MarketplaceError("Destination region is invalid")
+    # Exact country + region is the highest authority.  Both values originate
+    # from checkout address data, never from the creator's shipping charge.
+    allowance = None
+    if region:
+        allowance = await db.scalar(
+            select(MarketplaceShippingAllowance).where(
+                MarketplaceShippingAllowance.scope == ShippingAllowanceScope.country_region,
+                MarketplaceShippingAllowance.country_code == country,
+                MarketplaceShippingAllowance.region_code == region,
+                MarketplaceShippingAllowance.currency == currency,
+                MarketplaceShippingAllowance.active.is_(True),
+            )
+        )
+    if allowance:
+        return allowance
     allowance = await db.scalar(
         select(MarketplaceShippingAllowance).where(
             MarketplaceShippingAllowance.scope == ShippingAllowanceScope.country,
-            MarketplaceShippingAllowance.destination_code == country,
+            (
+                (MarketplaceShippingAllowance.country_code == country)
+                | (
+                    MarketplaceShippingAllowance.country_code.is_(None)
+                    & (MarketplaceShippingAllowance.destination_code == country)
+                )
+            ),
             MarketplaceShippingAllowance.currency == currency,
             MarketplaceShippingAllowance.active.is_(True),
         )
     )
     if allowance:
         return allowance
-    region = shipping_region_for_country(country)
-    if region:
-        allowance = await db.scalar(
-            select(MarketplaceShippingAllowance).where(
-                MarketplaceShippingAllowance.scope == ShippingAllowanceScope.region,
-                MarketplaceShippingAllowance.destination_code == region,
-                MarketplaceShippingAllowance.currency == currency,
-                MarketplaceShippingAllowance.active.is_(True),
-            )
+    allowance = await db.scalar(
+        select(MarketplaceShippingAllowance).where(
+            MarketplaceShippingAllowance.scope == ShippingAllowanceScope.global_,
+            MarketplaceShippingAllowance.currency == currency,
+            MarketplaceShippingAllowance.active.is_(True),
         )
+    )
     if not allowance:
         raise MarketplaceError("Shipping is not configured for this destination")
+    return allowance
+
+
+def _allowance_scope(
+    country_code: str | None, region_code: str | None
+) -> tuple[ShippingAllowanceScope, str, str | None, str | None]:
+    country = country_code.upper().strip() if country_code else None
+    region = region_code.upper().strip() if region_code else None
+    if country and (len(country) != 2 or not country.isalpha()):
+        raise MarketplaceError("Allowance country must be an ISO alpha-2 code")
+    if region and (not region.isalnum() or len(region) > 16):
+        raise MarketplaceError("Allowance region is invalid")
+    if region and not country:
+        raise MarketplaceError("A regional allowance requires a destination country")
+    if country and region:
+        return ShippingAllowanceScope.country_region, f"{country}:{region}", country, region
+    if country:
+        return ShippingAllowanceScope.country, country, country, None
+    return ShippingAllowanceScope.global_, "*", None, None
+
+
+def allowance_snapshot(allowance: MarketplaceShippingAllowance) -> dict[str, object]:
+    return {
+        "id": str(allowance.id),
+        "scope": allowance.scope.value,
+        "country_code": allowance.country_code,
+        "region_code": allowance.region_code,
+        "currency": allowance.currency,
+        "allowed_shipping_minor": allowance.allowed_shipping_minor,
+        "active": allowance.active,
+    }
+
+
+async def configure_shipping_allowance(
+    db: AsyncSession,
+    actor: User,
+    *,
+    country_code: str | None,
+    region_code: str | None,
+    currency: str,
+    allowed_shipping_minor: int,
+    active: bool = True,
+) -> MarketplaceShippingAllowance:
+    """Create or edit an allowance as an auditable platform-admin action."""
+    if allowed_shipping_minor < 0:
+        raise MarketplaceError("Shipping allowance must be nonnegative")
+    scope, destination_code, normalized_country, normalized_region = _allowance_scope(
+        country_code, region_code
+    )
+    currency = currency_code(currency)
+    allowance = await db.scalar(
+        select(MarketplaceShippingAllowance)
+        .where(
+            MarketplaceShippingAllowance.scope == scope,
+            MarketplaceShippingAllowance.destination_code == destination_code,
+            MarketplaceShippingAllowance.currency == currency,
+        )
+        .with_for_update()
+    )
+    old_value = allowance_snapshot(allowance) if allowance else None
+    if not allowance:
+        allowance = MarketplaceShippingAllowance(
+            scope=scope,
+            destination_code=destination_code,
+            country_code=normalized_country,
+            region_code=normalized_region,
+            currency=currency,
+            allowed_shipping_minor=allowed_shipping_minor,
+            active=active,
+        )
+        db.add(allowance)
+        await db.flush()
+        event_type = "marketplace.shipping_allowance_created"
+    else:
+        allowance.country_code = normalized_country
+        allowance.region_code = normalized_region
+        allowance.allowed_shipping_minor = allowed_shipping_minor
+        allowance.active = active
+        event_type = "marketplace.shipping_allowance_updated"
+    await record_event(
+        db,
+        event_type,
+        actor_user_id=actor.id,
+        target_type="marketplace_shipping_allowance",
+        target_id=str(allowance.id),
+        metadata={
+            "old": old_value,
+            "new": allowance_snapshot(allowance),
+            "scope": allowance.scope.value,
+        },
+    )
+    return allowance
+
+
+async def disable_shipping_allowance(
+    db: AsyncSession, actor: User, allowance_id: UUID
+) -> MarketplaceShippingAllowance:
+    """Safely retire configuration without deleting any historical reference."""
+    allowance = await db.scalar(
+        select(MarketplaceShippingAllowance)
+        .where(MarketplaceShippingAllowance.id == allowance_id)
+        .with_for_update()
+    )
+    if not allowance:
+        raise MarketplaceError("Shipping allowance not found")
+    old_value = allowance_snapshot(allowance)
+    allowance.active = False
+    await record_event(
+        db,
+        "marketplace.shipping_allowance_disabled",
+        actor_user_id=actor.id,
+        target_type="marketplace_shipping_allowance",
+        target_id=str(allowance.id),
+        metadata={
+            "old": old_value,
+            "new": allowance_snapshot(allowance),
+            "scope": allowance.scope.value,
+        },
+    )
     return allowance
 
 
@@ -153,6 +255,7 @@ async def initiate_order(
     quantity: int,
     destination_country_code: str,
     idempotency_key: str,
+    destination_region_code: str | None = None,
 ) -> MarketplaceOrder:
     """Reserve stock and snapshot server-owned pricing and shipping treatment."""
     if not idempotency_key or len(idempotency_key) > 128:
@@ -192,7 +295,9 @@ async def initiate_order(
     if seller.user_id == buyer.id:
         raise MarketplaceError("Creators cannot purchase their own listing")
     currency = currency_code(listing.currency)
-    allowance = await shipping_allowance_for(db, destination_country_code, currency)
+    allowance = await shipping_allowance_for(
+        db, destination_country_code, currency, destination_region_code
+    )
     treatment = shipping_treatment(
         listing.price_amount_minor * quantity,
         listing.shipping_charged_minor,
