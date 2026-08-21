@@ -21,6 +21,7 @@ from app.models.finance import (
     LedgerAccountKind,
     LedgerDirection,
     LedgerEntry,
+    LedgerTransaction,
     PaymentAttempt,
 )
 from app.models.groups import GroupContract, GroupContractStatus, GroupPermission
@@ -180,6 +181,68 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
         db_session, manager.id, creator.id, GroupPermission.manage_content
     )
     assert (await db_session.get(GroupContract, active.id)).status is GroupContractStatus.ended
+
+
+@pytest.mark.asyncio
+async def test_contract_amendments_change_only_future_financial_allocations(db_session):
+    manager, _ = await accounts.register(
+        db_session, "amendment-manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "amendment-creator@example.com")
+    group = await groups.create_group(db_session, manager, "Amendments", "amendments", 5_000, None)
+    membership = await groups.invite_creator(db_session, group.id, manager, creator.id, None, [])
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    content = ContentItem(
+        owner_creator_id=creator.id,
+        created_by_user_id=creator_user.id,
+        content_type=ContentType.gallery,
+        title="Immutable amendment allocation",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=2000,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+
+    async def settle(reference: str) -> LedgerTransaction:
+        buyer, _ = await accounts.register(
+            db_session, f"{reference}@example.com", "strong-password-123", None
+        )
+        purchase = await finance.initiate_purchase(db_session, buyer, content.id, reference)
+        attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+        payload, signature = finance.development_webhook_payload(attempt)
+        settled = await finance.process_development_webhook(db_session, payload, signature)
+        assert settled and settled.ledger_transaction_id
+        ledger = await db_session.get(LedgerTransaction, settled.ledger_transaction_id)
+        assert ledger
+        return ledger
+
+    before = await settle("before-amendment")
+    assert before.metadata_json["creator_amount_minor"] == "800"
+    assert before.metadata_json["group_amount_minor"] == "800"
+    assert before.metadata_json["group_contract_version"] == "1"
+
+    rejected = await groups.propose_amendment(db_session, membership.id, manager, 7_000)
+    pending = await settle("while-pending")
+    assert pending.metadata_json["creator_amount_minor"] == "800"
+    assert pending.metadata_json["group_contract_version"] == "1"
+    await groups.decide_amendment(db_session, rejected.id, creator_user, False)
+    after_rejection = await settle("after-rejection")
+    assert after_rejection.metadata_json["creator_amount_minor"] == "800"
+    assert after_rejection.metadata_json["group_amount_minor"] == "800"
+
+    accepted = await groups.propose_amendment(db_session, membership.id, manager, 7_000)
+    await groups.decide_amendment(db_session, accepted.id, creator_user, True)
+    after_acceptance = await settle("after-acceptance")
+    assert after_acceptance.metadata_json["creator_amount_minor"] == "1120"
+    assert after_acceptance.metadata_json["group_amount_minor"] == "480"
+    assert after_acceptance.metadata_json["group_contract_version"] == "3"
+    # The ledger stores the accepted event-time split; neither a rejection nor
+    # the later acceptance can mutate those earlier financial records.
+    assert (await db_session.get(LedgerTransaction, before.id)).metadata_json == before.metadata_json
+    assert (await db_session.get(LedgerTransaction, pending.id)).metadata_json == pending.metadata_json
 
 
 @pytest.mark.asyncio
