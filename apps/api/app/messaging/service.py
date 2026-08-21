@@ -456,8 +456,13 @@ async def settle_message_unlock(
     revenue = await _account(db, LedgerAccountKind.platform_revenue, purchase.currency)
     from app.finance.service import creator_revenue_allocation
 
+    attempt = await db.get(PaymentAttempt, purchase.payment_attempt_id)
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
-        db, purchase.seller_creator_id, purchase.currency, purchase.creator_amount_minor
+        db,
+        purchase.seller_creator_id,
+        purchase.currency,
+        purchase.creator_amount_minor,
+        attempt.completed_at if attempt and attempt.completed_at else purchase.created_at,
     )
     ledger = await post_entries(
         db,
@@ -551,8 +556,13 @@ async def settle_paid_send(db: AsyncSession, pending: PendingMessageSend) -> Pen
     revenue = await _account(db, LedgerAccountKind.platform_revenue, pending.currency)
     from app.finance.service import creator_revenue_allocation
 
+    attempt = await db.get(PaymentAttempt, pending.payment_attempt_id)
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
-        db, pending.creator_id, pending.currency, pending.creator_amount_minor
+        db,
+        pending.creator_id,
+        pending.currency,
+        pending.creator_amount_minor,
+        attempt.completed_at if attempt and attempt.completed_at else pending.created_at,
     )
     ledger = await post_entries(
         db,

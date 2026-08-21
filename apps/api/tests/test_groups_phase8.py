@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import case, func, select
@@ -25,6 +27,7 @@ from app.models.finance import (
     LedgerEntry,
     LedgerTransaction,
     PaymentAttempt,
+    PaymentStatus,
 )
 from app.models.groups import (
     GroupContract,
@@ -185,11 +188,56 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
     assert active and active.creator_basis_points == 7_000
     old_contract = await db_session.get(GroupContract, a_before.id)
     assert old_contract and old_contract.status is GroupContractStatus.ended
+    historical_buyer, _ = await accounts.register(
+        db_session, "historical-exit-buyer@example.com", "strong-password-123", None
+    )
+    historical_purchase = await finance.initiate_purchase(
+        db_session, historical_buyer, content.id, "historical-before-exit"
+    )
+    historical_attempt = await db_session.get(PaymentAttempt, historical_purchase.payment_attempt_id)
+    historical_payload, historical_signature = finance.development_webhook_payload(historical_attempt)
+    historical_settled = await finance.process_development_webhook(
+        db_session, historical_payload, historical_signature
+    )
+    assert historical_settled and historical_settled.ledger_transaction_id
+    historical_ledger = await db_session.get(
+        LedgerTransaction, historical_settled.ledger_transaction_id
+    )
+    assert historical_ledger and historical_ledger.metadata_json["group_amount_minor"] == "480"
+    assert historical_ledger.metadata_json["group_contract_id"] == str(active.id)
+    delayed_buyer, _ = await accounts.register(
+        db_session, "delayed-exit-buyer@example.com", "strong-password-123", None
+    )
+    delayed_purchase = await finance.initiate_purchase(
+        db_session, delayed_buyer, content.id, "delayed-settlement-before-exit"
+    )
+    delayed_attempt = await db_session.get(PaymentAttempt, delayed_purchase.payment_attempt_id)
+    assert delayed_attempt
+    # This is a provider-confirmed financial event whose durable settlement is
+    # delayed until after the creator leaves the group.
+    delayed_attempt.status = PaymentStatus.succeeded
+    delayed_attempt.completed_at = datetime.now(UTC)
+    await db_session.flush()
     await groups.leave_membership(db_session, membership.id, creator_user)
     assert not await groups.has_delegated_permission(
         db_session, manager.id, creator.id, GroupPermission.manage_content
     )
     assert (await db_session.get(GroupContract, active.id)).status is GroupContractStatus.ended
+    assert await finance.reconcile_succeeded_payments(db_session) == 1
+    assert delayed_purchase.ledger_transaction_id
+    delayed_ledger = await db_session.get(LedgerTransaction, delayed_purchase.ledger_transaction_id)
+    assert delayed_ledger and delayed_ledger.metadata_json["group_amount_minor"] == "480"
+    assert delayed_ledger.metadata_json["group_contract_id"] == str(active.id)
+    historical_refund = await finance.refund_purchase(
+        db_session, historical_settled, manager, "Refund after creator exit"
+    )
+    refund_ledger = await db_session.scalar(
+        select(LedgerTransaction).where(
+            LedgerTransaction.reference == f"refund:{historical_refund.id}"
+        )
+    )
+    assert refund_ledger and refund_ledger.metadata_json["group_amount_minor"] == "480"
+    assert refund_ledger.metadata_json["original_group_contract_id"] == str(active.id)
     # Leave is a future-only boundary: the group keeps its immutable historical
     # earnings, while a later paid event credits the creator's full post-fee pool.
     group_before_exit_sale = await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")

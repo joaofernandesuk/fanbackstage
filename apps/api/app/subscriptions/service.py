@@ -293,7 +293,11 @@ async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> S
     from app.finance.service import creator_revenue_allocation
 
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
-        db, subscription.creator_id, period.currency, period.creator_amount_minor
+        db,
+        subscription.creator_id,
+        period.currency,
+        period.creator_amount_minor,
+        attempt.completed_at or period.created_at,
     )
     ledger = await post_entries(
         db,

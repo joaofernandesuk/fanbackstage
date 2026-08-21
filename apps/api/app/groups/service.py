@@ -365,14 +365,21 @@ async def set_affiliation_visibility(
 async def active_contract(
     db: AsyncSession, creator_id: UUID, at: datetime | None = None
 ) -> GroupContract | None:
+    """Return the contract in force at an event timestamp.
+
+    Ended memberships and contracts remain queryable for historical financial
+    reconciliation.  Their effective windows, rather than their current
+    status, determine whether they governed an event.
+    """
     at = at or _now()
     return await db.scalar(
         select(GroupContract)
         .join(GroupCreatorMembership)
         .where(
             GroupCreatorMembership.creator_id == creator_id,
-            GroupCreatorMembership.status == GroupMembershipStatus.active,
-            GroupContract.status == GroupContractStatus.active,
+            GroupCreatorMembership.joined_at <= at,
+            (GroupCreatorMembership.left_at.is_(None)) | (GroupCreatorMembership.left_at > at),
+            GroupContract.status.in_((GroupContractStatus.active, GroupContractStatus.ended)),
             GroupContract.effective_from <= at,
             (GroupContract.effective_until.is_(None)) | (GroupContract.effective_until > at),
         )

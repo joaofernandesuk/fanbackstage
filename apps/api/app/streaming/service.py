@@ -985,7 +985,11 @@ async def settle_private_session(db: AsyncSession, session: PrivateSession) -> P
     clearing = await finance._account(db, LedgerAccountKind.platform_clearing, session.currency)
     revenue = await finance._account(db, LedgerAccountKind.platform_revenue, session.currency)
     allocation_entries, allocation_metadata = await finance.creator_revenue_allocation(
-        db, session.creator_id, session.currency, creator_amount
+        db,
+        session.creator_id,
+        session.currency,
+        creator_amount,
+        session.ended_at or session.active_started_at or session.created_at,
     )
     ledger = await finance.post_entries(
         db,

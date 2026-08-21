@@ -110,7 +110,11 @@ async def _account(
 
 
 async def creator_revenue_allocation(
-    db: AsyncSession, creator_id: UUID, currency: str, creator_pool_minor: int
+    db: AsyncSession,
+    creator_id: UUID,
+    currency: str,
+    creator_pool_minor: int,
+    event_at: datetime | None = None,
 ) -> tuple[list[tuple[LedgerAccount, LedgerDirection, int]], dict[str, str]]:
     """Resolve a single active contract and snapshot it in the ledger event.
 
@@ -120,7 +124,7 @@ async def creator_revenue_allocation(
     """
     from app.groups.service import active_contract
 
-    contract = await active_contract(db, creator_id)
+    contract = await active_contract(db, creator_id, event_at)
     creator_amount = creator_pool_minor
     metadata: dict[str, str] = {
         "creator_id": str(creator_id),
@@ -388,8 +392,13 @@ async def settle_purchase(db: AsyncSession, purchase: Purchase) -> Purchase:
         return purchase
     clearing = await _account(db, LedgerAccountKind.platform_clearing, purchase.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, purchase.currency)
+    attempt = await db.get(PaymentAttempt, purchase.payment_attempt_id)
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
-        db, purchase.seller_creator_id, purchase.currency, purchase.creator_amount_minor
+        db,
+        purchase.seller_creator_id,
+        purchase.currency,
+        purchase.creator_amount_minor,
+        attempt.completed_at if attempt and attempt.completed_at else purchase.created_at,
     )
     ledger = await post_entries(
         db,
