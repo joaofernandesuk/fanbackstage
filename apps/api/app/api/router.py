@@ -10,6 +10,7 @@ from app.api.routes import (
     health,
     media,
     messaging,
+    messaging_moderation,
     social,
     subscriptions,
 )
@@ -25,4 +26,5 @@ api_router.include_router(finance.router)
 api_router.include_router(subscriptions.router)
 api_router.include_router(social.router)
 api_router.include_router(messaging.router)
+api_router.include_router(messaging_moderation.router)
 health_router = health.router
