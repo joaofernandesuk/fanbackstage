@@ -10,6 +10,8 @@ from app.models.identity import User
 
 EMAIL = "phase2-e2e-admin@example.com"
 PASSWORD = "phase2-e2e-admin-password"
+MANAGER_EMAIL = "phase8-e2e-manager@example.com"
+MANAGER_PASSWORD = "phase8-e2e-manager-password"
 
 
 async def seed() -> None:
@@ -19,6 +21,11 @@ async def seed() -> None:
             user, _ = await accounts.register(db, EMAIL, PASSWORD, None)
         if "admin" not in {role.name for role in user.roles}:
             await accounts.assign_role(db, user, "admin", user.id, None)
+        manager = await db.scalar(select(User).where(User.email == MANAGER_EMAIL))
+        if not manager:
+            manager, _ = await accounts.register(db, MANAGER_EMAIL, MANAGER_PASSWORD, None)
+        if "manager" not in {role.name for role in manager.roles}:
+            await accounts.assign_role(db, manager, "manager", user.id, None)
         await db.commit()
 
 

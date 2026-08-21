@@ -64,7 +64,14 @@ def contract_response(row: GroupContract) -> ContractResponse:
 async def create(payload: GroupCreate, identity: CurrentIdentity, db: Db) -> GroupResponse:
     authorize(identity[0], Permission.MANAGER_ACCESS)
     try:
-        group = await service.create_group(db, identity[0], **payload.model_dump())
+        group = await service.create_group(
+            db,
+            identity[0],
+            name=payload.name,
+            slug=payload.slug,
+            default_creator_bps=payload.default_creator_basis_points,
+            description=payload.description,
+        )
         await db.commit()
         return group_response(group)
     except (service.GroupError, PermissionError) as exc:
