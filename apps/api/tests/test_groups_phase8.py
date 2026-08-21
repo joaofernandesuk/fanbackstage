@@ -260,6 +260,7 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
         db_session, "operations-manager@example.com", "strong-password-123", None
     )
     creator_user, creator = await approved_creator(db_session, "operations-creator@example.com")
+    _, unrelated_creator = await approved_creator(db_session, "operations-unrelated@example.com")
     group = await groups.create_group(db_session, manager, "Operations", "operations", 5_000, None)
     membership = await groups.invite_creator(db_session, group.id, manager, creator.id, None, [])
     await groups.accept_invitation(db_session, membership.id, creator_user)
@@ -277,6 +278,11 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
                 manager_membership_id=manager_membership.id,
                 permission=GroupPermission.manage_live_settings,
             ),
+            GroupPermissionGrant(
+                membership_id=membership.id,
+                manager_membership_id=manager_membership.id,
+                permission=GroupPermission.view_earnings,
+            ),
         ]
     )
     await db_session.flush()
@@ -290,6 +296,9 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
         creator.id, CreatorLiveSettingsInput(one_to_one_price_minor=777), identity, db_session
     )
     assert settings.one_to_one_price_minor == 777
+    assert (await group_routes.managed_creator_earnings(creator.id, identity, db_session))["creator_id"] == str(creator.id)
+    with pytest.raises(HTTPException, match="Delegated earnings permission denied"):
+        await group_routes.managed_creator_earnings(unrelated_creator.id, identity, db_session)
     events = set(
         (await db_session.scalars(select(AuditEvent.event_type).where(AuditEvent.actor_user_id == manager.id))).all()
     )

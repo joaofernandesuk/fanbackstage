@@ -20,6 +20,12 @@ from app.models.groups import (
     GroupPermission,
 )
 from app.models.messaging import MessagingPermission
+from app.models.subscription import (
+    PromotionEligibility,
+    PromotionRenewalScope,
+    SubscriptionPromotion,
+    SubscriptionPromotionRule,
+)
 from app.permissions.policies import Permission, authorize
 from app.schemas.content import ContentUpdate
 from app.schemas.creator import CreatorProfileUpdate
@@ -35,7 +41,7 @@ from app.schemas.groups import (
 )
 from app.schemas.messaging import MessagingSettingsInput
 from app.schemas.streaming import CreatorLiveSettingsInput, CreatorLiveSettingsResponse
-from app.schemas.subscription import PlanInput
+from app.schemas.subscription import PlanInput, PromotionInput
 from app.streaming import service as streaming_service
 from app.subscriptions import service as subscription_service
 
@@ -319,6 +325,32 @@ async def update_managed_subscription_plan(
     except (subscription_service.SubscriptionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/managed-creators/{creator_id}/subscription-promotions")
+async def create_managed_subscription_promotion(
+    creator_id: UUID, payload: PromotionInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    if not await service.has_delegated_permission(
+        db, identity[0].id, creator_id, GroupPermission.manage_promotions
+    ):
+        raise HTTPException(status_code=403, detail="Delegated promotion permission denied")
+    try:
+        promotion = SubscriptionPromotion(
+            creator_id=creator_id, name=payload.name,
+            eligibility=PromotionEligibility(payload.eligibility),
+            renewal_scope=PromotionRenewalScope(payload.renewal_scope), enabled=payload.enabled,
+            start_at=payload.start_at, end_at=payload.end_at,
+        )
+        db.add(promotion)
+        await db.flush()
+        db.add_all(SubscriptionPromotionRule(promotion_id=promotion.id, duration=rule.duration, discount_basis_points=rule.discount_basis_points) for rule in payload.rules)
+        await record_event(db, "group_manager.subscription_promotion_created", actor_user_id=identity[0].id, target_type="subscription_promotion", target_id=str(promotion.id))
+        await db.commit()
+        return {"id": str(promotion.id), "creator_id": str(creator_id), "actor_user_id": str(identity[0].id)}
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid promotion") from exc
 
 
 @router.put("/managed-creators/{creator_id}/messaging-settings")
