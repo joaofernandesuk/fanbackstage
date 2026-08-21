@@ -4,7 +4,19 @@ Private messaging, paid entry/messages, PPV attachments, mass messaging, notific
 
 # 11. Messaging, Paid DMs and PPV Messages
 
-Phase 6 uses a normalized creator/viewer conversation with participant read state. Eligibility and pricing are resolved server-side; a locked attachment references the existing private media asset and is authorised only after a settled message-unlock record. Message unlocks reuse `PaymentAttempt` and the immutable ledger rather than creating a wallet or upload pipeline. Campaign recipients are snapshotted at execution time and unique per campaign to make worker replay safe.
+Phase 6 uses a normalized creator/viewer conversation with participant read state. PostgreSQL/API state is authoritative; realtime delivery is optional and the inbox always polls the REST API after opening a conversation and on a bounded interval. Eligibility and pricing are resolved server-side; a locked attachment references the existing private media asset and is authorised only after a settled message-unlock record. Message unlocks reuse `PaymentAttempt` and the immutable ledger rather than creating a wallet or upload pipeline. Campaign recipients are snapshotted when the campaign is created and unique per campaign to make worker replay safe.
+
+## Phase 6 security and financial boundaries
+
+- A client may request a message or attachment purchase but cannot supply its amount, currency, commission, recipient or entitlement scope. The server snapshots the current creator configuration into the pending commercial record.
+- Pay-to-send creates no delivered message before provider-verified settlement. Its refund is an immutable compensating ledger entry and never erases delivered communication.
+- A paid attachment unlock is scoped to one `MessageAttachment` and one `MediaAsset`. It grants no creator-wide or content-wide access. A refund similarly posts a compensating entry and immediately changes that unlock out of the access resolver's paid state.
+- Locked attachment previews are restricted to conversation participants and use preview derivatives only. Full media is delivered through the central media access resolver only after the attachment-specific purchase is settled.
+- Creator settings apply to future actions only. Pending sends and unlock purchases retain immutable price and commission snapshots.
+- Campaign schedules are future, timezone-aware UTC instants. Due campaigns are locked in PostgreSQL, recipient rows are unique, and replay skips every existing delivery. A block always overrides a snapshotted recipient at delivery time.
+- Private-message reports are participant-only. Moderator text access requires moderation permission and a documented reason, and emits the `message.moderator_accessed` audit event. It does not expose protected media originals.
+- Archive and mute are per-user inbox state only. They do not change conversation history, access ownership, or financial records. Read state is stored per conversation participant.
+- Messaging writes are independently Redis-rate-limited by authenticated actor and action. The authoritative business authorisation checks still run for every request.
 
 
 ## 11.1 Messaging permissions
