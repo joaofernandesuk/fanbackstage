@@ -105,7 +105,9 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
     assert credits[LedgerAccountKind.platform_revenue] == 400
     assert credits[LedgerAccountKind.creator_pending] == 800
     assert credits[LedgerAccountKind.group_pending] == 800
-    dashboard_after_ppv = await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+    dashboard_after_ppv = await groups.group_financial_dashboard(
+        db_session, group.id, manager, "EUR"
+    )
     assert dashboard_after_ppv["pending_amount_minor"] == 800
     assert dashboard_after_ppv["source_amounts_minor"]["ppv"] == 800
 
@@ -218,8 +220,12 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
     historical_purchase = await finance.initiate_purchase(
         db_session, historical_buyer, content.id, "historical-before-exit"
     )
-    historical_attempt = await db_session.get(PaymentAttempt, historical_purchase.payment_attempt_id)
-    historical_payload, historical_signature = finance.development_webhook_payload(historical_attempt)
+    historical_attempt = await db_session.get(
+        PaymentAttempt, historical_purchase.payment_attempt_id
+    )
+    historical_payload, historical_signature = finance.development_webhook_payload(
+        historical_attempt
+    )
     historical_settled = await finance.process_development_webhook(
         db_session, historical_payload, historical_signature
     )
@@ -264,7 +270,9 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
     assert refund_ledger.metadata_json["original_group_contract_id"] == str(active.id)
     # Leave is a future-only boundary: the group keeps its immutable historical
     # earnings, while a later paid event credits the creator's full post-fee pool.
-    group_before_exit_sale = await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+    group_before_exit_sale = await groups.group_financial_dashboard(
+        db_session, group.id, manager, "EUR"
+    )
     post_exit_buyer, _ = await accounts.register(
         db_session, "post-exit-buyer@example.com", "strong-password-123", None
     )
@@ -277,7 +285,9 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
         db_session, post_exit_payload, post_exit_signature
     )
     assert post_exit_settled and post_exit_settled.ledger_transaction_id
-    post_exit_ledger = await db_session.get(LedgerTransaction, post_exit_settled.ledger_transaction_id)
+    post_exit_ledger = await db_session.get(
+        LedgerTransaction, post_exit_settled.ledger_transaction_id
+    )
     assert post_exit_ledger and post_exit_ledger.metadata_json["group_amount_minor"] == "0"
     assert post_exit_ledger.metadata_json["creator_amount_minor"] == "1600"
     assert (
@@ -344,8 +354,12 @@ async def test_contract_amendments_change_only_future_financial_allocations(db_s
     assert after_acceptance.metadata_json["group_contract_version"] == "3"
     # The ledger stores the accepted event-time split; neither a rejection nor
     # the later acceptance can mutate those earlier financial records.
-    assert (await db_session.get(LedgerTransaction, before.id)).metadata_json == before.metadata_json
-    assert (await db_session.get(LedgerTransaction, pending.id)).metadata_json == pending.metadata_json
+    assert (
+        await db_session.get(LedgerTransaction, before.id)
+    ).metadata_json == before.metadata_json
+    assert (
+        await db_session.get(LedgerTransaction, pending.id)
+    ).metadata_json == pending.metadata_json
 
 
 @pytest.mark.asyncio
@@ -387,7 +401,10 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
     await db_session.flush()
     identity = (manager, None)
     result = await group_routes.update_managed_creator_profile(
-        creator.id, CreatorProfileUpdate(display_name="Manager-set display name"), identity, db_session
+        creator.id,
+        CreatorProfileUpdate(display_name="Manager-set display name"),
+        identity,
+        db_session,
     )
     assert result["owner_creator_id"] == str(creator.id)
     assert result["actor_user_id"] == str(manager.id)
@@ -395,10 +412,14 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
         creator.id, CreatorLiveSettingsInput(one_to_one_price_minor=777), identity, db_session
     )
     assert settings.one_to_one_price_minor == 777
-    assert (await group_routes.managed_creator_earnings(creator.id, identity, db_session))["creator_id"] == str(creator.id)
+    assert (await group_routes.managed_creator_earnings(creator.id, identity, db_session))[
+        "creator_id"
+    ] == str(creator.id)
     with pytest.raises(HTTPException, match="Delegated earnings permission denied"):
         await group_routes.managed_creator_earnings(unrelated_creator.id, identity, db_session)
-    assert (await group_routes.managed_creator_analytics(creator.id, identity, db_session))["creator_id"] == str(creator.id)
+    assert (await group_routes.managed_creator_analytics(creator.id, identity, db_session))[
+        "creator_id"
+    ] == str(creator.id)
     with pytest.raises(HTTPException, match="Delegated analytics permission denied"):
         await group_routes.managed_creator_analytics(unrelated_creator.id, identity, db_session)
     with pytest.raises(HTTPException, match="Delegated profile permission denied"):
@@ -409,7 +430,11 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
             db_session,
         )
     events = set(
-        (await db_session.scalars(select(AuditEvent.event_type).where(AuditEvent.actor_user_id == manager.id))).all()
+        (
+            await db_session.scalars(
+                select(AuditEvent.event_type).where(AuditEvent.actor_user_id == manager.id)
+            )
+        ).all()
     )
     assert {"group_manager.profile_updated", "group_manager.live_settings_updated"} <= events
     await groups.leave_membership(db_session, membership.id, creator_user)

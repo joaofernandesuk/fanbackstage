@@ -271,17 +271,26 @@ async def update_managed_creator_profile(
             db, creator, payload.model_dump(exclude_unset=True), identity[0].id
         )
         await record_event(
-            db, "group_manager.profile_updated", actor_user_id=identity[0].id,
-            target_type="creator_profile", target_id=str(creator.id),
+            db,
+            "group_manager.profile_updated",
+            actor_user_id=identity[0].id,
+            target_type="creator_profile",
+            target_id=str(creator.id),
         )
         await db.commit()
-        return {"id": str(creator.id), "owner_creator_id": str(creator.id), "actor_user_id": str(identity[0].id)}
+        return {
+            "id": str(creator.id),
+            "owner_creator_id": str(creator.id),
+            "actor_user_id": str(identity[0].id),
+        }
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.patch("/managed-creators/{creator_id}/live-settings", response_model=CreatorLiveSettingsResponse)
+@router.patch(
+    "/managed-creators/{creator_id}/live-settings", response_model=CreatorLiveSettingsResponse
+)
 async def update_managed_creator_live_settings(
     creator_id: UUID, payload: CreatorLiveSettingsInput, identity: CurrentIdentity, db: Db
 ) -> CreatorLiveSettingsResponse:
@@ -293,11 +302,22 @@ async def update_managed_creator_live_settings(
     settings = await streaming_service.settings_for_creator(db, creator.id)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(settings, field, currency_code(value) if field == "currency" and value else value)
-    if settings.max_authorization_minor < settings.one_to_one_price_minor * settings.minimum_minutes or settings.max_authorization_minor < settings.two_to_one_price_minor * settings.minimum_minutes:
-        raise HTTPException(status_code=400, detail="Authorization cap must cover the 1-to-1 and 2-to-1 minimum charge")
+    if (
+        settings.max_authorization_minor
+        < settings.one_to_one_price_minor * settings.minimum_minutes
+        or settings.max_authorization_minor
+        < settings.two_to_one_price_minor * settings.minimum_minutes
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Authorization cap must cover the 1-to-1 and 2-to-1 minimum charge",
+        )
     await record_event(
-        db, "group_manager.live_settings_updated", actor_user_id=identity[0].id,
-        target_type="creator_profile", target_id=str(creator.id),
+        db,
+        "group_manager.live_settings_updated",
+        actor_user_id=identity[0].id,
+        target_type="creator_profile",
+        target_id=str(creator.id),
     )
     await db.commit()
     return CreatorLiveSettingsResponse(
@@ -320,12 +340,25 @@ async def update_managed_subscription_plan(
         raise HTTPException(status_code=403, detail="Delegated subscription permission denied")
     try:
         plan = await subscription_service.configure_plan(
-            db, creator_id, payload.currency, payload.enabled,
+            db,
+            creator_id,
+            payload.currency,
+            payload.enabled,
             [price.model_dump() for price in payload.prices],
         )
-        await record_event(db, "group_manager.subscription_plan_updated", actor_user_id=identity[0].id, target_type="subscription_plan", target_id=str(plan.id))
+        await record_event(
+            db,
+            "group_manager.subscription_plan_updated",
+            actor_user_id=identity[0].id,
+            target_type="subscription_plan",
+            target_id=str(plan.id),
+        )
         await db.commit()
-        return {"id": str(plan.id), "creator_id": str(creator_id), "actor_user_id": str(identity[0].id)}
+        return {
+            "id": str(plan.id),
+            "creator_id": str(creator_id),
+            "actor_user_id": str(identity[0].id),
+        }
     except (subscription_service.SubscriptionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -341,17 +374,37 @@ async def create_managed_subscription_promotion(
         raise HTTPException(status_code=403, detail="Delegated promotion permission denied")
     try:
         promotion = SubscriptionPromotion(
-            creator_id=creator_id, name=payload.name,
+            creator_id=creator_id,
+            name=payload.name,
             eligibility=PromotionEligibility(payload.eligibility),
-            renewal_scope=PromotionRenewalScope(payload.renewal_scope), enabled=payload.enabled,
-            start_at=payload.start_at, end_at=payload.end_at,
+            renewal_scope=PromotionRenewalScope(payload.renewal_scope),
+            enabled=payload.enabled,
+            start_at=payload.start_at,
+            end_at=payload.end_at,
         )
         db.add(promotion)
         await db.flush()
-        db.add_all(SubscriptionPromotionRule(promotion_id=promotion.id, duration=rule.duration, discount_basis_points=rule.discount_basis_points) for rule in payload.rules)
-        await record_event(db, "group_manager.subscription_promotion_created", actor_user_id=identity[0].id, target_type="subscription_promotion", target_id=str(promotion.id))
+        db.add_all(
+            SubscriptionPromotionRule(
+                promotion_id=promotion.id,
+                duration=rule.duration,
+                discount_basis_points=rule.discount_basis_points,
+            )
+            for rule in payload.rules
+        )
+        await record_event(
+            db,
+            "group_manager.subscription_promotion_created",
+            actor_user_id=identity[0].id,
+            target_type="subscription_promotion",
+            target_id=str(promotion.id),
+        )
         await db.commit()
-        return {"id": str(promotion.id), "creator_id": str(creator_id), "actor_user_id": str(identity[0].id)}
+        return {
+            "id": str(promotion.id),
+            "creator_id": str(creator_id),
+            "actor_user_id": str(identity[0].id),
+        }
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail="Invalid promotion") from exc
@@ -368,13 +421,27 @@ async def update_managed_messaging_settings(
     settings = await messaging_service.settings_for_creator(db, creator_id)
     settings.permission = MessagingPermission(payload.permission)
     settings.send_fee_minor = payload.send_fee_minor
-    settings.send_fee_currency = payload.send_fee_currency.upper() if payload.send_fee_currency else None
+    settings.send_fee_currency = (
+        payload.send_fee_currency.upper() if payload.send_fee_currency else None
+    )
     settings.subscribers_free = payload.subscribers_free
     if bool(settings.send_fee_minor) != bool(settings.send_fee_currency):
-        raise HTTPException(status_code=400, detail="A send-fee currency is required with a send fee")
-    await record_event(db, "group_manager.messaging_settings_updated", actor_user_id=identity[0].id, target_type="creator_profile", target_id=str(creator_id))
+        raise HTTPException(
+            status_code=400, detail="A send-fee currency is required with a send fee"
+        )
+    await record_event(
+        db,
+        "group_manager.messaging_settings_updated",
+        actor_user_id=identity[0].id,
+        target_type="creator_profile",
+        target_id=str(creator_id),
+    )
     await db.commit()
-    return {"creator_id": str(creator_id), "actor_user_id": str(identity[0].id), "permission": settings.permission.value}
+    return {
+        "creator_id": str(creator_id),
+        "actor_user_id": str(identity[0].id),
+        "permission": settings.permission.value,
+    }
 
 
 @router.get("/managed-creators/{creator_id}/earnings")
@@ -385,7 +452,12 @@ async def managed_creator_earnings(
         db, identity[0].id, creator_id, GroupPermission.view_earnings
     ):
         raise HTTPException(status_code=403, detail="Delegated earnings permission denied")
-    return {**(await finance_service.creator_financial_summary(db, creator_id, currency)), "currency": currency_code(currency), "creator_id": str(creator_id), "actor_user_id": str(identity[0].id)}
+    return {
+        **(await finance_service.creator_financial_summary(db, creator_id, currency)),
+        "currency": currency_code(currency),
+        "creator_id": str(creator_id),
+        "actor_user_id": str(identity[0].id),
+    }
 
 
 @router.get("/managed-creators/{creator_id}/analytics")
@@ -394,13 +466,22 @@ async def managed_creator_analytics(creator_id: UUID, identity: CurrentIdentity,
         db, identity[0].id, creator_id, GroupPermission.view_analytics
     ):
         raise HTTPException(status_code=403, detail="Delegated analytics permission denied")
-    followers = await db.scalar(select(func.count()).select_from(Follow).where(Follow.creator_id == creator_id))
+    followers = await db.scalar(
+        select(func.count()).select_from(Follow).where(Follow.creator_id == creator_id)
+    )
     active_subscribers = await db.scalar(
-        select(func.count()).select_from(Subscription).where(
+        select(func.count())
+        .select_from(Subscription)
+        .where(
             Subscription.creator_id == creator_id, Subscription.status == SubscriptionStatus.active
         )
     )
-    return {"creator_id": str(creator_id), "actor_user_id": str(identity[0].id), "followers": int(followers or 0), "active_subscribers": int(active_subscribers or 0)}
+    return {
+        "creator_id": str(creator_id),
+        "actor_user_id": str(identity[0].id),
+        "followers": int(followers or 0),
+        "active_subscribers": int(active_subscribers or 0),
+    }
 
 
 @router.get("/mine/memberships", response_model=list[MembershipResponse])

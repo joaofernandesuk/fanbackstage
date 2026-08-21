@@ -198,35 +198,70 @@ async def social_reports(
     result = []
     for row in rows:
         target = await db.get(FeedPost if row.target_type == "post" else PostComment, row.target_id)
-        result.append({"id": str(row.id), "target_type": row.target_type, "target_id": str(row.target_id), "reason": row.reason, "details": row.details, "status": row.status.value, "created_at": row.created_at, "target_exists": target is not None, "target_preview": (target.body[:240] if target else None)})
+        result.append(
+            {
+                "id": str(row.id),
+                "target_type": row.target_type,
+                "target_id": str(row.target_id),
+                "reason": row.reason,
+                "details": row.details,
+                "status": row.status.value,
+                "created_at": row.created_at,
+                "target_exists": target is not None,
+                "target_preview": (target.body[:240] if target else None),
+            }
+        )
     return result
 
 
 @router.post("/social-reports/{report_id}/dismiss", response_model=MessageResponse)
-async def dismiss_social_report(report_id: str, identity: CurrentIdentity, db: Db) -> MessageResponse:
+async def dismiss_social_report(
+    report_id: str, identity: CurrentIdentity, db: Db
+) -> MessageResponse:
     authorize(identity[0], Permission.MODERATION_ACCESS)
     report = await db.get(SocialReport, report_id)
-    if not report: raise HTTPException(404, "Report not found")
+    if not report:
+        raise HTTPException(404, "Report not found")
     report.status = ReportStatus.dismissed
-    await record_event(db, "social_report.dismissed", actor_user_id=identity[0].id, target_type="social_report", target_id=str(report.id))
+    await record_event(
+        db,
+        "social_report.dismissed",
+        actor_user_id=identity[0].id,
+        target_type="social_report",
+        target_id=str(report.id),
+    )
     await db.commit()
     return MessageResponse(message="Report dismissed")
 
 
 @router.post("/social-reports/{report_id}/remove-target", response_model=MessageResponse)
-async def remove_social_target(report_id: str, identity: CurrentIdentity, db: Db) -> MessageResponse:
+async def remove_social_target(
+    report_id: str, identity: CurrentIdentity, db: Db
+) -> MessageResponse:
     authorize(identity[0], Permission.MODERATION_ACCESS)
     report = await db.get(SocialReport, report_id)
-    if not report: raise HTTPException(404, "Report not found")
-    target = await db.get(FeedPost if report.target_type == "post" else PostComment, report.target_id)
-    if not target: raise HTTPException(404, "Report target not found")
+    if not report:
+        raise HTTPException(404, "Report not found")
+    target = await db.get(
+        FeedPost if report.target_type == "post" else PostComment, report.target_id
+    )
+    if not target:
+        raise HTTPException(404, "Report target not found")
     if report.target_type == "post":
         target.status = FeedPostStatus.removed
         target.moderation_status = ModerationStatus.removed
     else:
         from datetime import UTC, datetime
+
         target.hidden_at = datetime.now(UTC)
     report.status = ReportStatus.reviewed
-    await record_event(db, "social_report.target_removed", actor_user_id=identity[0].id, target_type=report.target_type, target_id=str(report.target_id), metadata={"report_id": str(report.id)})
+    await record_event(
+        db,
+        "social_report.target_removed",
+        actor_user_id=identity[0].id,
+        target_type=report.target_type,
+        target_id=str(report.target_id),
+        metadata={"report_id": str(report.id)},
+    )
     await db.commit()
     return MessageResponse(message="Reported target removed")
