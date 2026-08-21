@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
+from app.core.config import get_settings
 from app.core.rate_limit import enforce_streaming_rate_limit
 from app.models.streaming import (
     LiveAccessMode,
@@ -103,7 +104,11 @@ async def room_token(room_id: UUID, request: Request, identity: CurrentIdentity,
         await enforce_streaming_rate_limit(request, str(identity[0].id), "live_token")
         room, token = await service.issue_live_token(db, identity[0], room_id)
         await db.commit()
-        return {"room_id": str(room.id), "provider_url": "livekit", "token": token}
+        return {
+            "room_id": str(room.id),
+            "provider_url": get_settings().livekit_url,
+            "token": token,
+        }
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(403, str(exc)) from exc
@@ -117,7 +122,11 @@ async def private_session_token(
         await enforce_streaming_rate_limit(request, str(identity[0].id), "private_live_token")
         session, token = await service.issue_private_token(db, identity[0], session_id)
         await db.commit()
-        return ProviderTokenResponse(room_id=session.id, provider_url="livekit", token=token)
+        return ProviderTokenResponse(
+            room_id=session.id,
+            provider_url=get_settings().livekit_url,
+            token=token,
+        )
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(403, str(exc)) from exc
