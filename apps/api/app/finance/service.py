@@ -289,9 +289,20 @@ async def process_development_webhook(
             if pending_send:
                 await settle_paid_send(db, pending_send)
             else:
-                from app.subscriptions.service import settle_payment_attempt
+                from app.models.streaming import PrivateSession
+                from app.streaming.service import authorize_private_session
 
-                await settle_payment_attempt(db, attempt)
+                session = await db.scalar(
+                    select(PrivateSession)
+                    .where(PrivateSession.payment_attempt_id == attempt.id)
+                    .with_for_update()
+                )
+                if session:
+                    await authorize_private_session(db, session)
+                else:
+                    from app.subscriptions.service import settle_payment_attempt
+
+                    await settle_payment_attempt(db, attempt)
     webhook_event.processed_at = datetime.now(UTC)
     return purchase
 

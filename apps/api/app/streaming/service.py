@@ -10,10 +10,18 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
+from app.core.config import get_settings
+from app.finance import service as finance
 from app.finance.service import currency_code, ppv_commission
 from app.integrations.streaming import LiveKitStreamingProvider
 from app.media.service import approved_creator
 from app.models.creator import CreatorProfile
+from app.models.finance import (
+    LedgerAccountKind,
+    LedgerDirection,
+    LedgerTransactionType,
+    PaymentAttempt,
+)
 from app.models.identity import User
 from app.models.messaging import UserBlock
 from app.models.streaming import (
@@ -338,6 +346,17 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
     )
     db.add(session)
     await db.flush()
+    attempt = PaymentAttempt(
+        buyer_user_id=request.requester_user_id,
+        provider=get_settings().payment_provider,
+        provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
+        amount_minor=request.max_authorization_minor,
+        currency=request.currency,
+        idempotency_key=f"private_session:{request.id}",
+    )
+    db.add(attempt)
+    await db.flush()
+    session.payment_attempt_id = attempt.id
     db.add_all(
         [
             SessionParticipant(
@@ -367,6 +386,20 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
         db,
         "private_session.accepted",
         actor_user_id=actor.id,
+        target_type="private_session",
+        target_id=str(session.id),
+    )
+    return session
+
+
+async def authorize_private_session(db: AsyncSession, session: PrivateSession) -> PrivateSession:
+    if session.status is not PrivateSessionStatus.awaiting_payment_authorization:
+        return session
+    session.status, session.ready_at = PrivateSessionStatus.ready, datetime.now(UTC)
+    await record_event(
+        db,
+        "private_session.authorized",
+        actor_user_id=session.payer_user_id,
         target_type="private_session",
         target_id=str(session.id),
     )
@@ -445,3 +478,54 @@ async def private_participant_disconnected(
 def settlement_amount(session: PrivateSession) -> int:
     elapsed_charge = (session.per_minute_price_minor * session.billable_seconds + 59) // 60
     return min(session.max_authorization_minor, max(session.minimum_charge_minor, elapsed_charge))
+
+
+async def settle_private_session(db: AsyncSession, session: PrivateSession) -> PrivateSession:
+    if session.status is PrivateSessionStatus.settled:
+        return session
+    if session.status not in (PrivateSessionStatus.ended, PrivateSessionStatus.ending):
+        raise StreamingError("Only ended private sessions can settle")
+    gross = settlement_amount(session)
+    fee, creator_amount = finance.commission_amount(gross, session.commission_basis_points)
+    clearing = await finance._account(db, LedgerAccountKind.platform_clearing, session.currency)
+    revenue = await finance._account(db, LedgerAccountKind.platform_revenue, session.currency)
+    earnings = await finance._account(
+        db, LedgerAccountKind.creator_pending, session.currency, session.creator_id
+    )
+    ledger = await finance.post_entries(
+        db,
+        transaction_type=LedgerTransactionType.private_live_session,
+        currency=session.currency,
+        idempotency_key=f"private_session:{session.id}",
+        reference=f"private_session:{session.id}",
+        entries=[
+            (clearing, LedgerDirection.debit, gross),
+            (revenue, LedgerDirection.credit, fee),
+            (earnings, LedgerDirection.credit, creator_amount),
+        ],
+        metadata={
+            "private_session_id": str(session.id),
+            "billable_seconds": str(session.billable_seconds),
+        },
+    )
+    from app.models.streaming import PrivateSessionSettlement
+
+    settlement = await db.scalar(
+        select(PrivateSessionSettlement).where(
+            PrivateSessionSettlement.private_session_id == session.id
+        )
+    )
+    if settlement is None:
+        db.add(
+            PrivateSessionSettlement(
+                private_session_id=session.id,
+                gross_amount_minor=gross,
+                platform_fee_minor=fee,
+                creator_amount_minor=creator_amount,
+                currency=session.currency,
+                billable_seconds=session.billable_seconds,
+                ledger_transaction_id=ledger.id,
+            )
+        )
+    session.status = PrivateSessionStatus.settled
+    return session

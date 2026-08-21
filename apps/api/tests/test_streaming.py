@@ -47,7 +47,7 @@ async def test_private_requests_queue_during_live_but_cannot_be_accepted_until_l
     await streaming.end_live(db_session, owner, room.id)
     session = await streaming.accept_private_request(db_session, owner, queued.id)
     assert session.status is PrivateSessionStatus.awaiting_payment_authorization
-    assert session.payment_attempt_id is None
+    assert session.payment_attempt_id is not None
     assert session.provider_room_name
 
 
