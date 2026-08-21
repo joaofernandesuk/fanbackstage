@@ -238,6 +238,27 @@ async def messages(
     return [response(row) for row in rows]
 
 
+@router.get("/conversations/{conversation_id}/attachments", response_model=list[dict])
+async def conversation_attachments(
+    conversation_id: UUID, identity: CurrentIdentity, db: Db
+) -> list[dict]:
+    conversation = await db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found")
+    try:
+        await service.assert_participant(db, conversation, identity[0])
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    rows = (
+        await db.execute(
+            select(MessageAttachment.id, MessageAttachment.message_id)
+            .join(Message, Message.id == MessageAttachment.message_id)
+            .where(Message.conversation_id == conversation_id)
+        )
+    ).all()
+    return [{"id": str(row.id), "message_id": str(row.message_id)} for row in rows]
+
+
 @router.post("/conversations/{conversation_id}/read", status_code=204)
 async def read(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
     try:

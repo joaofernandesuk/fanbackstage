@@ -2,10 +2,14 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select
+from starlette.requests import Request
 
 from app.accounts import service as accounts
 from app.content.access import can_access_asset
+from app.core.config import get_settings
+from app.core.rate_limit import enforce_messaging_rate_limit
 from app.creators import service as creators
 from app.finance import service as finance
 from app.main import app
@@ -458,6 +462,25 @@ async def test_due_campaign_worker_replay_cannot_duplicate_recipient_messages(db
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_messaging_write_rate_limit_is_scoped_to_the_messaging_action():
+    settings = get_settings()
+    original_attempts = settings.messaging_rate_limit_attempts
+    original_window = settings.messaging_rate_limit_window_seconds
+    settings.messaging_rate_limit_attempts = 1
+    settings.messaging_rate_limit_window_seconds = 60
+    request = Request({"type": "http", "client": ("127.0.0.1", 50000), "headers": []})
+    try:
+        await enforce_messaging_rate_limit(request, "rate-limit-user", "send")
+        await enforce_messaging_rate_limit(request, "rate-limit-user", "report")
+        with pytest.raises(HTTPException) as limited:
+            await enforce_messaging_rate_limit(request, "rate-limit-user", "send")
+        assert limited.value.status_code == 429
+    finally:
+        settings.messaging_rate_limit_attempts = original_attempts
+        settings.messaging_rate_limit_window_seconds = original_window
 
 
 @pytest.mark.asyncio
