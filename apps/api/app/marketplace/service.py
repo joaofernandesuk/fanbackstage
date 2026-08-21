@@ -31,6 +31,7 @@ from app.models.finance import (
 from app.models.identity import User
 from app.models.marketplace import (
     MarketplaceListing,
+    MarketplaceListingMedia,
     MarketplaceListingStatus,
     MarketplaceOrder,
     MarketplaceOrderStatus,
@@ -41,6 +42,154 @@ from app.models.marketplace import (
 
 class MarketplaceError(ValueError):
     pass
+
+
+def _country_code(value: str, field: str = "Country") -> str:
+    normalized = value.upper().strip()
+    if len(normalized) != 2 or not normalized.isalpha():
+        raise MarketplaceError(f"{field} must be an ISO alpha-2 code")
+    return normalized
+
+
+async def create_listing(
+    db: AsyncSession,
+    actor: User,
+    *,
+    creator_id: UUID,
+    title: str,
+    description: str | None,
+    category: str,
+    condition: str,
+    quantity_available: int,
+    price_amount_minor: int,
+    currency: str,
+    shipping_mode: str,
+    origin_country_code: str,
+    shipping_charged_minor: int,
+    media_asset_ids: list[UUID],
+) -> MarketplaceListing:
+    """Create a creator-owned physical listing; actor attribution never changes ownership."""
+    from app.models.content import MediaAsset, MediaStatus
+    from app.models.creator import CreatorProfile
+    from app.models.marketplace import MarketplaceCondition, MarketplaceShippingMode
+
+    if not title.strip() or not category.strip():
+        raise MarketplaceError("Listing title and category are required")
+    if quantity_available < 0 or price_amount_minor <= 0 or shipping_charged_minor < 0:
+        raise MarketplaceError("Listing stock, price, or shipping charge is invalid")
+    if len(media_asset_ids) != len(set(media_asset_ids)) or len(media_asset_ids) > 12:
+        raise MarketplaceError("Listing media must be unique and limited to 12 assets")
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator:
+        raise MarketplaceError("Creator not found")
+    if actor.id != creator.user_id:
+        from app.groups.service import has_delegated_permission
+        from app.models.groups import GroupPermission
+
+        if not await has_delegated_permission(
+            db, actor.id, creator_id, GroupPermission.manage_marketplace
+        ):
+            raise PermissionError("Delegated marketplace permission denied")
+    try:
+        listing_condition = MarketplaceCondition(condition)
+        listing_shipping_mode = MarketplaceShippingMode(shipping_mode)
+    except ValueError as exc:
+        raise MarketplaceError("Listing condition or shipping mode is invalid") from exc
+    assets = []
+    if media_asset_ids:
+        assets = (
+            await db.scalars(
+                select(MediaAsset).where(
+                    MediaAsset.id.in_(media_asset_ids),
+                    MediaAsset.owner_creator_id == creator_id,
+                    MediaAsset.status == MediaStatus.ready,
+                    MediaAsset.moderation_status == ModerationStatus.approved,
+                )
+            )
+        ).all()
+        if len(assets) != len(media_asset_ids):
+            raise MarketplaceError("Listing media must be approved creator-owned media")
+    listing = MarketplaceListing(
+        public_id=f"ml_{secrets.token_urlsafe(12)}",
+        owner_creator_id=creator_id,
+        created_by_user_id=actor.id,
+        title=title.strip(),
+        description=description.strip() if description else None,
+        category=category.strip().lower(),
+        condition=listing_condition,
+        quantity_available=quantity_available,
+        price_amount_minor=price_amount_minor,
+        currency=currency_code(currency),
+        shipping_mode=listing_shipping_mode,
+        origin_country_code=_country_code(origin_country_code, "Origin country"),
+        shipping_charged_minor=shipping_charged_minor,
+    )
+    db.add(listing)
+    await db.flush()
+    db.add_all(
+        MarketplaceListingMedia(listing_id=listing.id, media_asset_id=asset_id, position=position)
+        for position, asset_id in enumerate(media_asset_ids)
+    )
+    await record_event(
+        db,
+        "marketplace.listing_created",
+        actor_user_id=actor.id,
+        target_type="marketplace_listing",
+        target_id=str(listing.id),
+        metadata={"owner_creator_id": str(creator_id)},
+    )
+    return listing
+
+
+async def submit_listing_for_review(
+    db: AsyncSession, actor: User, listing_id: UUID, creator_id: UUID
+) -> MarketplaceListing:
+    listing = await db.scalar(
+        select(MarketplaceListing)
+        .where(
+            MarketplaceListing.id == listing_id, MarketplaceListing.owner_creator_id == creator_id
+        )
+        .with_for_update()
+    )
+    if not listing:
+        raise MarketplaceError("Marketplace listing not found")
+    if listing.status not in {MarketplaceListingStatus.draft, MarketplaceListingStatus.paused}:
+        raise MarketplaceError("Listing cannot be submitted for review")
+    listing.status = MarketplaceListingStatus.pending_review
+    listing.moderation_status = ModerationStatus.queued
+    await record_event(
+        db,
+        "marketplace.listing_submitted",
+        actor_user_id=actor.id,
+        target_type="marketplace_listing",
+        target_id=str(listing.id),
+        metadata={"owner_creator_id": str(creator_id)},
+    )
+    return listing
+
+
+async def decide_listing_moderation(
+    db: AsyncSession, actor: User, listing_id: UUID, approved: bool
+) -> MarketplaceListing:
+    listing = await db.scalar(
+        select(MarketplaceListing).where(MarketplaceListing.id == listing_id).with_for_update()
+    )
+    if not listing or listing.status is not MarketplaceListingStatus.pending_review:
+        raise MarketplaceError("Marketplace listing is not awaiting review")
+    listing.moderation_status = ModerationStatus.approved if approved else ModerationStatus.rejected
+    listing.status = (
+        MarketplaceListingStatus.published if approved else MarketplaceListingStatus.rejected
+    )
+    listing.published_at = datetime.now(UTC) if approved else None
+    await record_event(
+        db,
+        "marketplace.listing_moderated",
+        actor_user_id=actor.id,
+        target_type="marketplace_listing",
+        target_id=str(listing.id),
+        metadata={"approved": approved, "owner_creator_id": str(listing.owner_creator_id)},
+    )
+    return listing
 
 
 def shipping_treatment(

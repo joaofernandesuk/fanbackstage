@@ -19,3 +19,60 @@ class ShippingAllowanceResponse(BaseModel):
     currency: str
     allowed_shipping_minor: int
     active: bool
+
+
+class MarketplaceListingCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=5000)
+    category: str = Field(min_length=1, max_length=80)
+    condition: str
+    quantity_available: int = Field(ge=0, le=1_000_000)
+    price_amount_minor: int = Field(gt=0, le=2_147_483_647)
+    currency: str = Field(min_length=3, max_length=3)
+    shipping_mode: str
+    origin_country_code: str = Field(min_length=2, max_length=2)
+    shipping_charged_minor: int = Field(ge=0, le=2_147_483_647)
+    media_asset_ids: list[UUID] = Field(default_factory=list, max_length=12)
+
+
+class MarketplaceListingResponse(BaseModel):
+    id: UUID
+    public_id: str
+    owner_creator_id: UUID
+    title: str
+    description: str | None
+    category: str
+    condition: str
+    status: str
+    quantity_available: int
+    price_amount_minor: int
+    currency: str
+    shipping_mode: str
+    origin_country_code: str
+    shipping_charged_minor: int
+
+
+class MarketplaceCheckoutInput(BaseModel):
+    quantity: int = Field(gt=0, le=1_000)
+    destination_country_code: str = Field(min_length=2, max_length=2)
+    destination_region_code: str | None = Field(default=None, min_length=1, max_length=16)
+
+
+class MarketplaceOrderResponse(BaseModel):
+    id: UUID
+    public_id: str
+    listing_id: UUID
+    status: str
+    quantity: int
+    currency: str
+    item_subtotal_minor: int
+    shipping_charged_minor: int
+    shipping_allowance_minor: int
+    shipping_pass_through_minor: int
+    shipping_excess_minor: int
+    commissionable_base_minor: int
+    platform_fee_minor: int
+    creator_amount_minor: int
+    group_amount_minor: int
+    total_paid_minor: int
+    payment_attempt_id: UUID

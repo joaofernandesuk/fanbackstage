@@ -237,7 +237,8 @@ async def test_admin_allowance_precedence_authorization_and_audit(db_session):
     events = (
         await db_session.scalars(
             select(AuditEvent).where(
-                AuditEvent.target_id == str(region_override.id), AuditEvent.actor_user_id == admin.id
+                AuditEvent.target_id == str(region_override.id),
+                AuditEvent.actor_user_id == admin.id,
             )
         )
     ).all()
@@ -293,3 +294,61 @@ async def test_admin_change_applies_only_to_new_checkout_snapshots(db_session):
     assert second.shipping_allowance_minor == 100
     assert second.shipping_pass_through_minor == 100
     assert second.shipping_excess_minor == 900
+
+
+@pytest.mark.asyncio
+async def test_listing_ownership_delegation_and_stock_reservation(db_session):
+    manager, _ = await accounts.register(
+        db_session, "listing-manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "listing-creator@example.com")
+    buyer_a, _ = await accounts.register(
+        db_session, "listing-buyer-a@example.com", "strong-password-123", None
+    )
+    buyer_b, _ = await accounts.register(
+        db_session, "listing-buyer-b@example.com", "strong-password-123", None
+    )
+    group = await groups.create_group(
+        db_session, manager, "Listing group", "listing-group", 10_000, None
+    )
+    membership = await groups.invite_creator(
+        db_session,
+        group.id,
+        manager,
+        creator.id,
+        10_000,
+        [GroupPermission.manage_marketplace],
+    )
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    created = await marketplace.create_listing(
+        db_session,
+        manager,
+        creator_id=creator.id,
+        title="One-off item",
+        description=None,
+        category="collectible",
+        condition="used",
+        quantity_available=1,
+        price_amount_minor=500,
+        currency="EUR",
+        shipping_mode="worldwide",
+        origin_country_code="PT",
+        shipping_charged_minor=100,
+        media_asset_ids=[],
+    )
+    assert created.owner_creator_id == creator.id
+    assert created.created_by_user_id == manager.id
+    await marketplace.submit_listing_for_review(db_session, creator_user, created.id, creator.id)
+    # Direct service use in this focused state test simulates the authorized
+    # moderation route; public availability is never client-selected.
+    created.status = MarketplaceListingStatus.published
+    created.moderation_status = ModerationStatus.approved
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AE")
+    first = await marketplace.initiate_order(
+        db_session, buyer_a, created.id, 1, "AE", "single-stock-a"
+    )
+    assert first.quantity == 1
+    assert created.quantity_available == 0
+    with pytest.raises(marketplace.MarketplaceError, match="sold out"):
+        await marketplace.initiate_order(db_session, buyer_b, created.id, 1, "AE", "single-stock-b")
