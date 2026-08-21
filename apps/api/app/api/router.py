@@ -7,6 +7,7 @@ from app.api.routes import (
     content,
     creators,
     finance,
+    groups,
     health,
     media,
     messaging,
@@ -24,6 +25,7 @@ api_router.include_router(creators.router)
 api_router.include_router(media.router)
 api_router.include_router(content.router)
 api_router.include_router(finance.router)
+api_router.include_router(groups.router)
 api_router.include_router(subscriptions.router)
 api_router.include_router(social.router)
 api_router.include_router(messaging.router)

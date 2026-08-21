@@ -454,8 +454,10 @@ async def settle_message_unlock(
         return purchase
     clearing = await _account(db, LedgerAccountKind.platform_clearing, purchase.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, purchase.currency)
-    pending = await _account(
-        db, LedgerAccountKind.creator_pending, purchase.currency, purchase.seller_creator_id
+    from app.finance.service import creator_revenue_allocation
+
+    allocation_entries, allocation_metadata = await creator_revenue_allocation(
+        db, purchase.seller_creator_id, purchase.currency, purchase.creator_amount_minor
     )
     ledger = await post_entries(
         db,
@@ -466,11 +468,12 @@ async def settle_message_unlock(
         entries=[
             (clearing, LedgerDirection.debit, purchase.gross_amount_minor),
             (revenue, LedgerDirection.credit, purchase.platform_fee_minor),
-            (pending, LedgerDirection.credit, purchase.creator_amount_minor),
+            *allocation_entries,
         ],
         metadata={
             "message_unlock_purchase_id": str(purchase.id),
             "message_attachment_id": str(purchase.message_attachment_id),
+            **allocation_metadata,
         },
     )
     purchase.status, purchase.purchased_at, purchase.ledger_transaction_id = (
@@ -546,8 +549,10 @@ async def settle_paid_send(db: AsyncSession, pending: PendingMessageSend) -> Pen
     )
     clearing = await _account(db, LedgerAccountKind.platform_clearing, pending.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, pending.currency)
-    earnings = await _account(
-        db, LedgerAccountKind.creator_pending, pending.currency, pending.creator_id
+    from app.finance.service import creator_revenue_allocation
+
+    allocation_entries, allocation_metadata = await creator_revenue_allocation(
+        db, pending.creator_id, pending.currency, pending.creator_amount_minor
     )
     ledger = await post_entries(
         db,
@@ -558,9 +563,9 @@ async def settle_paid_send(db: AsyncSession, pending: PendingMessageSend) -> Pen
         entries=[
             (clearing, LedgerDirection.debit, pending.gross_amount_minor),
             (revenue, LedgerDirection.credit, pending.platform_fee_minor),
-            (earnings, LedgerDirection.credit, pending.creator_amount_minor),
+            *allocation_entries,
         ],
-        metadata={"pending_message_send_id": str(pending.id)},
+        metadata={"pending_message_send_id": str(pending.id), **allocation_metadata},
     )
     message = Message(
         conversation_id=conversation.id,

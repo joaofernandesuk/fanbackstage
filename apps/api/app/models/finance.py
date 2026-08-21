@@ -23,6 +23,8 @@ class LedgerAccountKind(str, enum.Enum):
     platform_revenue = "platform_revenue"
     creator_pending = "creator_pending"
     creator_available = "creator_available"
+    group_pending = "group_pending"
+    group_available = "group_available"
     refund_clearing = "refund_clearing"
 
 
@@ -75,6 +77,9 @@ class LedgerAccount(UUIDPrimaryKey, Timestamped, Base):
     )
     owner_creator_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("creator_profiles.id", ondelete="RESTRICT"), index=True
+    )
+    owner_group_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("groups.id", ondelete="RESTRICT"), index=True
     )
     kind: Mapped[LedgerAccountKind] = mapped_column(
         Enum(LedgerAccountKind, name="ledger_account_kind"), index=True

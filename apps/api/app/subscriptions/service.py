@@ -290,8 +290,10 @@ async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> S
         return subscription
     clearing = await _account(db, LedgerAccountKind.platform_clearing, period.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, period.currency)
-    pending = await _account(
-        db, LedgerAccountKind.creator_pending, period.currency, subscription.creator_id
+    from app.finance.service import creator_revenue_allocation
+
+    allocation_entries, allocation_metadata = await creator_revenue_allocation(
+        db, subscription.creator_id, period.currency, period.creator_amount_minor
     )
     ledger = await post_entries(
         db,
@@ -302,9 +304,13 @@ async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> S
         entries=[
             (clearing, LedgerDirection.debit, period.charged_amount_minor),
             (revenue, LedgerDirection.credit, period.platform_fee_minor),
-            (pending, LedgerDirection.credit, period.creator_amount_minor),
+            *allocation_entries,
         ],
-        metadata={"subscription_id": str(subscription.id), "period_id": str(period.id)},
+        metadata={
+            "subscription_id": str(subscription.id),
+            "period_id": str(period.id),
+            **allocation_metadata,
+        },
     )
     entitlement = (
         await db.get(ContentEntitlement, period.entitlement_id) if period.entitlement_id else None

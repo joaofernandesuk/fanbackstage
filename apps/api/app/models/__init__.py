@@ -17,6 +17,13 @@ from app.models.finance import (
     PaymentWebhookEvent,
     Purchase,
 )
+from app.models.groups import (
+    Group,
+    GroupContract,
+    GroupCreatorMembership,
+    GroupManagerMembership,
+    GroupPermissionGrant,
+)
 from app.models.identity import Role, SecurityToken, User, UserRole, UserSession
 from app.models.messaging import (
     Conversation,
@@ -80,6 +87,11 @@ __all__ = [
     "FeedPostMedia",
     "Follow",
     "Gallery",
+    "Group",
+    "GroupContract",
+    "GroupCreatorMembership",
+    "GroupManagerMembership",
+    "GroupPermissionGrant",
     "Hashtag",
     "LedgerAccount",
     "LedgerEntry",

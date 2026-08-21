@@ -78,7 +78,11 @@ async def ppv_commission(db: AsyncSession) -> int:
 
 
 async def _account(
-    db: AsyncSession, kind: LedgerAccountKind, currency: str, owner_creator_id: UUID | None = None
+    db: AsyncSession,
+    kind: LedgerAccountKind,
+    currency: str,
+    owner_creator_id: UUID | None = None,
+    owner_group_id: UUID | None = None,
 ) -> LedgerAccount:
     query = select(LedgerAccount).where(
         LedgerAccount.kind == kind, LedgerAccount.currency == currency
@@ -87,13 +91,85 @@ async def _account(
         query = query.where(LedgerAccount.owner_creator_id.is_(None))
     else:
         query = query.where(LedgerAccount.owner_creator_id == owner_creator_id)
+    if owner_group_id is None:
+        query = query.where(LedgerAccount.owner_group_id.is_(None))
+    else:
+        query = query.where(LedgerAccount.owner_group_id == owner_group_id)
     account = await db.scalar(query.with_for_update())
     if account:
         return account
-    account = LedgerAccount(kind=kind, currency=currency, owner_creator_id=owner_creator_id)
+    account = LedgerAccount(
+        kind=kind,
+        currency=currency,
+        owner_creator_id=owner_creator_id,
+        owner_group_id=owner_group_id,
+    )
     db.add(account)
     await db.flush()
     return account
+
+
+async def creator_revenue_allocation(
+    db: AsyncSession, creator_id: UUID, currency: str, creator_pool_minor: int
+) -> tuple[list[tuple[LedgerAccount, LedgerDirection, int]], dict[str, str]]:
+    """Resolve a single active contract and snapshot it in the ledger event.
+
+    This function is the only Phase 8 settlement boundary used by PPV,
+    subscriptions, messaging and private live.  A later contract amendment or
+    group exit cannot rewrite the returned ledger entries.
+    """
+    from app.groups.service import active_contract
+
+    contract = await active_contract(db, creator_id)
+    creator_amount = creator_pool_minor
+    metadata: dict[str, str] = {
+        "creator_id": str(creator_id),
+        "creator_pool_minor": str(creator_pool_minor),
+    }
+    if not contract:
+        account = await _account(db, LedgerAccountKind.creator_pending, currency, creator_id)
+        metadata.update({"creator_amount_minor": str(creator_amount), "group_amount_minor": "0"})
+        return [(account, LedgerDirection.credit, creator_amount)], metadata
+    from app.models.groups import GroupCreatorMembership
+
+    membership = await db.get(GroupCreatorMembership, contract.membership_id)
+    assert membership
+    group_amount = creator_pool_minor * contract.group_basis_points // 10_000
+    creator_amount = creator_pool_minor - group_amount
+    entries: list[tuple[LedgerAccount, LedgerDirection, int]] = []
+    if creator_amount:
+        entries.append(
+            (
+                await _account(db, LedgerAccountKind.creator_pending, currency, creator_id),
+                LedgerDirection.credit,
+                creator_amount,
+            )
+        )
+    if group_amount:
+        entries.append(
+            (
+                await _account(
+                    db,
+                    LedgerAccountKind.group_pending,
+                    currency,
+                    owner_group_id=membership.group_id,
+                ),
+                LedgerDirection.credit,
+                group_amount,
+            )
+        )
+    metadata.update(
+        {
+            "group_id": str(membership.group_id),
+            "group_contract_id": str(contract.id),
+            "group_contract_version": str(contract.version),
+            "creator_basis_points": str(contract.creator_basis_points),
+            "group_basis_points": str(contract.group_basis_points),
+            "creator_amount_minor": str(creator_amount),
+            "group_amount_minor": str(group_amount),
+        }
+    )
+    return entries, metadata
 
 
 async def post_entries(
@@ -312,8 +388,8 @@ async def settle_purchase(db: AsyncSession, purchase: Purchase) -> Purchase:
         return purchase
     clearing = await _account(db, LedgerAccountKind.platform_clearing, purchase.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, purchase.currency)
-    pending = await _account(
-        db, LedgerAccountKind.creator_pending, purchase.currency, purchase.seller_creator_id
+    allocation_entries, allocation_metadata = await creator_revenue_allocation(
+        db, purchase.seller_creator_id, purchase.currency, purchase.creator_amount_minor
     )
     ledger = await post_entries(
         db,
@@ -324,9 +400,13 @@ async def settle_purchase(db: AsyncSession, purchase: Purchase) -> Purchase:
         entries=[
             (clearing, LedgerDirection.debit, purchase.gross_amount_minor),
             (revenue, LedgerDirection.credit, purchase.platform_fee_minor),
-            (pending, LedgerDirection.credit, purchase.creator_amount_minor),
+            *allocation_entries,
         ],
-        metadata={"purchase_id": str(purchase.id), "content_id": str(purchase.content_id)},
+        metadata={
+            "purchase_id": str(purchase.id),
+            "content_id": str(purchase.content_id),
+            **allocation_metadata,
+        },
     )
     entitlement = await db.scalar(
         select(ContentEntitlement).where(
@@ -535,6 +615,14 @@ async def refund_purchase(
         raise FinancialError("Purchase entitlement is missing")
     clearing = await _account(db, LedgerAccountKind.platform_clearing, purchase.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, purchase.currency)
+    original_ledger = await db.get(LedgerTransaction, purchase.ledger_transaction_id)
+    assert original_ledger
+    group_amount = int(original_ledger.metadata_json.get("group_amount_minor", 0))
+    creator_allocation = int(
+        original_ledger.metadata_json.get(
+            "creator_amount_minor", purchase.creator_amount_minor - group_amount
+        )
+    )
     pending = await _account(
         db, LedgerAccountKind.creator_pending, purchase.currency, purchase.seller_creator_id
     )
@@ -554,8 +642,8 @@ async def refund_purchase(
             )
         ).where(LedgerEntry.ledger_account_id == pending.id)
     )
-    pending_reversal = min(max(int(pending_balance or 0), 0), purchase.creator_amount_minor)
-    available_reversal = purchase.creator_amount_minor - pending_reversal
+    pending_reversal = min(max(int(pending_balance or 0), 0), creator_allocation)
+    available_reversal = creator_allocation - pending_reversal
     entries = [
         (clearing, LedgerDirection.credit, purchase.gross_amount_minor),
         (revenue, LedgerDirection.debit, purchase.platform_fee_minor),
@@ -564,6 +652,14 @@ async def refund_purchase(
         entries.append((pending, LedgerDirection.debit, pending_reversal))
     if available_reversal:
         entries.append((available, LedgerDirection.debit, available_reversal))
+    if group_amount:
+        group_id = original_ledger.metadata_json.get("group_id")
+        if not group_id:
+            raise FinancialError("Group allocation snapshot is incomplete")
+        group_pending = await _account(
+            db, LedgerAccountKind.group_pending, purchase.currency, owner_group_id=UUID(group_id)
+        )
+        entries.append((group_pending, LedgerDirection.debit, group_amount))
     refund = await post_entries(
         db,
         transaction_type=LedgerTransactionType.refund,
@@ -572,7 +668,14 @@ async def refund_purchase(
         reference=f"refund:{purchase.id}",
         reversal_of_transaction_id=purchase.ledger_transaction_id,
         entries=entries,
-        metadata={"purchase_id": str(purchase.id), "reason": reason},
+        metadata={
+            "purchase_id": str(purchase.id),
+            "reason": reason,
+            "original_group_contract_id": original_ledger.metadata_json.get(
+                "group_contract_id", ""
+            ),
+            "group_amount_minor": str(group_amount),
+        },
     )
     purchase.status = PurchaseStatus.refunded
     entitlement.status = EntitlementStatus.revoked

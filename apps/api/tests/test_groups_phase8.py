@@ -1,0 +1,141 @@
+import pytest
+from sqlalchemy import case, func, select
+
+from app.accounts import service as accounts
+from app.content.access import can_access_content
+from app.creators import service as creators
+from app.finance import service as finance
+from app.groups import service as groups
+from app.models.content import (
+    AccessPolicy,
+    ContentItem,
+    ContentStatus,
+    ContentType,
+    ModerationStatus,
+)
+from app.models.creator import CreatorStatus
+from app.models.finance import (
+    LedgerAccount,
+    LedgerAccountKind,
+    LedgerDirection,
+    LedgerEntry,
+    PaymentAttempt,
+)
+from app.models.groups import GroupContract, GroupContractStatus, GroupPermission
+
+
+async def approved_creator(db, email):
+    user, _ = await accounts.register(db, email, "strong-password-123", None)
+    profile = await creators.get_or_create_profile(db, user)
+    await creators.update_profile(
+        db, profile, {"username": email.split("@")[0], "display_name": "Creator"}, user.id
+    )
+    await creators.submit(db, profile, user.id)
+    await creators.development_verify(db, profile, True, user.id)
+    await creators.set_status(db, profile, CreatorStatus.approved, user.id)
+    return user, profile
+
+
+@pytest.mark.asyncio
+async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegation(db_session):
+    manager, _ = await accounts.register(
+        db_session, "manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "group-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "group-buyer@example.com", "strong-password-123", None
+    )
+    group = await groups.create_group(db_session, manager, "A Group", "a-group", 5_000, None)
+    membership = await groups.invite_creator(
+        db_session, group.id, manager, creator.id, None, [GroupPermission.manage_content]
+    )
+    assert membership.status.value == "invited"
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    assert await groups.has_delegated_permission(
+        db_session, manager.id, creator.id, GroupPermission.manage_content
+    )
+
+    content = ContentItem(
+        owner_creator_id=creator.id,
+        created_by_user_id=creator_user.id,
+        content_type=ContentType.gallery,
+        title="Split PPV",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=2000,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    purchase = await finance.initiate_purchase(db_session, buyer, content.id, "split-ppv")
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    payload, signature = finance.development_webhook_payload(attempt)
+    settled = await finance.process_development_webhook(db_session, payload, signature)
+    assert settled and await can_access_content(db_session, content, buyer)
+    entries = (
+        await db_session.execute(
+            select(LedgerEntry, LedgerAccount.kind)
+            .join(LedgerAccount)
+            .where(LedgerEntry.transaction_id == settled.ledger_transaction_id)
+        )
+    ).all()
+    credits = {
+        kind: amount
+        for entry, kind in entries
+        if entry.direction is LedgerDirection.credit
+        for amount in [entry.amount_minor]
+    }
+    assert credits[LedgerAccountKind.platform_revenue] == 400
+    assert credits[LedgerAccountKind.creator_pending] == 800
+    assert credits[LedgerAccountKind.group_pending] == 800
+
+    refunded = await finance.refund_purchase(db_session, settled, manager, "Support refund")
+    assert refunded.status.value == "refunded"
+    group_pending = await db_session.scalar(
+        select(LedgerAccount).where(
+            LedgerAccount.kind == LedgerAccountKind.group_pending,
+            LedgerAccount.owner_group_id == group.id,
+        )
+    )
+    assert group_pending
+    group_balance = await db_session.scalar(
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (LedgerEntry.direction == LedgerDirection.credit, LedgerEntry.amount_minor),
+                        else_=-LedgerEntry.amount_minor,
+                    )
+                ),
+                0,
+            )
+        ).where(LedgerEntry.ledger_account_id == group_pending.id)
+    )
+    assert group_balance == 0
+
+    # Defaults are future-only: Creator A's accepted 50/50 contract does not
+    # change when the group offers 30/70 to a later creator.
+    group.default_creator_basis_points = 3_000
+    creator_b_user, creator_b = await approved_creator(db_session, "group-creator-b@example.com")
+    membership_b = await groups.invite_creator(
+        db_session, group.id, manager, creator_b.id, None, []
+    )
+    await groups.accept_invitation(db_session, membership_b.id, creator_b_user)
+    a_before = await groups.active_contract(db_session, creator.id)
+    b_contract = await groups.active_contract(db_session, creator_b.id)
+    assert a_before and a_before.creator_basis_points == 5_000
+    assert b_contract and b_contract.creator_basis_points == 3_000
+
+    amendment = await groups.propose_amendment(db_session, membership.id, manager, 7_000)
+    assert amendment.status is GroupContractStatus.proposed
+    await groups.decide_amendment(db_session, amendment.id, creator_user, True)
+    active = await groups.active_contract(db_session, creator.id)
+    assert active and active.creator_basis_points == 7_000
+    old_contract = await db_session.get(GroupContract, a_before.id)
+    assert old_contract and old_contract.status is GroupContractStatus.ended
+    await groups.leave_membership(db_session, membership.id, creator_user)
+    assert not await groups.has_delegated_permission(
+        db_session, manager.id, creator.id, GroupPermission.manage_content
+    )
+    assert (await db_session.get(GroupContract, active.id)).status is GroupContractStatus.ended

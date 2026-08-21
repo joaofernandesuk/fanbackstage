@@ -1,0 +1,11 @@
+# Phase 8 implementation notes
+
+Phase 8 introduces the groups/agencies contract boundary. A group invitation contains the initial proposed split and an explicit set of manager grants. It has no financial or delegated-authority effect until the creator accepts it. Acceptance activates contract version 1 at a UTC effective timestamp; amendments create a new proposed version and only replace the active version when the creator accepts.
+
+The group default split is read only when an invitation is created. Changing it therefore affects only subsequent invitations; existing contracts remain immutable. All Phase 8 settlement paths resolve the active contract once and persist the group ID, contract ID/version, basis points, creator amount, and group amount in the immutable ledger transaction metadata. PPV, subscription periods, paid-message unlocks/paid sends, and private live sessions share this allocation boundary.
+
+Group and creator earnings have separate pending accounts. A creator exit or manager removal ends the active contract immediately, deletes all delegated grants, and prevents future allocation to the group. It never rewrites the original ledger allocation. Creator-controlled affiliation visibility is stored per active membership and is not controlled by group managers.
+
+Sensitive lifecycle actions emit audit events: group creation, invitations and decisions, contract proposals and decisions, exits/removals, and affiliation visibility changes. Manager grants are checked through an active membership plus an explicit grant; a manager role alone does not authorize creator operations.
+
+Migration lifecycle coverage is retained in `20260821_0012_groups_agencies` and `20260821_0013_group_ledger_accounts`. The latter deliberately retains PostgreSQL enum values on downgrade because a deployed immutable ledger must remain readable; production rollback must use a forward corrective migration.

@@ -971,8 +971,8 @@ async def settle_private_session(db: AsyncSession, session: PrivateSession) -> P
     fee, creator_amount = finance.commission_amount(gross, session.commission_basis_points)
     clearing = await finance._account(db, LedgerAccountKind.platform_clearing, session.currency)
     revenue = await finance._account(db, LedgerAccountKind.platform_revenue, session.currency)
-    earnings = await finance._account(
-        db, LedgerAccountKind.creator_pending, session.currency, session.creator_id
+    allocation_entries, allocation_metadata = await finance.creator_revenue_allocation(
+        db, session.creator_id, session.currency, creator_amount
     )
     ledger = await finance.post_entries(
         db,
@@ -983,11 +983,12 @@ async def settle_private_session(db: AsyncSession, session: PrivateSession) -> P
         entries=[
             (clearing, LedgerDirection.debit, gross),
             (revenue, LedgerDirection.credit, fee),
-            (earnings, LedgerDirection.credit, creator_amount),
+            *allocation_entries,
         ],
         metadata={
             "private_session_id": str(session.id),
             "billable_seconds": str(session.billable_seconds),
+            **allocation_metadata,
         },
     )
     from app.models.streaming import PrivateSessionSettlement
