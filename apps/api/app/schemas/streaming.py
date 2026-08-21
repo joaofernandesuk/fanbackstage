@@ -53,3 +53,9 @@ class PrivateSessionResponse(BaseModel):
     minimum_charge_minor: int
     currency: str
     billable_seconds: int
+
+
+class ProviderTokenResponse(BaseModel):
+    room_id: UUID
+    provider_url: str
+    token: str

@@ -11,6 +11,22 @@ from app.models.streaming import PrivateSession, PrivateSessionMode, PrivateSess
 from app.streaming import service as streaming
 
 
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [(1, 5), (30, 150), (60, 300), (61, 305), (95, 475)],
+)
+def test_second_level_billing_rounds_minor_units_deterministically(seconds, expected):
+    """ceil(rate * seconds / 60), without per-minute rounding or floats."""
+
+    class Session:
+        per_minute_price_minor = 300
+        billable_seconds = seconds
+        minimum_charge_minor = 1
+        max_authorization_minor = 10_000
+
+    assert streaming.settlement_amount(Session()) == expected
+
+
 async def creator(db, email):
     user, _ = await accounts.register(db, email, "strong-password-123", None)
     profile = await creators.get_or_create_profile(db, user)
@@ -86,6 +102,45 @@ async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_sessio
 
 
 @pytest.mark.asyncio
+async def test_two_to_one_cannot_bill_or_issue_invitee_token_before_all_participants_join(
+    db_session,
+):
+    owner, profile = await creator(db_session, "waiting-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "waiting-payer@example.com", "strong-password-123", None
+    )
+    invited, _ = await accounts.register(
+        db_session, "waiting-invited@example.com", "strong-password-123", None
+    )
+    stranger, _ = await accounts.register(
+        db_session, "waiting-stranger@example.com", "strong-password-123", None
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.two_to_one, invited.id
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    session.status = PrivateSessionStatus.ready
+    with pytest.raises(PermissionError, match="not invited"):
+        await streaming.issue_private_token(db_session, stranger, session.id)
+    start = datetime(2026, 8, 21, tzinfo=UTC)
+    await streaming.private_participant_connected(db_session, owner, session.id, start)
+    await streaming.private_participant_connected(db_session, payer, session.id, start)
+    assert session.status is PrivateSessionStatus.connecting
+    ended = await streaming.end_private_session(
+        db_session, owner, session.id, "invitee_absent", start
+    )
+    assert ended.status is PrivateSessionStatus.cancelled
+    assert (
+        await db_session.scalar(
+            select(LedgerTransaction).where(
+                LedgerTransaction.reference == f"private_session:{session.id}"
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_disconnect_pauses_billable_time_and_reconnect_resumes(db_session):
     owner, profile = await creator(db_session, "reconnect-owner@example.com")
     payer, _ = await accounts.register(
@@ -149,6 +204,18 @@ async def test_provider_event_replay_cannot_inflate_private_billable_time(db_ses
         session_id=session.id,
         user_id=payer.id,
         now=now + timedelta(seconds=15),
+    )
+    assert session.billable_seconds == 15
+    assert (
+        await streaming.process_private_provider_event(
+            db_session,
+            event_id="leave-payer",
+            event_type="participant_left",
+            session_id=session.id,
+            user_id=payer.id,
+            now=now + timedelta(seconds=45),
+        )
+        is None
     )
     assert session.billable_seconds == 15
 

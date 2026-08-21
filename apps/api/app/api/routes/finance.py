@@ -11,6 +11,7 @@ from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
 from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
+from app.models.streaming import PrivateSession
 from app.models.subscription import SubscriptionPeriod
 from app.permissions.policies import Permission, authorize
 from app.schemas.finance import (
@@ -120,6 +121,15 @@ async def complete_development_payment(
     if pending_send is not None:
         return DevelopmentPaymentCompletionResponse(
             id=pending_send.id, status=pending_send.status, payment_attempt_id=attempt.id
+        )
+    private_session = await db.scalar(
+        select(PrivateSession).where(PrivateSession.payment_attempt_id == attempt.id)
+    )
+    if private_session is not None:
+        return DevelopmentPaymentCompletionResponse(
+            id=private_session.id,
+            status=private_session.status.value,
+            payment_attempt_id=attempt.id,
         )
     raise HTTPException(status_code=409, detail="Payment settlement was not found")
 

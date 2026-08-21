@@ -21,6 +21,7 @@ from app.models.finance import (
     LedgerDirection,
     LedgerTransactionType,
     PaymentAttempt,
+    PaymentStatus,
 )
 from app.models.identity import User
 from app.models.messaging import UserBlock
@@ -396,6 +397,9 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
 async def authorize_private_session(db: AsyncSession, session: PrivateSession) -> PrivateSession:
     if session.status is not PrivateSessionStatus.awaiting_payment_authorization:
         return session
+    attempt = await db.get(PaymentAttempt, session.payment_attempt_id)
+    if attempt is None or attempt.status is not PaymentStatus.succeeded:
+        raise StreamingError("Private-session payment authorization is not verified")
     session.status, session.ready_at = PrivateSessionStatus.ready, datetime.now(UTC)
     await record_event(
         db,
@@ -476,6 +480,34 @@ async def private_participant_disconnected(
     return session
 
 
+async def issue_private_token(
+    db: AsyncSession, actor: User, session_id: UUID
+) -> tuple[PrivateSession, str]:
+    """Issue a short-lived token only to a named, authorized participant."""
+    session = await db.scalar(
+        select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+    )
+    if session is None or session.status not in (
+        PrivateSessionStatus.ready,
+        PrivateSessionStatus.connecting,
+        PrivateSessionStatus.active,
+        PrivateSessionStatus.reconnecting,
+    ):
+        raise PermissionError("Private session is unavailable")
+    participant = await db.scalar(
+        select(SessionParticipant).where(
+            SessionParticipant.private_session_id == session.id,
+            SessionParticipant.user_id == actor.id,
+        )
+    )
+    if participant is None:
+        raise PermissionError("You are not invited to this private session")
+    token = await LiveKitStreamingProvider().participant_token(
+        session.provider_room_name, str(actor.id), can_publish=True, can_subscribe=True
+    )
+    return session, token
+
+
 async def end_private_session(
     db: AsyncSession, actor: User | None, session_id: UUID, reason: str, now: datetime | None = None
 ) -> PrivateSession:
@@ -490,10 +522,20 @@ async def end_private_session(
         (await db.get(CreatorProfile, session.creator_id)).user_id,
     }:
         raise PermissionError("Only the creator or payer can end this private session")
-    if session.status is PrivateSessionStatus.settled:
+    if session.status in (PrivateSessionStatus.settled, PrivateSessionStatus.cancelled):
         return session
     if session.status is PrivateSessionStatus.active and session.active_started_at:
         session.billable_seconds += max(0, int((now - session.active_started_at).total_seconds()))
+    # No required participants reached ACTIVE, so no service was delivered and
+    # the configured minimum must not be charged.
+    if session.billable_seconds == 0 and session.active_started_at is None:
+        session.status, session.ended_at, session.end_reason = (
+            PrivateSessionStatus.cancelled,
+            now,
+            reason,
+        )
+        session.ended_by_user_id = actor.id if actor else None
+        return session
     session.status, session.ended_at, session.end_reason = PrivateSessionStatus.ended, now, reason
     session.ended_by_user_id = actor.id if actor else None
     return await settle_private_session(db, session)

@@ -13,6 +13,7 @@ from app.schemas.streaming import (
     PrivateRequestInput,
     PrivateRequestResponse,
     PrivateSessionResponse,
+    ProviderTokenResponse,
 )
 from app.streaming import service
 
@@ -87,13 +88,27 @@ async def join_room(room_id: UUID, request: Request, identity: CurrentIdentity, 
         raise HTTPException(403, str(exc)) from exc
 
 
-@router.post("/rooms/{room_id}/token")
+@router.post("/rooms/{room_id}/token", response_model=ProviderTokenResponse)
 async def room_token(room_id: UUID, request: Request, identity: CurrentIdentity, db: Db) -> dict:
     try:
         await enforce_streaming_rate_limit(request, str(identity[0].id), "live_token")
         room, token = await service.issue_live_token(db, identity[0], room_id)
         await db.commit()
         return {"room_id": str(room.id), "provider_url": "livekit", "token": token}
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.post("/private-sessions/{session_id}/token", response_model=ProviderTokenResponse)
+async def private_session_token(
+    session_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> ProviderTokenResponse:
+    try:
+        await enforce_streaming_rate_limit(request, str(identity[0].id), "private_live_token")
+        session, token = await service.issue_private_token(db, identity[0], session_id)
+        await db.commit()
+        return ProviderTokenResponse(room_id=session.id, provider_url="livekit", token=token)
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(403, str(exc)) from exc
@@ -174,6 +189,30 @@ async def accept_private(
 ) -> PrivateSessionResponse:
     try:
         session = await service.accept_private_request(db, identity[0], request_id)
+        await db.commit()
+        return PrivateSessionResponse(
+            id=session.id,
+            request_id=session.request_id,
+            status=session.status.value,
+            mode=session.mode.value,
+            per_minute_price_minor=session.per_minute_price_minor,
+            minimum_charge_minor=session.minimum_charge_minor,
+            currency=session.currency,
+            billable_seconds=session.billable_seconds,
+        )
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/private-sessions/{session_id}/end", response_model=PrivateSessionResponse)
+async def end_private(
+    session_id: UUID, identity: CurrentIdentity, db: Db
+) -> PrivateSessionResponse:
+    try:
+        session = await service.end_private_session(
+            db, identity[0], session_id, "ended_by_participant"
+        )
         await db.commit()
         return PrivateSessionResponse(
             id=session.id,
