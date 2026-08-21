@@ -6,7 +6,14 @@ from app.api.deps import CurrentIdentity, Db
 from app.content import service as content_service
 from app.groups import service
 from app.models.creator import CreatorProfile
-from app.models.groups import Group, GroupContract, GroupCreatorMembership, GroupPermission
+from app.models.groups import (
+    Group,
+    GroupContract,
+    GroupContractStatus,
+    GroupCreatorMembership,
+    GroupManagerMembership,
+    GroupPermission,
+)
 from app.permissions.policies import Permission, authorize
 from app.schemas.content import ContentUpdate
 from app.schemas.groups import (
@@ -16,6 +23,7 @@ from app.schemas.groups import (
     GroupCreate,
     GroupResponse,
     InvitationCreate,
+    ManagedCreatorResponse,
     MembershipResponse,
 )
 
@@ -232,6 +240,59 @@ async def my_memberships(identity: CurrentIdentity, db: Db) -> list[MembershipRe
         )
     ).all()
     return [membership_response(row) for row in rows]
+
+
+@router.get("/mine/managed", response_model=list[GroupResponse])
+async def managed_groups(identity: CurrentIdentity, db: Db) -> list[GroupResponse]:
+    from sqlalchemy import select
+
+    rows = (
+        await db.scalars(
+            select(Group)
+            .join(GroupManagerMembership, GroupManagerMembership.group_id == Group.id)
+            .where(GroupManagerMembership.user_id == identity[0].id)
+            .order_by(Group.name)
+        )
+    ).all()
+    return [group_response(row) for row in rows]
+
+
+@router.get("/{group_id}/managed-creators", response_model=list[ManagedCreatorResponse])
+async def managed_creators(
+    group_id: UUID, identity: CurrentIdentity, db: Db
+) -> list[ManagedCreatorResponse]:
+    await service.require_group_manager(db, group_id, identity[0].id)
+    from sqlalchemy import select
+
+    memberships = (
+        await db.scalars(
+            select(GroupCreatorMembership)
+            .where(GroupCreatorMembership.group_id == group_id)
+            .order_by(GroupCreatorMembership.created_at.desc())
+        )
+    ).all()
+    result = []
+    for membership in memberships:
+        creator = await db.get(CreatorProfile, membership.creator_id)
+        contract = await db.scalar(
+            select(GroupContract)
+            .where(
+                GroupContract.membership_id == membership.id,
+                GroupContract.status.in_(
+                    [GroupContractStatus.active, GroupContractStatus.proposed]
+                ),
+            )
+            .order_by(GroupContract.version.desc())
+        )
+        result.append(
+            ManagedCreatorResponse(
+                **membership_response(membership).model_dump(),
+                username=creator.username if creator else None,
+                display_name=creator.display_name if creator else None,
+                active_contract=contract_response(contract) if contract else None,
+            )
+        )
+    return result
 
 
 @router.get("/{group_id}/dashboard")

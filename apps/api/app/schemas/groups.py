@@ -46,3 +46,9 @@ class ContractResponse(BaseModel):
     creator_basis_points: int
     group_basis_points: int
     status: str
+
+
+class ManagedCreatorResponse(MembershipResponse):
+    username: str | None
+    display_name: str | None
+    active_contract: ContractResponse | None = None
