@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../../../lib/api";
 import { SubscriptionOptions } from "../../../components/subscription-options";
 import { Feed } from "../../../components/feed";
+import { CreatorMessageComposer } from "../../../components/creator-message-composer";
 
 type Creator = {
   id: string;
@@ -79,6 +80,7 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
       {creator.bio && <p>{creator.bio}</p>}
       {creator.location && <p>{creator.location}</p>}
       <SubscriptionOptions username={creator.username} creatorId={creator.id} />
+      <CreatorMessageComposer creatorId={creator.id} />
       <h2>Posts</h2>
       <Feed creatorId={creator.id} />
       <h2>Published content</h2>
