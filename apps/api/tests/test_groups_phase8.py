@@ -91,6 +91,9 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
     assert credits[LedgerAccountKind.platform_revenue] == 400
     assert credits[LedgerAccountKind.creator_pending] == 800
     assert credits[LedgerAccountKind.group_pending] == 800
+    assert (await groups.group_financial_dashboard(db_session, group.id, manager, "EUR"))[
+        "pending_amount_minor"
+    ] == 800
 
     refunded = await finance.refund_purchase(db_session, settled, manager, "Support refund")
     assert refunded.status.value == "refunded"
@@ -135,6 +138,35 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
     b_contract = await groups.active_contract(db_session, creator_b.id)
     assert a_before and a_before.creator_basis_points == 5_000
     assert b_contract and b_contract.creator_basis_points == 3_000
+    b_content = ContentItem(
+        owner_creator_id=creator_b.id,
+        created_by_user_id=creator_b_user.id,
+        content_type=ContentType.gallery,
+        title="B split PPV",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=2000,
+        price_currency="EUR",
+    )
+    db_session.add(b_content)
+    await db_session.flush()
+    buyer_b, _ = await accounts.register(
+        db_session, "group-buyer-b@example.com", "strong-password-123", None
+    )
+    b_purchase = await finance.initiate_purchase(db_session, buyer_b, b_content.id, "b-split-ppv")
+    b_attempt = await db_session.get(PaymentAttempt, b_purchase.payment_attempt_id)
+    b_payload, b_signature = finance.development_webhook_payload(b_attempt)
+    assert await finance.process_development_webhook(db_session, b_payload, b_signature)
+    dashboard_before_default_change = await groups.group_financial_dashboard(
+        db_session, group.id, manager, "EUR"
+    )
+    assert dashboard_before_default_change["pending_amount_minor"] == 1_120
+    group.default_creator_basis_points = 1_000
+    assert (
+        await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+        == dashboard_before_default_change
+    )
 
     amendment = await groups.propose_amendment(db_session, membership.id, manager, 7_000)
     assert amendment.status is GroupContractStatus.proposed
