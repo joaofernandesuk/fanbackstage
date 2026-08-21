@@ -299,6 +299,13 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
     assert (await group_routes.managed_creator_earnings(creator.id, identity, db_session))["creator_id"] == str(creator.id)
     with pytest.raises(HTTPException, match="Delegated earnings permission denied"):
         await group_routes.managed_creator_earnings(unrelated_creator.id, identity, db_session)
+    with pytest.raises(HTTPException, match="Delegated profile permission denied"):
+        await group_routes.update_managed_creator_profile(
+            unrelated_creator.id,
+            CreatorProfileUpdate(display_name="Cross-creator attempt"),
+            identity,
+            db_session,
+        )
     events = set(
         (await db_session.scalars(select(AuditEvent.event_type).where(AuditEvent.actor_user_id == manager.id))).all()
     )
