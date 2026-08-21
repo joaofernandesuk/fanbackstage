@@ -4,6 +4,8 @@ Private messaging, paid entry/messages, PPV attachments, mass messaging, notific
 
 # 11. Messaging, Paid DMs and PPV Messages
 
+Phase 6 uses a normalized creator/viewer conversation with participant read state. Eligibility and pricing are resolved server-side; a locked attachment references the existing private media asset and is authorised only after a settled message-unlock record. Message unlocks reuse `PaymentAttempt` and the immutable ledger rather than creating a wallet or upload pipeline. Campaign recipients are snapshotted at execution time and unique per campaign to make worker replay safe.
+
 
 ## 11.1 Messaging permissions
 

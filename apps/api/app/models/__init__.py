@@ -18,6 +18,10 @@ from app.models.finance import (
     Purchase,
 )
 from app.models.identity import Role, SecurityToken, User, UserRole, UserSession
+from app.models.messaging import (
+    Conversation, ConversationParticipant, MassMessageCampaign, MassMessageRecipient,
+    Message, MessageAttachment, MessageUnlockPurchase, MessagingSettings, UserBlock,
+)
 from app.models.social import (
     CreatorFeedSettings,
     FeedPost,
@@ -42,6 +46,8 @@ from app.models.subscription import (
 __all__ = [
     "AuditEvent",
     "CommissionRule",
+    "Conversation",
+    "ConversationParticipant",
     "ContentEntitlement",
     "ContentItem",
     "CreatorFeedSettings",
@@ -57,6 +63,12 @@ __all__ = [
     "LedgerTransaction",
     "MediaAsset",
     "MediaDerivative",
+    "MassMessageCampaign",
+    "MassMessageRecipient",
+    "Message",
+    "MessageAttachment",
+    "MessageUnlockPurchase",
+    "MessagingSettings",
     "PaymentAttempt",
     "PaymentWebhookEvent",
     "PostComment",
@@ -74,6 +86,7 @@ __all__ = [
     "SubscriptionPromotion",
     "SubscriptionPromotionRule",
     "User",
+    "UserBlock",
     "UserRole",
     "UserSession",
     "VideoContent",

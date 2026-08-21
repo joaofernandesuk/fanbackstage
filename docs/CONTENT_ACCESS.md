@@ -174,3 +174,6 @@ Bundle purchase grants entitlement to each included asset according to bundle ru
 # Phase 3 PPV integration
 
 PPV access is granted only by an active `ContentEntitlement` whose purchase source references the settled purchase. A payment attempt, client success message, or ledger record alone never grants content access. A full PPV refund revokes that entitlement without deleting it.
+# Message attachment access
+
+Paid message attachments are distinct from content PPV. The central media resolver permits a full asset only for the creator owner, an existing authorised content policy, or the recipient's settled message-unlock purchase for that exact attachment. A message unlock never grants access to unrelated galleries or videos.

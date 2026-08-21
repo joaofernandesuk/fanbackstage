@@ -1,5 +1,7 @@
 # Financial Ledger, Commissions and Payouts
 
+Phase 6 message unlocks are a `messaging_charge` ledger transaction. They snapshot gross, platform fee, creator amount, currency, and commission basis points in `message_unlock_purchases`; webhook replay uses the same payment-attempt and ledger idempotency guarantees as PPV. Paid send fees are intentionally not settled until their command is implemented.
+
 Financial source-of-truth rules. Any feature creating economic value must integrate here rather than maintaining its own balance.
 
 # 22. Unified Wallet and Immutable Financial Ledger

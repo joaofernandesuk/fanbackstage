@@ -62,3 +62,19 @@ async def enforce_social_rate_limit(request: Request, subject: str, action: str)
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many social actions. Please try again later.")
     finally:
         await redis.aclose()
+
+
+async def enforce_messaging_rate_limit(request: Request, subject: str, action: str) -> None:
+    """Throttle spam-sensitive messaging writes independently of social actions."""
+    settings = get_settings()
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"fanbackstage:rate-limit:messaging:{action}:{_key(f'{client_ip}:{subject}')}"
+    redis = Redis.from_url(settings.redis_url)
+    try:
+        attempts = await redis.incr(key)
+        if attempts == 1:
+            await redis.expire(key, settings.messaging_rate_limit_window_seconds)
+        if attempts > settings.messaging_rate_limit_attempts:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many messaging actions. Please try again later.")
+    finally:
+        await redis.aclose()

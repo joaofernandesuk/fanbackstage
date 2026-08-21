@@ -94,6 +94,38 @@ async def can_access_asset(db: AsyncSession, asset_id: UUID, user: User | None) 
     for content in contents:
         if await can_access_content(db, content, user):
             return True
+    # A message offer is a distinct entitlement source: buying it must not
+    # unlock unrelated gallery/video content that happens to share a creator.
+    if user:
+        from app.models.messaging import Conversation, Message, MessageAttachment, MessageUnlockPurchase
+
+        attachment_owner = await db.scalar(
+            select(MessageAttachment.id)
+            .join(Message, Message.id == MessageAttachment.message_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .join(CreatorProfile, CreatorProfile.id == Conversation.creator_id)
+            .where(
+                MessageAttachment.media_asset_id == asset_id,
+                CreatorProfile.user_id == user.id,
+            )
+        )
+        if attachment_owner:
+            return True
+
+        unlock = await db.scalar(
+            select(MessageUnlockPurchase.id)
+            .join(
+                MessageAttachment,
+                MessageAttachment.id == MessageUnlockPurchase.message_attachment_id,
+            )
+            .where(
+                MessageAttachment.media_asset_id == asset_id,
+                MessageUnlockPurchase.buyer_user_id == user.id,
+                MessageUnlockPurchase.status == "paid",
+            )
+        )
+        if unlock:
+            return True
     return False
 
 

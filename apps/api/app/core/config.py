@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     media_rate_limit_window_seconds: int = 60
     social_rate_limit_attempts: int = 60
     social_rate_limit_window_seconds: int = 60
+    messaging_rate_limit_attempts: int = 30
+    messaging_rate_limit_window_seconds: int = 60
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "no-reply@fanbackstage.local"

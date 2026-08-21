@@ -37,6 +37,7 @@ class LedgerTransactionType(str, enum.Enum):
     refund = "refund"
     chargeback = "chargeback"
     subscription_charge = "subscription_charge"
+    messaging_charge = "messaging_charge"
 
 
 class PaymentStatus(str, enum.Enum):
