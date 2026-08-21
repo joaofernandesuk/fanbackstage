@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.accounts import service as accounts
+from app.content.access import can_access_asset
 from app.creators import service as creators
 from app.finance import service as finance
 from app.messaging import service as messaging
@@ -13,6 +14,9 @@ from app.models.content import (
     ContentItem,
     ContentStatus,
     ContentType,
+    MediaAsset,
+    MediaStatus,
+    MediaType,
     ModerationStatus,
 )
 from app.models.creator import CreatorStatus
@@ -169,3 +173,34 @@ async def test_previous_customer_requires_settled_purchase_and_respects_block(db
     db_session.add(UserBlock(blocker_user_id=profile.user_id, blocked_user_id=buyer.id))
     await db_session.flush()
     assert not await messaging.can_message(db_session, buyer, profile)
+
+
+@pytest.mark.asyncio
+async def test_paid_attachment_unlocks_only_after_settlement(db_session):
+    owner, profile = await creator(db_session, "attachment-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "attachment-buyer@example.com", "strong-password-123", None
+    )
+    initiated = await messaging.send_message(db_session, buyer, profile.id, "hello")
+    sent = await messaging.send_in_conversation(
+        db_session, owner, initiated.conversation_id, "locked"
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        storage_key="private/phase6-locked",
+        original_filename="locked.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    attachment = await messaging.attach_media(db_session, owner, sent.id, asset.id, 700, "EUR")
+    assert not await can_access_asset(db_session, asset.id, buyer)
+    purchase = await messaging.create_unlock_purchase(db_session, buyer, attachment.id, "unlock-1")
+    attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    assert purchase.status == "paid"
+    assert await can_access_asset(db_session, asset.id, buyer)
+    assert await finance.process_development_webhook(db_session, payload, signature) is None
