@@ -39,6 +39,7 @@ from app.models.streaming import (
     PrivateSessionMode,
     PrivateSessionRequest,
     PrivateSessionStatus,
+    ProviderLiveEvent,
     SessionParticipant,
     SessionParticipantRole,
 )
@@ -514,6 +515,40 @@ async def expire_reconnect_grace(db: AsyncSession, now: datetime | None = None) 
     for session in sessions:
         await end_private_session(db, None, session.id, "reconnect_grace_expired", now)
     return len(sessions)
+
+
+async def process_private_provider_event(
+    db: AsyncSession,
+    *,
+    event_id: str,
+    event_type: str,
+    session_id: UUID,
+    user_id: UUID,
+    now: datetime | None = None,
+) -> PrivateSession | None:
+    """Replay-safe provider adapter entrypoint; event IDs guard state/timing inflation."""
+    if await db.scalar(
+        select(ProviderLiveEvent).where(
+            ProviderLiveEvent.provider == "livekit", ProviderLiveEvent.external_event_id == event_id
+        )
+    ):
+        return None
+    event = ProviderLiveEvent(
+        provider="livekit",
+        external_event_id=event_id,
+        event_type=event_type,
+        private_session_id=session_id,
+        processed_at=now or datetime.now(UTC),
+    )
+    db.add(event)
+    actor = await db.get(User, user_id)
+    if actor is None:
+        raise PermissionError("Provider participant is unknown")
+    if event_type == "participant_joined":
+        return await private_participant_connected(db, actor, session_id, now)
+    if event_type == "participant_left":
+        return await private_participant_disconnected(db, actor, session_id, now)
+    raise StreamingError("Unsupported provider event")
 
 
 def settlement_amount(session: PrivateSession) -> int:
