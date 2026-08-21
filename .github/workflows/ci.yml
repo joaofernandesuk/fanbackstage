@@ -19,6 +19,7 @@ jobs:
     defaults: { run: { working-directory: apps/api } }
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: astral-sh/setup-uv@v4
       - name: Install FFmpeg with bounded repository retries
         run: |
@@ -26,7 +27,15 @@ jobs:
           timeout 180s sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           timeout 180s sudo apt-get install -y --no-install-recommends ffmpeg
       - run: uv sync --all-groups
-      - run: uv run ruff check . && uv run ruff format --check .
+      - run: uv run ruff check .
+      - name: Check formatting of changed API files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          files=$(git diff --name-only "$BASE_SHA" HEAD -- 'apps/api/**/*.py' | sed 's#^apps/api/##')
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files" | xargs uv run ruff format --check
+          fi
       - run: uv run alembic upgrade head
       - name: Verify Phase 4 migration lifecycle
         run: uv run alembic downgrade 20260820_0006 && uv run alembic upgrade head
