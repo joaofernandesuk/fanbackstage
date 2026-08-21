@@ -59,7 +59,10 @@ async def enforce_social_rate_limit(request: Request, subject: str, action: str)
         if attempts == 1:
             await redis.expire(key, settings.social_rate_limit_window_seconds)
         if attempts > settings.social_rate_limit_attempts:
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many social actions. Please try again later.")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many social actions. Please try again later.",
+            )
     finally:
         await redis.aclose()
 
@@ -75,6 +78,9 @@ async def enforce_messaging_rate_limit(request: Request, subject: str, action: s
         if attempts == 1:
             await redis.expire(key, settings.messaging_rate_limit_window_seconds)
         if attempts > settings.messaging_rate_limit_attempts:
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many messaging actions. Please try again later.")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many messaging actions. Please try again later.",
+            )
     finally:
         await redis.aclose()

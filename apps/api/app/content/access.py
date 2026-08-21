@@ -44,9 +44,14 @@ async def can_access_content(db: AsyncSession, content: ContentItem, user: User 
     if not user:
         return False
     if content.access_policy is AccessPolicy.followers:
-        return await db.scalar(
-            select(Follow.id).where(Follow.user_id == user.id, Follow.creator_id == content.owner_creator_id)
-        ) is not None
+        return (
+            await db.scalar(
+                select(Follow.id).where(
+                    Follow.user_id == user.id, Follow.creator_id == content.owner_creator_id
+                )
+            )
+            is not None
+        )
     now = datetime.now(UTC)
     scope = ContentEntitlement.content_id == content.id
     if content.access_policy is AccessPolicy.subscription:
@@ -97,7 +102,12 @@ async def can_access_asset(db: AsyncSession, asset_id: UUID, user: User | None) 
     # A message offer is a distinct entitlement source: buying it must not
     # unlock unrelated gallery/video content that happens to share a creator.
     if user:
-        from app.models.messaging import Conversation, Message, MessageAttachment, MessageUnlockPurchase
+        from app.models.messaging import (
+            Conversation,
+            Message,
+            MessageAttachment,
+            MessageUnlockPurchase,
+        )
 
         attachment_owner = await db.scalar(
             select(MessageAttachment.id)
