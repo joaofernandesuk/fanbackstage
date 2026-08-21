@@ -193,6 +193,42 @@ class MessageUnlockPurchase(UUIDPrimaryKey, Timestamped, Base):
     purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class PendingMessageSend(UUIDPrimaryKey, Timestamped, Base):
+    """A paid send is persisted only after provider-verified settlement."""
+
+    __tablename__ = "pending_message_sends"
+    __table_args__ = (
+        UniqueConstraint("payment_attempt_id", name="uq_pending_message_send_payment"),
+        UniqueConstraint("message_id", name="uq_pending_message_send_message"),
+        CheckConstraint(
+            "gross_amount_minor = platform_fee_minor + creator_amount_minor",
+            name="ck_pending_message_send_balance",
+        ),
+    )
+    buyer_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    creator_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="RESTRICT"), index=True
+    )
+    body: Mapped[str] = mapped_column(Text)
+    payment_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="RESTRICT")
+    )
+    gross_amount_minor: Mapped[int] = mapped_column(Integer)
+    platform_fee_minor: Mapped[int] = mapped_column(Integer)
+    creator_amount_minor: Mapped[int] = mapped_column(Integer)
+    commission_basis_points: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    status: Mapped[str] = mapped_column(String(32), default="awaiting_payment", index=True)
+    ledger_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ledger_transactions.id", ondelete="RESTRICT"), unique=True
+    )
+    message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), unique=True
+    )
+
+
 class MassMessageCampaign(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "mass_message_campaigns"
     __table_args__ = (Index("ix_mass_campaign_due", "status", "scheduled_at"),)

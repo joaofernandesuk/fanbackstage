@@ -15,7 +15,7 @@ from app.finance.service import (
     currency_code,
     post_entries,
 )
-from app.models.content import ContentEntitlement, EntitlementStatus
+from app.models.content import ContentEntitlement, EntitlementStatus, MediaAsset, MediaStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.finance import (
     CommissionRule,
@@ -38,6 +38,7 @@ from app.models.messaging import (
     MessageUnlockPurchase,
     MessagingPermission,
     MessagingSettings,
+    PendingMessageSend,
     UserBlock,
 )
 from app.models.social import Follow
@@ -302,6 +303,44 @@ async def mark_read(db: AsyncSession, user: User, conversation_id: UUID) -> None
     )
 
 
+async def attach_media(
+    db: AsyncSession,
+    creator_user: User,
+    message_id: UUID,
+    asset_id: UUID,
+    unlock_price_minor: int | None,
+    unlock_currency: str | None,
+) -> MessageAttachment:
+    message = await db.get(Message, message_id)
+    if not message:
+        raise PermissionError("Message not found")
+    conversation = await db.get(Conversation, message.conversation_id)
+    creator = await assert_participant(db, conversation, creator_user)
+    if message.sender_user_id != creator.user_id:
+        raise PermissionError("Only the creator can attach media")
+    if bool(unlock_price_minor) != bool(unlock_currency):
+        raise MessagingError("Locked attachments require a price and currency")
+    asset = await db.get(MediaAsset, asset_id)
+    if not asset or asset.owner_creator_id != creator.id or asset.status is not MediaStatus.ready:
+        raise MessagingError("Only ready creator-owned media may be attached")
+    attachment = MessageAttachment(
+        message_id=message.id,
+        media_asset_id=asset.id,
+        unlock_price_minor=unlock_price_minor,
+        unlock_currency=currency_code(unlock_currency) if unlock_currency else None,
+    )
+    db.add(attachment)
+    message.message_type = MessageType.media
+    await record_event(
+        db,
+        "message.attachment_created",
+        actor_user_id=creator_user.id,
+        target_type="message_attachment",
+        target_id=str(attachment.id),
+    )
+    return attachment
+
+
 async def messaging_commission(db: AsyncSession) -> int:
     rule = await db.scalar(
         select(CommissionRule).where(
@@ -419,6 +458,97 @@ async def settle_message_unlock(
         target_id=str(purchase.id),
     )
     return purchase
+
+
+async def initiate_paid_send(
+    db: AsyncSession, buyer: User, creator_id: UUID, body: str, idempotency_key: str
+) -> PendingMessageSend:
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise MessagingError("A valid Idempotency-Key is required")
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator or not await can_message(db, buyer, creator):
+        raise PermissionError("Messaging is not permitted")
+    amount, currency = await resolve_send_price(db, buyer, creator)
+    if not amount or not currency:
+        raise MessagingError("This message does not require payment")
+    existing = await db.scalar(
+        select(PendingMessageSend)
+        .join(PaymentAttempt)
+        .where(
+            PaymentAttempt.buyer_user_id == buyer.id,
+            PaymentAttempt.idempotency_key == idempotency_key,
+        )
+    )
+    if existing:
+        return existing
+    bps = await messaging_commission(db)
+    fee, creator_amount = commission_amount(amount, bps)
+    attempt = PaymentAttempt(
+        buyer_user_id=buyer.id,
+        provider=get_settings().payment_provider,
+        provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
+        amount_minor=amount,
+        currency=currency_code(currency),
+        idempotency_key=idempotency_key,
+    )
+    db.add(attempt)
+    await db.flush()
+    pending = PendingMessageSend(
+        buyer_user_id=buyer.id,
+        creator_id=creator.id,
+        body=body.strip(),
+        payment_attempt_id=attempt.id,
+        gross_amount_minor=amount,
+        platform_fee_minor=fee,
+        creator_amount_minor=creator_amount,
+        commission_basis_points=bps,
+        currency=currency_code(currency),
+    )
+    db.add(pending)
+    await db.flush()
+    return pending
+
+
+async def settle_paid_send(db: AsyncSession, pending: PendingMessageSend) -> PendingMessageSend:
+    if pending.status == "paid":
+        return pending
+    creator = await db.get(CreatorProfile, pending.creator_id)
+    conversation = await conversation_for_pair(
+        db, creator, await db.get(User, pending.buyer_user_id)
+    )
+    clearing = await _account(db, LedgerAccountKind.platform_clearing, pending.currency)
+    revenue = await _account(db, LedgerAccountKind.platform_revenue, pending.currency)
+    earnings = await _account(
+        db, LedgerAccountKind.creator_pending, pending.currency, pending.creator_id
+    )
+    ledger = await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.messaging_charge,
+        currency=pending.currency,
+        idempotency_key=f"paid_message_send:{pending.id}",
+        reference=f"paid_message_send:{pending.id}",
+        entries=[
+            (clearing, LedgerDirection.debit, pending.gross_amount_minor),
+            (revenue, LedgerDirection.credit, pending.platform_fee_minor),
+            (earnings, LedgerDirection.credit, pending.creator_amount_minor),
+        ],
+        metadata={"pending_message_send_id": str(pending.id)},
+    )
+    message = Message(
+        conversation_id=conversation.id,
+        sender_user_id=pending.buyer_user_id,
+        message_type=MessageType.text,
+        body=pending.body,
+    )
+    db.add(message)
+    await db.flush()
+    conversation.last_message_at = datetime.now(UTC)
+    pending.status, pending.ledger_transaction_id, pending.message_id = (
+        "paid",
+        ledger.id,
+        message.id,
+    )
+    return pending
 
 
 async def campaign_recipients(db: AsyncSession, campaign: MassMessageCampaign) -> list[UUID]:

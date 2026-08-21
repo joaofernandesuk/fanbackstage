@@ -27,6 +27,7 @@ from app.models.messaging import (
     MessageAttachment,
     MessageUnlockPurchase,
     MessagingSettings,
+    PendingMessageSend,
     UserBlock,
 )
 from app.models.social import (
@@ -78,6 +79,7 @@ __all__ = [
     "MessagingSettings",
     "PaymentAttempt",
     "PaymentWebhookEvent",
+    "PendingMessageSend",
     "PostComment",
     "PostHashtag",
     "PostMention",

@@ -18,6 +18,7 @@ from app.models.messaging import (
     UserBlock,
 )
 from app.schemas.messaging import (
+    AttachmentInput,
     CampaignInput,
     ConversationResponse,
     MessageResponse,
@@ -122,6 +123,33 @@ async def send(
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
+@router.post("/creator/{creator_id}/paid-send")
+async def paid_send(
+    creator_id: UUID,
+    payload: SendMessageInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    try:
+        await enforce_messaging_rate_limit(request, str(identity[0].id), "paid_send")
+        pending = await service.initiate_paid_send(
+            db, identity[0], creator_id, payload.body, idempotency_key or ""
+        )
+        await db.commit()
+        return {
+            "id": str(pending.id),
+            "status": pending.status,
+            "amount_minor": pending.gross_amount_minor,
+            "currency": pending.currency,
+            "payment_attempt_id": str(pending.payment_attempt_id),
+        }
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
 @router.get("/conversations", response_model=list[ConversationResponse])
 async def inbox(identity: CurrentIdentity, db: Db, limit: int = 20) -> list[ConversationResponse]:
     rows = (
@@ -221,6 +249,31 @@ async def unlock(
             "payment_attempt_id": str(purchase.payment_attempt_id),
             "amount_minor": purchase.gross_amount_minor,
             "currency": purchase.currency,
+        }
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/messages/{message_id}/attachments")
+async def add_attachment(
+    message_id: UUID, payload: AttachmentInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    try:
+        attachment = await service.attach_media(
+            db,
+            identity[0],
+            message_id,
+            payload.media_asset_id,
+            payload.unlock_price_minor,
+            payload.unlock_currency,
+        )
+        await db.commit()
+        return {
+            "id": str(attachment.id),
+            "locked": attachment.unlock_price_minor is not None,
+            "amount_minor": attachment.unlock_price_minor,
+            "currency": attachment.unlock_currency,
         }
     except (PermissionError, ValueError) as exc:
         await db.rollback()

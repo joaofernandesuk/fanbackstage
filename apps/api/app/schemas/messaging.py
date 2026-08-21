@@ -16,6 +16,12 @@ class SendMessageInput(BaseModel):
     reply_to_message_id: UUID | None = None
 
 
+class AttachmentInput(BaseModel):
+    media_asset_id: UUID
+    unlock_price_minor: int | None = Field(default=None, gt=0)
+    unlock_currency: str | None = Field(default=None, min_length=3, max_length=3)
+
+
 class MessageResponse(BaseModel):
     id: UUID
     conversation_id: UUID

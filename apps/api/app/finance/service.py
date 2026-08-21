@@ -270,8 +270,8 @@ async def process_development_webhook(
     if purchase and purchase.status is PurchaseStatus.awaiting_payment:
         await settle_purchase(db, purchase)
     elif not purchase:
-        from app.messaging.service import settle_message_unlock
-        from app.models.messaging import MessageUnlockPurchase
+        from app.messaging.service import settle_message_unlock, settle_paid_send
+        from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
 
         unlock = await db.scalar(
             select(MessageUnlockPurchase)
@@ -281,9 +281,17 @@ async def process_development_webhook(
         if unlock:
             await settle_message_unlock(db, unlock)
         else:
-            from app.subscriptions.service import settle_payment_attempt
+            pending_send = await db.scalar(
+                select(PendingMessageSend)
+                .where(PendingMessageSend.payment_attempt_id == attempt.id)
+                .with_for_update()
+            )
+            if pending_send:
+                await settle_paid_send(db, pending_send)
+            else:
+                from app.subscriptions.service import settle_payment_attempt
 
-            await settle_payment_attempt(db, attempt)
+                await settle_payment_attempt(db, attempt)
     webhook_event.processed_at = datetime.now(UTC)
     return purchase
 
