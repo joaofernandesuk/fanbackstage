@@ -16,6 +16,7 @@ from app.permissions.policies import Permission, authorize
 from app.schemas.finance import (
     CommissionUpdate,
     CreatorEarningsResponse,
+    DevelopmentPaymentCompletionResponse,
     PurchaseHistoryResponse,
     PurchaseResponse,
     RefundRequest,
@@ -80,10 +81,13 @@ async def my_purchases(identity: CurrentIdentity, db: Db) -> list[PurchaseHistor
     ]
 
 
-@router.post("/payments/development/{payment_attempt_id}/complete", response_model=PurchaseResponse)
+@router.post(
+    "/payments/development/{payment_attempt_id}/complete",
+    response_model=PurchaseResponse | DevelopmentPaymentCompletionResponse,
+)
 async def complete_development_payment(
     payment_attempt_id: UUID, identity: CurrentIdentity, db: Db
-) -> PurchaseResponse:
+) -> PurchaseResponse | DevelopmentPaymentCompletionResponse:
     attempt = await db.get(PaymentAttempt, payment_attempt_id)
     if not attempt or attempt.buyer_user_id != identity[0].id:
         raise HTTPException(status_code=404, detail="Payment attempt not found")
@@ -96,13 +100,28 @@ async def complete_development_payment(
     except service.FinancialError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if purchase is None:
-        purchase = await db.scalar(
-            select(Purchase).where(Purchase.payment_attempt_id == attempt.id)
+    if purchase is not None:
+        return purchase_response(purchase)
+
+    purchase = await db.scalar(select(Purchase).where(Purchase.payment_attempt_id == attempt.id))
+    if purchase is not None:
+        return purchase_response(purchase)
+
+    unlock = await db.scalar(
+        select(MessageUnlockPurchase).where(MessageUnlockPurchase.payment_attempt_id == attempt.id)
+    )
+    if unlock is not None:
+        return DevelopmentPaymentCompletionResponse(
+            id=unlock.id, status=unlock.status, payment_attempt_id=attempt.id
         )
-    if not purchase:
-        raise HTTPException(status_code=409, detail="Payment was already processed")
-    return purchase_response(purchase)
+    pending_send = await db.scalar(
+        select(PendingMessageSend).where(PendingMessageSend.payment_attempt_id == attempt.id)
+    )
+    if pending_send is not None:
+        return DevelopmentPaymentCompletionResponse(
+            id=pending_send.id, status=pending_send.status, payment_attempt_id=attempt.id
+        )
+    raise HTTPException(status_code=409, detail="Payment settlement was not found")
 
 
 @router.post("/payments/webhooks/development", status_code=204)

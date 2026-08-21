@@ -17,6 +17,11 @@ Phase 6 uses a normalized creator/viewer conversation with participant read stat
 - Private-message reports are participant-only. Moderator text access requires moderation permission and a documented reason, and emits the `message.moderator_accessed` audit event. It does not expose protected media originals.
 - Archive and mute are per-user inbox state only. They do not change conversation history, access ownership, or financial records. Read state is stored per conversation participant.
 - Messaging writes are independently Redis-rate-limited by authenticated actor and action. The authoritative business authorisation checks still run for every request.
+- The development payment completion endpoint is shared by PPV, paid sends, and message unlocks. It returns the settled commercial record for each of those flows, including harmless provider-event replays; it never treats a successfully settled message payment as a failed purchase merely because it is not a content PPV purchase.
+
+## Phase 6 release journey
+
+`apps/web/e2e/messaging.spec.ts` exercises the isolated browser/API/PostgreSQL stack for creator approval, free conversation delivery, REST-polled reply visibility, server-priced paid-send confirmation, provider settlement, idempotent replay, and participant reporting. The service-level regression suite additionally covers asset-scoped unlock and refund revocation, all eligibility modes, campaign segmentation/replay, moderator auditing, rate limits, and per-conversation read state.
 
 
 ## 11.1 Messaging permissions

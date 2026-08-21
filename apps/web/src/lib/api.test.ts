@@ -29,4 +29,10 @@ describe("api", () => {
       }),
     );
   });
+
+  it("accepts valid empty successful responses", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+
+    await expect(api<void>("/messages/conversations/conversation-id/read", { method: "POST" })).resolves.toBeUndefined();
+  });
 });

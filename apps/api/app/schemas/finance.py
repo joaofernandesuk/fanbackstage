@@ -14,6 +14,14 @@ class PurchaseResponse(BaseModel):
     payment_attempt_id: UUID
 
 
+class DevelopmentPaymentCompletionResponse(BaseModel):
+    """Stable completion response for non-PPV uses of the shared payment path."""
+
+    id: UUID
+    status: str
+    payment_attempt_id: UUID
+
+
 class RefundRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
