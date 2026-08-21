@@ -190,6 +190,28 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
         db_session, manager.id, creator.id, GroupPermission.manage_content
     )
     assert (await db_session.get(GroupContract, active.id)).status is GroupContractStatus.ended
+    # Leave is a future-only boundary: the group keeps its immutable historical
+    # earnings, while a later paid event credits the creator's full post-fee pool.
+    group_before_exit_sale = await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+    post_exit_buyer, _ = await accounts.register(
+        db_session, "post-exit-buyer@example.com", "strong-password-123", None
+    )
+    post_exit_purchase = await finance.initiate_purchase(
+        db_session, post_exit_buyer, content.id, "post-exit-creator-revenue"
+    )
+    post_exit_attempt = await db_session.get(PaymentAttempt, post_exit_purchase.payment_attempt_id)
+    post_exit_payload, post_exit_signature = finance.development_webhook_payload(post_exit_attempt)
+    post_exit_settled = await finance.process_development_webhook(
+        db_session, post_exit_payload, post_exit_signature
+    )
+    assert post_exit_settled and post_exit_settled.ledger_transaction_id
+    post_exit_ledger = await db_session.get(LedgerTransaction, post_exit_settled.ledger_transaction_id)
+    assert post_exit_ledger and post_exit_ledger.metadata_json["group_amount_minor"] == "0"
+    assert post_exit_ledger.metadata_json["creator_amount_minor"] == "1600"
+    assert (
+        await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+        == group_before_exit_sale
+    )
 
 
 @pytest.mark.asyncio
