@@ -45,6 +45,19 @@ def room_response(room: LiveRoom) -> LiveRoomResponse:
     )
 
 
+def private_session_response(session) -> PrivateSessionResponse:
+    return PrivateSessionResponse(
+        id=session.id,
+        request_id=session.request_id,
+        status=session.status.value,
+        mode=session.mode.value,
+        per_minute_price_minor=session.per_minute_price_minor,
+        minimum_charge_minor=session.minimum_charge_minor,
+        currency=session.currency,
+        billable_seconds=session.billable_seconds,
+    )
+
+
 @router.post("/rooms", response_model=LiveRoomResponse)
 async def start_room(
     payload: LiveStartInput, request: Request, identity: CurrentIdentity, db: Db
@@ -276,6 +289,37 @@ async def request_private(
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
+@router.get("/private-requests/mine/creator", response_model=list[PrivateRequestResponse])
+async def creator_private_requests(
+    identity: CurrentIdentity, db: Db
+) -> list[PrivateRequestResponse]:
+    try:
+        rows = await service.creator_pending_private_requests(db, identity[0])
+        return [
+            PrivateRequestResponse(
+                id=item.id,
+                creator_id=item.creator_id,
+                status=item.status.value,
+                mode=item.mode.value,
+                per_minute_price_minor=item.per_minute_price_minor,
+                minimum_charge_minor=item.minimum_charge_minor,
+                currency=item.currency,
+                expires_at=item.expires_at,
+            )
+            for item in rows
+        ]
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.get("/private-sessions/mine", response_model=list[PrivateSessionResponse])
+async def my_private_sessions(identity: CurrentIdentity, db: Db) -> list[PrivateSessionResponse]:
+    return [
+        private_session_response(session)
+        for session in await service.participant_private_sessions(db, identity[0])
+    ]
+
+
 @router.post("/private-requests/{request_id}/accept", response_model=PrivateSessionResponse)
 async def accept_private(
     request_id: UUID, identity: CurrentIdentity, db: Db
@@ -283,16 +327,7 @@ async def accept_private(
     try:
         session = await service.accept_private_request(db, identity[0], request_id)
         await db.commit()
-        return PrivateSessionResponse(
-            id=session.id,
-            request_id=session.request_id,
-            status=session.status.value,
-            mode=session.mode.value,
-            per_minute_price_minor=session.per_minute_price_minor,
-            minimum_charge_minor=session.minimum_charge_minor,
-            currency=session.currency,
-            billable_seconds=session.billable_seconds,
-        )
+        return private_session_response(session)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
@@ -307,16 +342,7 @@ async def end_private(
             db, identity[0], session_id, "ended_by_participant"
         )
         await db.commit()
-        return PrivateSessionResponse(
-            id=session.id,
-            request_id=session.request_id,
-            status=session.status.value,
-            mode=session.mode.value,
-            per_minute_price_minor=session.per_minute_price_minor,
-            minimum_charge_minor=session.minimum_charge_minor,
-            currency=session.currency,
-            billable_seconds=session.billable_seconds,
-        )
+        return private_session_response(session)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc

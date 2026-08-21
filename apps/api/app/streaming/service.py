@@ -432,6 +432,45 @@ async def request_private_session(
     return request
 
 
+async def creator_pending_private_requests(
+    db: AsyncSession, actor: User
+) -> list[PrivateSessionRequest]:
+    creator = await approved_creator(db, actor)
+    return (
+        await db.scalars(
+            select(PrivateSessionRequest)
+            .where(
+                PrivateSessionRequest.creator_id == creator.id,
+                PrivateSessionRequest.status == PrivateRequestStatus.pending,
+                PrivateSessionRequest.expires_at > datetime.now(UTC),
+            )
+            .order_by(PrivateSessionRequest.created_at)
+        )
+    ).all()
+
+
+async def participant_private_sessions(db: AsyncSession, actor: User) -> list[PrivateSession]:
+    return (
+        await db.scalars(
+            select(PrivateSession)
+            .join(SessionParticipant, SessionParticipant.private_session_id == PrivateSession.id)
+            .where(
+                SessionParticipant.user_id == actor.id,
+                PrivateSession.status.in_(
+                    [
+                        PrivateSessionStatus.awaiting_payment_authorization,
+                        PrivateSessionStatus.ready,
+                        PrivateSessionStatus.connecting,
+                        PrivateSessionStatus.active,
+                        PrivateSessionStatus.reconnecting,
+                    ]
+                ),
+            )
+            .order_by(PrivateSession.created_at.desc())
+        )
+    ).all()
+
+
 async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID) -> PrivateSession:
     creator = await approved_creator(db, actor)
     request = await db.scalar(
@@ -701,6 +740,26 @@ async def expire_reconnect_grace(db: AsyncSession, now: datetime | None = None) 
     ).all()
     for session in sessions:
         await end_private_session(db, None, session.id, "reconnect_grace_expired", now)
+    return len(sessions)
+
+
+async def reconcile_private_authorizations(db: AsyncSession, limit: int = 100) -> int:
+    """Recover verified payment state after a webhook transaction interruption."""
+    sessions = (
+        await db.scalars(
+            select(PrivateSession)
+            .join(PaymentAttempt, PaymentAttempt.id == PrivateSession.payment_attempt_id)
+            .where(
+                PrivateSession.status == PrivateSessionStatus.awaiting_payment_authorization,
+                PaymentAttempt.status == PaymentStatus.succeeded,
+            )
+            .order_by(PaymentAttempt.completed_at, PaymentAttempt.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    for session in sessions:
+        await authorize_private_session(db, session)
     return len(sessions)
 
 

@@ -159,14 +159,15 @@ def process_scheduled_mass_messages() -> dict[str, int]:
 
 @celery_app.task
 def reconcile_private_session_grace() -> dict[str, int]:
-    """End reconnecting private sessions after the persisted grace deadline."""
+    """Reconcile private reconnect deadlines and verified payment authorization."""
     from app.db.session import SessionLocal
-    from app.streaming.service import expire_reconnect_grace
+    from app.streaming.service import expire_reconnect_grace, reconcile_private_authorizations
 
-    async def run() -> int:
+    async def run() -> dict[str, int]:
         async with SessionLocal() as session:
-            value = await expire_reconnect_grace(session)
+            ended = await expire_reconnect_grace(session)
+            authorized = await reconcile_private_authorizations(session)
             await session.commit()
-            return value
+            return {"ended": ended, "authorized": authorized}
 
-    return {"ended": run_async(run())}
+    return run_async(run())
