@@ -192,6 +192,7 @@ async def approve(db: AsyncSession, content: ContentItem, actor: User) -> Conten
         target_id=str(content.id),
     )
     from app.social.service import auto_post_content
+
     await auto_post_content(db, content)
     return content
 
@@ -225,10 +226,49 @@ async def update_content(
     target_amount = values.get("price_amount_minor", content.price_amount_minor)
     target_currency = values.get("price_currency", content.price_currency)
     validate_ppv_price(target_policy, target_amount, target_currency)
-    for field in ("title", "description", "access_policy", "price_amount_minor", "price_currency", "feed_announcement_override"):
+    for field in (
+        "title",
+        "description",
+        "access_policy",
+        "price_amount_minor",
+        "price_currency",
+        "feed_announcement_override",
+    ):
         if field in values:
             value = values[field]
             setattr(content, field, value.upper() if field == "price_currency" and value else value)
+    return content
+
+
+async def update_content_as_group_manager(
+    db: AsyncSession, user: User, content_id: UUID, values: dict[str, object]
+) -> ContentItem:
+    """Apply an explicitly delegated content-management action without transferring ownership."""
+    content = await db.get(ContentItem, content_id)
+    if not content:
+        raise PermissionError("Content not found")
+    from app.groups.service import has_delegated_permission
+    from app.models.groups import GroupPermission
+
+    if not await has_delegated_permission(
+        db, user.id, content.owner_creator_id, GroupPermission.manage_content
+    ):
+        raise PermissionError("Delegated content management permission denied")
+    target_policy = values.get("access_policy", content.access_policy)
+    target_amount = values.get("price_amount_minor", content.price_amount_minor)
+    target_currency = values.get("price_currency", content.price_currency)
+    validate_ppv_price(target_policy, target_amount, target_currency)
+    for field in ("title", "description", "access_policy", "price_amount_minor", "price_currency"):
+        if field in values:
+            value = values[field]
+            setattr(content, field, value.upper() if field == "price_currency" and value else value)
+    await record_event(
+        db,
+        "group_manager.content_updated",
+        actor_user_id=user.id,
+        target_type="content_item",
+        target_id=str(content.id),
+    )
     return content
 
 

@@ -3,9 +3,11 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 
 from app.api.deps import CurrentIdentity, Db
+from app.content import service as content_service
 from app.groups import service
 from app.models.groups import Group, GroupContract, GroupCreatorMembership, GroupPermission
 from app.permissions.policies import Permission, authorize
+from app.schemas.content import ContentUpdate
 from app.schemas.groups import (
     AffiliationVisibility,
     ContractAmendment,
@@ -196,6 +198,23 @@ async def affiliation(
         await db.rollback()
         raise HTTPException(
             status_code=400 if isinstance(exc, service.GroupError) else 403, detail=str(exc)
+        ) from exc
+
+
+@router.patch("/managed-content/{content_id}")
+async def update_managed_content(
+    content_id: UUID, payload: ContentUpdate, identity: CurrentIdentity, db: Db
+) -> dict:
+    try:
+        content = await content_service.update_content_as_group_manager(
+            db, identity[0], content_id, payload.model_dump(exclude_unset=True)
+        )
+        await db.commit()
+        return {"id": str(content.id), "owner_creator_id": str(content.owner_creator_id)}
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
         ) from exc
 
 
