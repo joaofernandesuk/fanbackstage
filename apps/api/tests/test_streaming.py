@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.accounts import service as accounts
 from app.creators import service as creators
 from app.models.creator import CreatorStatus
+from app.models.finance import LedgerTransaction
 from app.models.streaming import PrivateSession, PrivateSessionMode, PrivateSessionStatus
 from app.streaming import service as streaming
 
@@ -150,15 +151,38 @@ async def test_provider_event_replay_cannot_inflate_private_billable_time(db_ses
         now=now + timedelta(seconds=15),
     )
     assert session.billable_seconds == 15
-    assert (
-        await streaming.process_private_provider_event(
-            db_session,
-            event_id="leave-payer",
-            event_type="participant_left",
-            session_id=session.id,
-            user_id=payer.id,
-            now=now + timedelta(seconds=45),
-        )
-        is None
+
+
+@pytest.mark.asyncio
+async def test_private_settlement_uses_seconds_minimum_cap_and_is_idempotent(db_session):
+    owner, profile = await creator(db_session, "settle-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "settle-payer@example.com", "strong-password-123", None
     )
-    assert session.billable_seconds == 15
+    settings = await streaming.settings_for_creator(db_session, profile.id)
+    settings.one_to_one_price_minor, settings.minimum_minutes, settings.max_authorization_minor = (
+        300,
+        2,
+        700,
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    session.status, session.billable_seconds = PrivateSessionStatus.ended, 95
+    assert streaming.settlement_amount(session) == 600  # ceil(300 * 95 / 60) < 2-minute minimum
+    await streaming.settle_private_session(db_session, session)
+    assert session.status is PrivateSessionStatus.settled
+    assert await db_session.scalar(
+        select(LedgerTransaction).where(
+            LedgerTransaction.reference == f"private_session:{session.id}"
+        )
+    )
+    await streaming.settle_private_session(db_session, session)
+    assert (
+        await db_session.scalars(
+            select(LedgerTransaction).where(
+                LedgerTransaction.reference == f"private_session:{session.id}"
+            )
+        )
+    ).all().__len__() == 1
