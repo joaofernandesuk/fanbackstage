@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
@@ -7,6 +7,7 @@ from app.content import service as content_service
 from app.creators import service as creator_service
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
+from app.models.messaging import Message, MessageReport, MessageReportStatus
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
 from app.permissions.policies import Permission, authorize
 from app.schemas.auth import MessageResponse
@@ -130,35 +131,123 @@ async def social_reports(
     result = []
     for row in rows:
         target = await db.get(FeedPost if row.target_type == "post" else PostComment, row.target_id)
-        result.append({"id": str(row.id), "target_type": row.target_type, "target_id": str(row.target_id), "reason": row.reason, "details": row.details, "status": row.status.value, "created_at": row.created_at, "target_exists": target is not None, "target_preview": (target.body[:240] if target else None)})
+        result.append(
+            {
+                "id": str(row.id),
+                "target_type": row.target_type,
+                "target_id": str(row.target_id),
+                "reason": row.reason,
+                "details": row.details,
+                "status": row.status.value,
+                "created_at": row.created_at,
+                "target_exists": target is not None,
+                "target_preview": (target.body[:240] if target else None),
+            }
+        )
     return result
 
 
 @router.post("/social-reports/{report_id}/dismiss", response_model=MessageResponse)
-async def dismiss_social_report(report_id: str, identity: CurrentIdentity, db: Db) -> MessageResponse:
+async def dismiss_social_report(
+    report_id: str, identity: CurrentIdentity, db: Db
+) -> MessageResponse:
     authorize(identity[0], Permission.MODERATION_ACCESS)
     report = await db.get(SocialReport, report_id)
-    if not report: raise HTTPException(404, "Report not found")
+    if not report:
+        raise HTTPException(404, "Report not found")
     report.status = ReportStatus.dismissed
-    await record_event(db, "social_report.dismissed", actor_user_id=identity[0].id, target_type="social_report", target_id=str(report.id))
+    await record_event(
+        db,
+        "social_report.dismissed",
+        actor_user_id=identity[0].id,
+        target_type="social_report",
+        target_id=str(report.id),
+    )
     await db.commit()
     return MessageResponse(message="Report dismissed")
 
 
 @router.post("/social-reports/{report_id}/remove-target", response_model=MessageResponse)
-async def remove_social_target(report_id: str, identity: CurrentIdentity, db: Db) -> MessageResponse:
+async def remove_social_target(
+    report_id: str, identity: CurrentIdentity, db: Db
+) -> MessageResponse:
     authorize(identity[0], Permission.MODERATION_ACCESS)
     report = await db.get(SocialReport, report_id)
-    if not report: raise HTTPException(404, "Report not found")
-    target = await db.get(FeedPost if report.target_type == "post" else PostComment, report.target_id)
-    if not target: raise HTTPException(404, "Report target not found")
+    if not report:
+        raise HTTPException(404, "Report not found")
+    target = await db.get(
+        FeedPost if report.target_type == "post" else PostComment, report.target_id
+    )
+    if not target:
+        raise HTTPException(404, "Report target not found")
     if report.target_type == "post":
         target.status = FeedPostStatus.removed
         target.moderation_status = ModerationStatus.removed
     else:
         from datetime import UTC, datetime
+
         target.hidden_at = datetime.now(UTC)
     report.status = ReportStatus.reviewed
-    await record_event(db, "social_report.target_removed", actor_user_id=identity[0].id, target_type=report.target_type, target_id=str(report.target_id), metadata={"report_id": str(report.id)})
+    await record_event(
+        db,
+        "social_report.target_removed",
+        actor_user_id=identity[0].id,
+        target_type=report.target_type,
+        target_id=str(report.target_id),
+        metadata={"report_id": str(report.id)},
+    )
     await db.commit()
     return MessageResponse(message="Reported target removed")
+
+
+@router.get("/message-reports", response_model=list[dict])
+async def message_reports(
+    identity: CurrentIdentity, db: Db, status: MessageReportStatus | None = None
+) -> list[dict]:
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    query = select(MessageReport)
+    if status:
+        query = query.where(MessageReport.status == status)
+    rows = (await db.scalars(query.order_by(MessageReport.created_at))).all()
+    return [
+        {
+            "id": str(row.id),
+            "message_id": str(row.message_id),
+            "reason": row.reason,
+            "details": row.details,
+            "status": row.status.value,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+@router.get("/messages/{message_id}", response_model=dict)
+async def moderator_message_access(
+    message_id: str,
+    identity: CurrentIdentity,
+    db: Db,
+    reason: str = Query(min_length=3, max_length=500),
+) -> dict:
+    """Return private-message text only for a documented moderation purpose."""
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    message = await db.get(Message, message_id)
+    if not message:
+        raise HTTPException(404, "Message not found")
+    await record_event(
+        db,
+        "message.moderator_accessed",
+        actor_user_id=identity[0].id,
+        target_type="message",
+        target_id=str(message.id),
+        metadata={"reason": reason},
+    )
+    await db.commit()
+    return {
+        "id": str(message.id),
+        "conversation_id": str(message.conversation_id),
+        "sender_user_id": str(message.sender_user_id),
+        "body": message.body if message.status.value == "sent" else None,
+        "status": message.status.value,
+        "created_at": message.created_at,
+    }

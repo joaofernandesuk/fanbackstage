@@ -43,3 +43,8 @@ class CampaignInput(BaseModel):
     audience_segment: str
     body: str = Field(min_length=1, max_length=4000)
     scheduled_at: datetime | None = None
+
+
+class MessageReportInput(BaseModel):
+    reason: str = Field(min_length=1, max_length=80)
+    details: str | None = Field(default=None, max_length=2000)

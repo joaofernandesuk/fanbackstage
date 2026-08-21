@@ -14,6 +14,7 @@ from app.models.messaging import (
     ConversationParticipant,
     MassMessageCampaign,
     Message,
+    MessageReport,
     MessagingPermission,
     UserBlock,
 )
@@ -21,6 +22,7 @@ from app.schemas.messaging import (
     AttachmentInput,
     CampaignInput,
     ConversationResponse,
+    MessageReportInput,
     MessageResponse,
     MessagingSettingsInput,
     SendMessageInput,
@@ -333,6 +335,43 @@ async def unblock(user_id: UUID, identity: CurrentIdentity, db: Db) -> None:
     if row:
         await db.delete(row)
         await db.commit()
+
+
+@router.post("/messages/{message_id}/report", response_model=dict)
+async def report_message(
+    message_id: UUID,
+    payload: MessageReportInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    await enforce_messaging_rate_limit(request, str(identity[0].id), "report")
+    message = await db.get(Message, message_id)
+    conversation = await db.get(Conversation, message.conversation_id) if message else None
+    if not message or not conversation:
+        raise HTTPException(404, "Message not found")
+    try:
+        await service.assert_participant(db, conversation, identity[0])
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    existing = await db.scalar(
+        select(MessageReport).where(
+            MessageReport.reporter_user_id == identity[0].id,
+            MessageReport.message_id == message.id,
+            MessageReport.reason == payload.reason,
+        )
+    )
+    if not existing:
+        db.add(
+            MessageReport(
+                reporter_user_id=identity[0].id,
+                message_id=message.id,
+                reason=payload.reason,
+                details=payload.details,
+            )
+        )
+        await db.commit()
+    return {"reported": True}
 
 
 @router.post("/campaigns", response_model=dict)

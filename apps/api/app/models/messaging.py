@@ -54,6 +54,12 @@ class AudienceSegment(str, enum.Enum):
     previous_customers = "previous_customers"
 
 
+class MessageReportStatus(str, enum.Enum):
+    open = "open"
+    reviewed = "reviewed"
+    dismissed = "dismissed"
+
+
 class Conversation(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "conversations"
     __table_args__ = (
@@ -278,4 +284,31 @@ class UserBlock(UUIDPrimaryKey, Timestamped, Base):
     )
     blocked_user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+
+
+class MessageReport(UUIDPrimaryKey, Timestamped, Base):
+    """Append-oriented report of a private message, visible only to moderators."""
+
+    __tablename__ = "message_reports"
+    __table_args__ = (
+        UniqueConstraint(
+            "reporter_user_id",
+            "message_id",
+            "reason",
+            name="uq_message_report_dedupe",
+        ),
+    )
+    reporter_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"), index=True
+    )
+    reason: Mapped[str] = mapped_column(String(80))
+    details: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[MessageReportStatus] = mapped_column(
+        Enum(MessageReportStatus, name="message_report_status"),
+        default=MessageReportStatus.open,
+        index=True,
     )

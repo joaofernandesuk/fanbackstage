@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 
@@ -7,7 +8,9 @@ from app.accounts import service as accounts
 from app.content.access import can_access_asset
 from app.creators import service as creators
 from app.finance import service as finance
+from app.main import app
 from app.messaging import service as messaging
+from app.models.audit import AuditEvent
 from app.models.content import (
     AccessPolicy,
     ContentEntitlement,
@@ -28,6 +31,7 @@ from app.models.messaging import (
     MassMessageCampaign,
     MassMessageRecipient,
     Message,
+    MessageReport,
     MessagingPermission,
     UserBlock,
 )
@@ -264,3 +268,58 @@ async def test_campaign_snapshots_recipients_and_replay_respects_later_blocks(db
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_message_reports_and_moderator_access_are_authorized_and_audited(db_session):
+    _owner, profile = await creator(db_session, "report-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session, "report-viewer@example.com", "strong-password-123", None
+    )
+    message = await messaging.send_message(db_session, viewer, profile.id, "reportable message")
+    moderator, _ = await accounts.register(
+        db_session, "report-moderator@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, moderator, "moderator", moderator.id, None)
+    await db_session.commit()
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as viewer_client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as moderator_client,
+    ):
+        await viewer_client.post(
+            "/api/v1/auth/login",
+            json={"email": viewer.email, "password": "strong-password-123"},
+        )
+        await moderator_client.post(
+            "/api/v1/auth/login",
+            json={"email": moderator.email, "password": "strong-password-123"},
+        )
+        assert (
+            await viewer_client.post(
+                f"/api/v1/messages/messages/{message.id}/report",
+                json={"reason": "abuse"},
+            )
+        ).status_code == 200
+        assert (
+            await viewer_client.post(
+                f"/api/v1/messages/messages/{message.id}/report",
+                json={"reason": "abuse"},
+            )
+        ).status_code == 200
+        assert (
+            await viewer_client.get(f"/api/v1/admin/messages/{message.id}?reason=review")
+        ).status_code == 403
+        opened = await moderator_client.get(
+            f"/api/v1/admin/messages/{message.id}?reason=abuse-review"
+        )
+        assert opened.status_code == 200
+        assert opened.json()["body"] == "reportable message"
+    assert (await db_session.scalar(select(func.count()).select_from(MessageReport))) == 1
+    access = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "message.moderator_accessed")
+    )
+    assert access and access.actor_user_id == moderator.id

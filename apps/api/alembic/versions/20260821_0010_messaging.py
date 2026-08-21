@@ -23,6 +23,7 @@ def upgrade() -> None:
     op.execute(
         "CREATE TYPE mass_message_campaign_status AS ENUM ('draft', 'scheduled', 'processing', 'completed', 'cancelled')"
     )
+    op.execute("CREATE TYPE message_report_status AS ENUM ('open', 'reviewed', 'dismissed')")
     op.execute("ALTER TYPE ledger_transaction_type ADD VALUE IF NOT EXISTS 'messaging_charge'")
     op.create_table(
         "conversations",
@@ -439,10 +440,52 @@ def upgrade() -> None:
         sa.Column("delivered_at", sa.DateTime(timezone=True)),
         sa.UniqueConstraint("campaign_id", "recipient_user_id", name="uq_mass_campaign_recipient"),
     )
+    op.create_table(
+        "message_reports",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "reporter_user_id",
+            sa.Uuid(),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "message_id",
+            sa.Uuid(),
+            sa.ForeignKey("messages.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column("reason", sa.String(80), nullable=False),
+        sa.Column("details", sa.Text()),
+        sa.Column(
+            "status",
+            postgresql.ENUM(name="message_report_status", create_type=False),
+            nullable=False,
+            server_default="open",
+        ),
+        sa.UniqueConstraint(
+            "reporter_user_id", "message_id", "reason", name="uq_message_report_dedupe"
+        ),
+    )
+    op.create_index("ix_message_reports_reporter_user_id", "message_reports", ["reporter_user_id"])
+    op.create_index("ix_message_reports_message_id", "message_reports", ["message_id"])
 
 
 def downgrade() -> None:
     for table in (
+        "message_reports",
         "mass_message_recipients",
         "mass_message_campaigns",
         "pending_message_sends",
@@ -457,10 +500,11 @@ def downgrade() -> None:
         op.execute(f"DROP TABLE IF EXISTS {table}")
     for name in (
         "mass_message_campaign_status",
+        "message_report_status",
         "message_audience_segment",
         "message_status",
         "message_type",
         "messaging_permission",
     ):
-        op.execute(f"DROP TYPE {name}")
+        op.execute(f"DROP TYPE IF EXISTS {name}")
     # PostgreSQL enum values are intentionally not removed; a production rollback uses a forward correction.
