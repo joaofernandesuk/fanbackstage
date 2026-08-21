@@ -1,8 +1,9 @@
 """Phase 5 social feed foundation."""
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import ENUM
+
+from alembic import op
 
 revision = "20260820_0008"
 down_revision = "20260820_0007"

@@ -1,6 +1,7 @@
 """Add explicit content publication feed-announcement override."""
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "20260820_0009"

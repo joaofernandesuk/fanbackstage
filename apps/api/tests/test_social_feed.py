@@ -8,7 +8,7 @@ from app.content.access import can_access_content
 from app.creators import service as creators
 from app.models.content import AccessPolicy, ContentItem, ContentStatus, ContentType
 from app.models.creator import CreatorStatus
-from app.models.social import FeedPost, FeedPostStatus, Follow, PostReaction
+from app.models.social import FeedPost, FeedPostStatus, FeedPostType, Follow, PostReaction
 from app.social import service as social
 
 
@@ -76,3 +76,29 @@ async def test_scheduling_and_auto_posts_are_replay_safe(db_session):
     db_session.add(enabled); await db_session.flush()
     settings.auto_post_galleries = False
     assert await social.auto_post_content(db_session, enabled)
+
+
+@pytest.mark.asyncio
+async def test_feed_cursor_covers_equal_timestamps_and_pinned_sort_key(db_session):
+    owner, profile = await creator(db_session, "cursor-owner@example.com")
+    now = datetime.now(UTC)
+    posts = [
+        FeedPost(
+            creator_id=profile.id,
+            created_by_user_id=owner.id,
+            post_type=FeedPostType.text,
+            body=f"post {index}",
+            status=FeedPostStatus.published,
+            access_policy=AccessPolicy.free,
+            published_at=now,
+            pinned_at=now if index == 0 else None,
+        )
+        for index in range(3)
+    ]
+    db_session.add_all(posts)
+    await db_session.flush()
+    first, cursor = await social.feed_posts(db_session, None, "discover", None, None, 1)
+    second, cursor_two = await social.feed_posts(db_session, None, "discover", None, cursor, 1)
+    third, cursor_three = await social.feed_posts(db_session, None, "discover", None, cursor_two, 1)
+    assert cursor and cursor_two and cursor_three is None
+    assert len({first[0].id, second[0].id, third[0].id}) == 3

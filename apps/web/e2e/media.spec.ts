@@ -120,13 +120,16 @@ test("creator media travels through the real private processing stack", async ({
   await page.reload();
   await page.getByRole("group", { name: "Ready images" }).getByRole("checkbox").check();
   await page.getByLabel("Gallery title").fill(galleryTitle);
-  await page.getByLabel("Access policy").first().selectOption("ppv");
+  // The studio now also contains a post composer access policy. Scope these
+  // selections to the gallery editor's control order so this remains a real
+  // PPV/subscription media journey rather than silently creating FREE items.
+  await page.getByLabel("Access policy").nth(1).selectOption("ppv");
   await page.getByLabel("PPV price (minor units; only when PPV)").first().fill("999");
   await page.getByRole("button", { name: "Create and submit gallery" }).click();
   await expect(page.getByText(/pending_review/)).toBeVisible();
   await page.getByRole("group", { name: "Ready images" }).getByRole("checkbox").check();
   await page.getByLabel("Gallery title").fill(subscriptionTitle);
-  await page.getByLabel("Access policy").first().selectOption("subscription");
+  await page.getByLabel("Access policy").nth(1).selectOption("subscription");
   await page.getByRole("button", { name: "Create and submit gallery" }).click();
   await expect(page.getByText(/pending_review/)).toHaveCount(2);
 

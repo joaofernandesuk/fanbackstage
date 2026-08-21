@@ -164,15 +164,21 @@ async def can_access_post(db: AsyncSession, post: FeedPost, user: User | None) -
 
 
 def encode_cursor(post: FeedPost) -> str:
-    return f"{post.published_at.isoformat()}|{post.id}"
+    """Encode every field in the feed ordering, including the pin key.
+
+    A cursor must describe the full ordering tuple.  Omitting ``pinned_at``
+    caused a pinned item and an unpinned item with the same publication time
+    to be ordered differently from the cursor predicate.
+    """
+    return f"{post.pinned_at.isoformat() if post.pinned_at else ''}|{post.published_at.isoformat()}|{post.id}"
 
 
-def parse_cursor(value: str | None) -> tuple[datetime, UUID] | None:
+def parse_cursor(value: str | None) -> tuple[datetime | None, datetime, UUID] | None:
     if not value:
         return None
     try:
-        date, identifier = value.rsplit("|", 1)
-        return datetime.fromisoformat(date), UUID(identifier)
+        pinned, date, identifier = value.rsplit("|", 2)
+        return (datetime.fromisoformat(pinned) if pinned else None), datetime.fromisoformat(date), UUID(identifier)
     except (ValueError, TypeError) as exc:
         raise ValueError("Invalid cursor") from exc
 
@@ -187,8 +193,21 @@ async def feed_posts(db: AsyncSession, user: User | None, kind: str, creator_id:
         query = query.join(Follow, and_(Follow.creator_id == FeedPost.creator_id, Follow.user_id == user.id))
     parsed = parse_cursor(cursor)
     if parsed:
-        published, identifier = parsed
-        query = query.where(or_(FeedPost.published_at < published, and_(FeedPost.published_at == published, FeedPost.id < identifier)))
+        pinned, published, identifier = parsed
+        same_pin_after_cursor = or_(
+            FeedPost.published_at < published,
+            and_(FeedPost.published_at == published, FeedPost.id < identifier),
+        )
+        if pinned is None:
+            query = query.where(FeedPost.pinned_at.is_(None), same_pin_after_cursor)
+        else:
+            query = query.where(
+                or_(
+                    FeedPost.pinned_at.is_(None),
+                    FeedPost.pinned_at < pinned,
+                    and_(FeedPost.pinned_at == pinned, same_pin_after_cursor),
+                )
+            )
     rows = (await db.scalars(query.order_by(FeedPost.pinned_at.desc().nullslast(), FeedPost.published_at.desc(), FeedPost.id.desc()).limit(limit + 1))).all()
     page, extra = rows[:limit], len(rows) > limit
     return page, encode_cursor(page[-1]) if extra and page else None
