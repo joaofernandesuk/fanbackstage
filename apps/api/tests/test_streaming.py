@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import select
 
@@ -80,3 +82,32 @@ async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_sessio
         )
     ).all()
     assert {participant.user_id for participant in participants} == {owner.id, payer.id, invited.id}
+
+
+@pytest.mark.asyncio
+async def test_disconnect_pauses_billable_time_and_reconnect_resumes(db_session):
+    owner, profile = await creator(db_session, "reconnect-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "reconnect-payer@example.com", "strong-password-123", None
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    session.status = PrivateSessionStatus.ready
+    start = datetime(2026, 8, 21, tzinfo=UTC)
+    await streaming.private_participant_connected(db_session, owner, session.id, start)
+    await streaming.private_participant_connected(db_session, payer, session.id, start)
+    assert session.status is PrivateSessionStatus.active
+    await streaming.private_participant_disconnected(
+        db_session, payer, session.id, start + timedelta(seconds=20)
+    )
+    assert session.status is PrivateSessionStatus.reconnecting and session.billable_seconds == 20
+    await streaming.private_participant_disconnected(
+        db_session, payer, session.id, start + timedelta(seconds=25)
+    )
+    assert session.billable_seconds == 20
+    await streaming.private_participant_connected(
+        db_session, payer, session.id, start + timedelta(seconds=30)
+    )
+    assert session.status is PrivateSessionStatus.active

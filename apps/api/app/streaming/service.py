@@ -475,6 +475,47 @@ async def private_participant_disconnected(
     return session
 
 
+async def end_private_session(
+    db: AsyncSession, actor: User | None, session_id: UUID, reason: str, now: datetime | None = None
+) -> PrivateSession:
+    now = now or datetime.now(UTC)
+    session = await db.scalar(
+        select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+    )
+    if session is None:
+        raise PermissionError("Private session is unavailable")
+    if actor and actor.id not in {
+        session.payer_user_id,
+        (await db.get(CreatorProfile, session.creator_id)).user_id,
+    }:
+        raise PermissionError("Only the creator or payer can end this private session")
+    if session.status is PrivateSessionStatus.settled:
+        return session
+    if session.status is PrivateSessionStatus.active and session.active_started_at:
+        session.billable_seconds += max(0, int((now - session.active_started_at).total_seconds()))
+    session.status, session.ended_at, session.end_reason = PrivateSessionStatus.ended, now, reason
+    session.ended_by_user_id = actor.id if actor else None
+    return await settle_private_session(db, session)
+
+
+async def expire_reconnect_grace(db: AsyncSession, now: datetime | None = None) -> int:
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(seconds=get_settings().streaming_reconnect_grace_seconds)
+    sessions = (
+        await db.scalars(
+            select(PrivateSession)
+            .where(
+                PrivateSession.status == PrivateSessionStatus.reconnecting,
+                PrivateSession.disconnected_at <= cutoff,
+            )
+            .with_for_update()
+        )
+    ).all()
+    for session in sessions:
+        await end_private_session(db, None, session.id, "reconnect_grace_expired", now)
+    return len(sessions)
+
+
 def settlement_amount(session: PrivateSession) -> int:
     elapsed_charge = (session.per_minute_price_minor * session.billable_seconds + 59) // 60
     return min(session.max_authorization_minor, max(session.minimum_charge_minor, elapsed_charge))
