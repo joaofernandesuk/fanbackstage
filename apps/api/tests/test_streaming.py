@@ -20,6 +20,7 @@ from app.models.streaming import (
     PrivateSession,
     PrivateSessionMode,
     PrivateSessionStatus,
+    SessionParticipant,
 )
 from app.streaming import service as streaming
 
@@ -119,6 +120,69 @@ async def test_private_requests_queue_during_live_but_cannot_be_accepted_until_l
     assert session.status is PrivateSessionStatus.awaiting_payment_authorization
     assert session.payment_attempt_id is not None
     assert session.provider_room_name
+
+
+@pytest.mark.asyncio
+async def test_private_presence_reconciliation_uses_livekit_membership_for_delayed_joins_and_leaves(
+    db_session, monkeypatch
+):
+    """A missed callback is repaired from LiveKit, never from browser state."""
+    owner, profile = await creator(db_session, "presence-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "presence-payer@example.com", "strong-password-123", None
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    session.status = PrivateSessionStatus.ready
+
+    class Provider:
+        def __init__(self) -> None:
+            self.identities = {str(owner.id), str(payer.id)}
+
+        async def list_participant_identities(self, room_name: str) -> set[str]:
+            assert room_name == session.provider_room_name
+            return self.identities
+
+    provider = Provider()
+    monkeypatch.setattr(streaming, "LiveKitStreamingProvider", lambda: provider)
+
+    assert await streaming.reconcile_private_provider_presence(db_session) == 2
+    assert session.status is PrivateSessionStatus.active
+    participants = (
+        await db_session.scalars(
+            select(SessionParticipant).where(SessionParticipant.private_session_id == session.id)
+        )
+    ).all()
+    assert all(participant.joined_at and participant.left_at is None for participant in participants)
+
+    provider.identities = {str(owner.id)}
+    assert await streaming.reconcile_private_provider_presence(db_session) == 1
+    assert session.status is PrivateSessionStatus.reconnecting
+
+
+@pytest.mark.asyncio
+async def test_private_presence_reconciliation_does_not_disconnect_unjoined_ready_participants(
+    db_session, monkeypatch
+):
+    owner, profile = await creator(db_session, "presence-ready-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "presence-ready-payer@example.com", "strong-password-123", None
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    session.status = PrivateSessionStatus.ready
+
+    class Provider:
+        async def list_participant_identities(self, room_name: str) -> set[str]:
+            return set()
+
+    monkeypatch.setattr(streaming, "LiveKitStreamingProvider", Provider)
+    assert await streaming.reconcile_private_provider_presence(db_session) == 0
+    assert session.status is PrivateSessionStatus.ready
 
 
 @pytest.mark.asyncio

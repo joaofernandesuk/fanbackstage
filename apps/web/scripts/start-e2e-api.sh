@@ -12,7 +12,7 @@ run "python tests/e2e_seed.py"
 # webhook is delayed or unavailable. Run the production beat schedule inside
 # this isolated one-process worker so the bounded Playwright polls observe the
 # same reconciliation path used after a missed callback.
-run "celery -A app.worker.celery_app worker --beat --loglevel=WARNING --pool=solo -n e2e-media@%h" &
+run "celery -A app.worker.celery_app worker --beat --schedule=/tmp/fanbackstage-e2e-celerybeat-schedule.db --loglevel=WARNING --pool=solo -n e2e-media@%h" &
 worker_pid=$!
 # LiveKit runs in Docker and delivers signed lifecycle callbacks through the
 # host-gateway address.  Binding only loopback makes the API readiness probe

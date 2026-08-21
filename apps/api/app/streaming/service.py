@@ -800,7 +800,13 @@ async def reconcile_private_authorizations(db: AsyncSession, limit: int = 100) -
 
 
 async def reconcile_private_provider_presence(db: AsyncSession, limit: int = 100) -> int:
-    """Repair missed leave events from LiveKit's authoritative room membership."""
+    """Repair delayed LiveKit lifecycle callbacks from authoritative room membership.
+
+    The provider list is intentionally the only repair authority here.  It can
+    confirm a join that reached LiveKit when the signed callback was delayed,
+    and it can freeze billing for a previously connected participant that is
+    no longer present.  Browser UI state is never used for either transition.
+    """
     sessions = (
         await db.scalars(
             select(PrivateSession)
@@ -829,14 +835,21 @@ async def reconcile_private_provider_presence(db: AsyncSession, limit: int = 100
             await db.scalars(
                 select(SessionParticipant).where(
                     SessionParticipant.private_session_id == session.id,
-                    SessionParticipant.left_at.is_(None),
                 )
             )
         ).all()
         for participant in participants:
-            if str(participant.user_id) not in identities:
-                actor = await db.get(User, participant.user_id)
-                if actor:
+            actor = await db.get(User, participant.user_id)
+            if actor is None:
+                continue
+            if str(participant.user_id) in identities:
+                if participant.left_at is not None or participant.joined_at is None:
+                    await private_participant_connected(db, actor, session.id)
+                    repaired += 1
+            # A participant who has never joined is not a disconnect.  In
+            # particular, do not move an authorized READY session into the
+            # reconnecting state merely because its room is still empty.
+            elif participant.joined_at is not None and participant.left_at is None:
                     await private_participant_disconnected(db, actor, session.id)
                     repaired += 1
     return repaired
