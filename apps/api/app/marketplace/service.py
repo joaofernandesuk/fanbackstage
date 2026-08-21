@@ -20,6 +20,7 @@ from app.finance.service import (
     post_entries,
 )
 from app.models.content import ModerationStatus
+from app.models.creator import CreatorProfile
 from app.models.finance import (
     LedgerAccountKind,
     LedgerDirection,
@@ -167,10 +168,10 @@ async def initiate_order(
         raise MarketplaceError("Marketplace listing is not approved")
     if listing.quantity_available < quantity:
         raise MarketplaceError("Marketplace listing is sold out")
-    creator_owner = await db.scalar(
-        select(MarketplaceListing.owner_creator_id).where(MarketplaceListing.id == listing.id)
+    seller = await db.scalar(
+        select(CreatorProfile).where(CreatorProfile.id == listing.owner_creator_id)
     )
-    if creator_owner is None:
+    if not seller:
         raise MarketplaceError("Marketplace listing owner is unavailable")
     if await db.scalar(
         select(MarketplaceOrder)
@@ -188,7 +189,7 @@ async def initiate_order(
                 PaymentAttempt.idempotency_key == idempotency_key,
             )
         )  # type: ignore[return-value]
-    if listing.owner_creator_id == getattr(buyer, "creator_profile_id", None):
+    if seller.user_id == buyer.id:
         raise MarketplaceError("Creators cannot purchase their own listing")
     currency = currency_code(listing.currency)
     allowance = await shipping_allowance_for(db, destination_country_code, currency)
