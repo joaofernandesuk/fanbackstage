@@ -349,6 +349,7 @@ async def campaign(payload: CampaignInput, identity: CurrentIdentity, db: Db) ->
         )
         db.add(item)
         await db.flush()
+        await service.snapshot_campaign_recipients(db, item)
         if not payload.scheduled_at:
             await service.execute_campaign(db, item.id)
         await db.commit()

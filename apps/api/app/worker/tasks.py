@@ -132,9 +132,26 @@ def publish_scheduled_posts() -> dict[str, int]:
     """Publish due feed posts durably and replay-safely."""
     from app.db.session import SessionLocal
     from app.social.service import publish_due_posts
+
     async def run() -> int:
         async with SessionLocal() as session:
             count = await publish_due_posts(session)
             await session.commit()
             return count
+
     return {"published": run_async(run())}
+
+
+@celery_app.task
+def process_scheduled_mass_messages() -> dict[str, int]:
+    """Durably fan out due messaging campaigns; duplicate recipients are prevented in PostgreSQL."""
+    from app.db.session import SessionLocal
+    from app.messaging.service import execute_due_campaigns
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            count = await execute_due_campaigns(session)
+            await session.commit()
+            return count
+
+    return {"delivered": run_async(run())}

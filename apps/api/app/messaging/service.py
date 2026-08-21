@@ -620,6 +620,24 @@ async def campaign_recipients(db: AsyncSession, campaign: MassMessageCampaign) -
     return list(users - blocked - {creator.user_id})
 
 
+async def snapshot_campaign_recipients(db: AsyncSession, campaign: MassMessageCampaign) -> int:
+    """Persist the audience at campaign creation so later retries cannot expand it."""
+    existing = await db.scalar(
+        select(MassMessageRecipient.id)
+        .where(MassMessageRecipient.campaign_id == campaign.id)
+        .limit(1)
+    )
+    if existing:
+        return 0
+    recipients = await campaign_recipients(db, campaign)
+    db.add_all(
+        MassMessageRecipient(campaign_id=campaign.id, recipient_user_id=user_id)
+        for user_id in recipients
+    )
+    await db.flush()
+    return len(recipients)
+
+
 async def execute_campaign(db: AsyncSession, campaign_id: UUID) -> int:
     campaign = await db.scalar(
         select(MassMessageCampaign).where(MassMessageCampaign.id == campaign_id).with_for_update()
@@ -632,16 +650,22 @@ async def execute_campaign(db: AsyncSession, campaign_id: UUID) -> int:
     )
     creator = await db.get(CreatorProfile, campaign.creator_id)
     count = 0
-    for user_id in await campaign_recipients(db, campaign):
-        recipient = await db.scalar(
-            select(MassMessageRecipient).where(
-                MassMessageRecipient.campaign_id == campaign.id,
-                MassMessageRecipient.recipient_user_id == user_id,
-            )
+    recipients = (
+        await db.scalars(
+            select(MassMessageRecipient)
+            .where(MassMessageRecipient.campaign_id == campaign.id)
+            .with_for_update()
         )
-        if recipient:
+    ).all()
+    for recipient in recipients:
+        if recipient.message_id:
             continue
-        viewer = await db.get(User, user_id)
+        # A campaign audience is snapshotted, but a later block is always respected.
+        if await is_blocked(db, creator.user_id, recipient.recipient_user_id):
+            continue
+        viewer = await db.get(User, recipient.recipient_user_id)
+        if not viewer:
+            continue
         conversation = await conversation_for_pair(db, creator, viewer)
         message = Message(
             conversation_id=conversation.id,
@@ -651,14 +675,7 @@ async def execute_campaign(db: AsyncSession, campaign_id: UUID) -> int:
         )
         db.add(message)
         await db.flush()
-        db.add(
-            MassMessageRecipient(
-                campaign_id=campaign.id,
-                recipient_user_id=user_id,
-                message_id=message.id,
-                delivered_at=datetime.now(UTC),
-            )
-        )
+        recipient.message_id, recipient.delivered_at = message.id, datetime.now(UTC)
         conversation.last_message_at = datetime.now(UTC)
         count += 1
     campaign.status, campaign.completed_at = CampaignStatus.completed, datetime.now(UTC)
@@ -671,3 +688,24 @@ async def execute_campaign(db: AsyncSession, campaign_id: UUID) -> int:
         metadata={"delivered": count},
     )
     return count
+
+
+async def execute_due_campaigns(db: AsyncSession, limit: int = 25) -> int:
+    """Run UTC-scheduled campaigns with row locks; recipient uniqueness makes retries safe."""
+    now = datetime.now(UTC)
+    rows = (
+        await db.scalars(
+            select(MassMessageCampaign)
+            .where(
+                MassMessageCampaign.status == CampaignStatus.scheduled,
+                MassMessageCampaign.scheduled_at <= now,
+            )
+            .order_by(MassMessageCampaign.scheduled_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    delivered = 0
+    for campaign in rows:
+        delivered += await execute_campaign(db, campaign.id)
+    return delivered

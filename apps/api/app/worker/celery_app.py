@@ -29,6 +29,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.finalize_subscription_expirations": {"queue": "scheduled"},
     "app.worker.tasks.retry_subscription_renewals": {"queue": "scheduled"},
     "app.worker.tasks.publish_scheduled_posts": {"queue": "scheduled"},
+    "app.worker.tasks.process_scheduled_mass_messages": {"queue": "scheduled"},
     "app.worker.tasks.*": {"queue": "default"},
 }
 celery_app.conf.beat_schedule = {
@@ -50,6 +51,10 @@ celery_app.conf.beat_schedule = {
     },
     "scheduled-feed-posts": {
         "task": "app.worker.tasks.publish_scheduled_posts",
+        "schedule": 60.0,
+    },
+    "scheduled-mass-messages": {
+        "task": "app.worker.tasks.process_scheduled_mass_messages",
         "schedule": 60.0,
     },
 }

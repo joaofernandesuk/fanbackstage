@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -21,7 +21,16 @@ from app.models.content import (
 )
 from app.models.creator import CreatorStatus
 from app.models.finance import LedgerEntry, PaymentAttempt
-from app.models.messaging import ConversationParticipant, Message, MessagingPermission, UserBlock
+from app.models.messaging import (
+    AudienceSegment,
+    CampaignStatus,
+    ConversationParticipant,
+    MassMessageCampaign,
+    MassMessageRecipient,
+    Message,
+    MessagingPermission,
+    UserBlock,
+)
 from app.models.social import Follow
 
 
@@ -204,3 +213,54 @@ async def test_paid_attachment_unlocks_only_after_settlement(db_session):
     assert purchase.status == "paid"
     assert await can_access_asset(db_session, asset.id, buyer)
     assert await finance.process_development_webhook(db_session, payload, signature) is None
+
+
+@pytest.mark.asyncio
+async def test_campaign_snapshots_recipients_and_replay_respects_later_blocks(db_session):
+    owner, profile = await creator(db_session, "campaign-owner@example.com")
+    follower, _ = await accounts.register(
+        db_session, "campaign-follower@example.com", "strong-password-123", None
+    )
+    blocked, _ = await accounts.register(
+        db_session, "campaign-blocked@example.com", "strong-password-123", None
+    )
+    db_session.add_all(
+        [
+            Follow(user_id=follower.id, creator_id=profile.id),
+            Follow(user_id=blocked.id, creator_id=profile.id),
+        ]
+    )
+    await db_session.flush()
+    campaign = MassMessageCampaign(
+        creator_id=profile.id,
+        created_by_user_id=owner.id,
+        audience_segment=AudienceSegment.followers,
+        body="Campaign announcement",
+        status=CampaignStatus.scheduled,
+        scheduled_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(campaign)
+    await db_session.flush()
+    assert await messaging.snapshot_campaign_recipients(db_session, campaign) == 2
+    await db_session.execute(
+        Follow.__table__.delete().where(
+            Follow.user_id == follower.id, Follow.creator_id == profile.id
+        )
+    )
+    db_session.add(UserBlock(blocker_user_id=owner.id, blocked_user_id=blocked.id))
+    await db_session.flush()
+    assert await messaging.execute_campaign(db_session, campaign.id) == 1
+    assert await messaging.execute_campaign(db_session, campaign.id) == 0
+    recipients = (
+        await db_session.scalars(
+            select(MassMessageRecipient).where(MassMessageRecipient.campaign_id == campaign.id)
+        )
+    ).all()
+    assert {row.recipient_user_id for row in recipients} == {follower.id, blocked.id}
+    assert sum(row.message_id is not None for row in recipients) == 1
+    assert (
+        await db_session.scalar(
+            select(func.count()).select_from(Message).where(Message.body == "Campaign announcement")
+        )
+        == 1
+    )
