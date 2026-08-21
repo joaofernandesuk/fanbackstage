@@ -283,6 +283,11 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
                 manager_membership_id=manager_membership.id,
                 permission=GroupPermission.view_earnings,
             ),
+            GroupPermissionGrant(
+                membership_id=membership.id,
+                manager_membership_id=manager_membership.id,
+                permission=GroupPermission.view_analytics,
+            ),
         ]
     )
     await db_session.flush()
@@ -299,6 +304,9 @@ async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoke
     assert (await group_routes.managed_creator_earnings(creator.id, identity, db_session))["creator_id"] == str(creator.id)
     with pytest.raises(HTTPException, match="Delegated earnings permission denied"):
         await group_routes.managed_creator_earnings(unrelated_creator.id, identity, db_session)
+    assert (await group_routes.managed_creator_analytics(creator.id, identity, db_session))["creator_id"] == str(creator.id)
+    with pytest.raises(HTTPException, match="Delegated analytics permission denied"):
+        await group_routes.managed_creator_analytics(unrelated_creator.id, identity, db_session)
     with pytest.raises(HTTPException, match="Delegated profile permission denied"):
         await group_routes.update_managed_creator_profile(
             unrelated_creator.id,

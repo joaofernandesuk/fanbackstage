@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import func, select
 
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
@@ -20,11 +21,14 @@ from app.models.groups import (
     GroupPermission,
 )
 from app.models.messaging import MessagingPermission
+from app.models.social import Follow
 from app.models.subscription import (
     PromotionEligibility,
     PromotionRenewalScope,
+    Subscription,
     SubscriptionPromotion,
     SubscriptionPromotionRule,
+    SubscriptionStatus,
 )
 from app.permissions.policies import Permission, authorize
 from app.schemas.content import ContentUpdate
@@ -382,6 +386,21 @@ async def managed_creator_earnings(
     ):
         raise HTTPException(status_code=403, detail="Delegated earnings permission denied")
     return {**(await finance_service.creator_financial_summary(db, creator_id, currency)), "currency": currency_code(currency), "creator_id": str(creator_id), "actor_user_id": str(identity[0].id)}
+
+
+@router.get("/managed-creators/{creator_id}/analytics")
+async def managed_creator_analytics(creator_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
+    if not await service.has_delegated_permission(
+        db, identity[0].id, creator_id, GroupPermission.view_analytics
+    ):
+        raise HTTPException(status_code=403, detail="Delegated analytics permission denied")
+    followers = await db.scalar(select(func.count()).select_from(Follow).where(Follow.creator_id == creator_id))
+    active_subscribers = await db.scalar(
+        select(func.count()).select_from(Subscription).where(
+            Subscription.creator_id == creator_id, Subscription.status == SubscriptionStatus.active
+        )
+    )
+    return {"creator_id": str(creator_id), "actor_user_id": str(identity[0].id), "followers": int(followers or 0), "active_subscribers": int(active_subscribers or 0)}
 
 
 @router.get("/mine/memberships", response_model=list[MembershipResponse])
