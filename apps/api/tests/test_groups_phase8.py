@@ -1,7 +1,9 @@
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import case, func, select
 
 from app.accounts import service as accounts
+from app.api.routes import groups as group_routes
 from app.content import service as content_service
 from app.content.access import can_access_content
 from app.creators import service as creators
@@ -24,7 +26,14 @@ from app.models.finance import (
     LedgerTransaction,
     PaymentAttempt,
 )
-from app.models.groups import GroupContract, GroupContractStatus, GroupPermission
+from app.models.groups import (
+    GroupContract,
+    GroupContractStatus,
+    GroupPermission,
+    GroupPermissionGrant,
+)
+from app.schemas.creator import CreatorProfileUpdate
+from app.schemas.streaming import CreatorLiveSettingsInput
 
 
 async def approved_creator(db, email):
@@ -243,6 +252,53 @@ async def test_contract_amendments_change_only_future_financial_allocations(db_s
     # the later acceptance can mutate those earlier financial records.
     assert (await db_session.get(LedgerTransaction, before.id)).metadata_json == before.metadata_json
     assert (await db_session.get(LedgerTransaction, pending.id)).metadata_json == pending.metadata_json
+
+
+@pytest.mark.asyncio
+async def test_delegated_profile_and_live_settings_are_scoped_audited_and_revoked(db_session):
+    manager, _ = await accounts.register(
+        db_session, "operations-manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "operations-creator@example.com")
+    group = await groups.create_group(db_session, manager, "Operations", "operations", 5_000, None)
+    membership = await groups.invite_creator(db_session, group.id, manager, creator.id, None, [])
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    manager_membership = await groups.manager_membership(db_session, group.id, manager.id)
+    assert manager_membership
+    db_session.add_all(
+        [
+            GroupPermissionGrant(
+                membership_id=membership.id,
+                manager_membership_id=manager_membership.id,
+                permission=GroupPermission.edit_profile,
+            ),
+            GroupPermissionGrant(
+                membership_id=membership.id,
+                manager_membership_id=manager_membership.id,
+                permission=GroupPermission.manage_live_settings,
+            ),
+        ]
+    )
+    await db_session.flush()
+    identity = (manager, None)
+    result = await group_routes.update_managed_creator_profile(
+        creator.id, CreatorProfileUpdate(display_name="Manager-set display name"), identity, db_session
+    )
+    assert result["owner_creator_id"] == str(creator.id)
+    assert result["actor_user_id"] == str(manager.id)
+    settings = await group_routes.update_managed_creator_live_settings(
+        creator.id, CreatorLiveSettingsInput(one_to_one_price_minor=777), identity, db_session
+    )
+    assert settings.one_to_one_price_minor == 777
+    events = set(
+        (await db_session.scalars(select(AuditEvent.event_type).where(AuditEvent.actor_user_id == manager.id))).all()
+    )
+    assert {"group_manager.profile_updated", "group_manager.live_settings_updated"} <= events
+    await groups.leave_membership(db_session, membership.id, creator_user)
+    with pytest.raises(HTTPException, match="Delegated profile permission denied"):
+        await group_routes.update_managed_creator_profile(
+            creator.id, CreatorProfileUpdate(display_name="Stale manager"), identity, db_session
+        )
 
 
 @pytest.mark.asyncio

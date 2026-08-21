@@ -3,7 +3,10 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 
 from app.api.deps import CurrentIdentity, Db
+from app.audit.service import record_event
 from app.content import service as content_service
+from app.creators import service as creator_service
+from app.finance.service import currency_code
 from app.groups import service
 from app.models.creator import CreatorProfile
 from app.models.groups import (
@@ -16,6 +19,7 @@ from app.models.groups import (
 )
 from app.permissions.policies import Permission, authorize
 from app.schemas.content import ContentUpdate
+from app.schemas.creator import CreatorProfileUpdate
 from app.schemas.groups import (
     AffiliationVisibility,
     ContractAmendment,
@@ -26,6 +30,8 @@ from app.schemas.groups import (
     ManagedCreatorResponse,
     MembershipResponse,
 )
+from app.schemas.streaming import CreatorLiveSettingsInput, CreatorLiveSettingsResponse
+from app.streaming import service as streaming_service
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -232,6 +238,60 @@ async def update_managed_content(
         raise HTTPException(
             status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
         ) from exc
+
+
+@router.patch("/managed-creators/{creator_id}/profile")
+async def update_managed_creator_profile(
+    creator_id: UUID, payload: CreatorProfileUpdate, identity: CurrentIdentity, db: Db
+) -> dict:
+    """Delegated profile edits retain the creator as owner and manager as actor."""
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator or not await service.has_delegated_permission(
+        db, identity[0].id, creator_id, GroupPermission.edit_profile
+    ):
+        raise HTTPException(status_code=403, detail="Delegated profile permission denied")
+    try:
+        await creator_service.update_profile(
+            db, creator, payload.model_dump(exclude_unset=True), identity[0].id
+        )
+        await record_event(
+            db, "group_manager.profile_updated", actor_user_id=identity[0].id,
+            target_type="creator_profile", target_id=str(creator.id),
+        )
+        await db.commit()
+        return {"id": str(creator.id), "owner_creator_id": str(creator.id), "actor_user_id": str(identity[0].id)}
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/managed-creators/{creator_id}/live-settings", response_model=CreatorLiveSettingsResponse)
+async def update_managed_creator_live_settings(
+    creator_id: UUID, payload: CreatorLiveSettingsInput, identity: CurrentIdentity, db: Db
+) -> CreatorLiveSettingsResponse:
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator or not await service.has_delegated_permission(
+        db, identity[0].id, creator_id, GroupPermission.manage_live_settings
+    ):
+        raise HTTPException(status_code=403, detail="Delegated live-settings permission denied")
+    settings = await streaming_service.settings_for_creator(db, creator.id)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(settings, field, currency_code(value) if field == "currency" and value else value)
+    if settings.max_authorization_minor < settings.one_to_one_price_minor * settings.minimum_minutes or settings.max_authorization_minor < settings.two_to_one_price_minor * settings.minimum_minutes:
+        raise HTTPException(status_code=400, detail="Authorization cap must cover the 1-to-1 and 2-to-1 minimum charge")
+    await record_event(
+        db, "group_manager.live_settings_updated", actor_user_id=identity[0].id,
+        target_type="creator_profile", target_id=str(creator.id),
+    )
+    await db.commit()
+    return CreatorLiveSettingsResponse(
+        private_sessions_enabled=settings.private_sessions_enabled,
+        one_to_one_price_minor=settings.one_to_one_price_minor,
+        two_to_one_price_minor=settings.two_to_one_price_minor,
+        currency=settings.currency,
+        minimum_minutes=settings.minimum_minutes,
+        max_authorization_minor=settings.max_authorization_minor,
+    )
 
 
 @router.get("/mine/memberships", response_model=list[MembershipResponse])
