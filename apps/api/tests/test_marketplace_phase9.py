@@ -1,6 +1,7 @@
 """Permanent Phase 9 anti-abuse coverage for physical-order shipping treatment."""
 
 import secrets
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
@@ -352,3 +353,33 @@ async def test_listing_ownership_delegation_and_stock_reservation(db_session):
     assert created.quantity_available == 0
     with pytest.raises(marketplace.MarketplaceError, match="sold out"):
         await marketplace.initiate_order(db_session, buyer_b, created.id, 1, "AE", "single-stock-b")
+
+
+@pytest.mark.asyncio
+async def test_marketplace_earnings_release_requires_delivery_and_hold(db_session):
+    creator_user, creator = await approved_creator(db_session, "hold-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "hold-buyer@example.com", "strong-password-123", None
+    )
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AF")
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    row.status = MarketplaceListingStatus.published
+    row.moderation_status = ModerationStatus.approved
+    order = await marketplace.initiate_order(db_session, buyer, row.id, 1, "AF", "hold-order")
+    attempt = await db_session.get(PaymentAttempt, order.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    assert await finance.process_development_webhook(db_session, payload, signature) is None
+    assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
+    await marketplace.mark_order_processing(db_session, order.id, creator_user, creator.id)
+    await marketplace.mark_order_shipped(db_session, order.id, creator_user, creator.id, "TRACK-1")
+    await marketplace.confirm_order_delivery(db_session, order.id, buyer)
+    assert order.delivered_at
+    assert order.earnings_hold_until and order.earnings_hold_until > datetime.now(UTC)
+    assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
+    order.earnings_hold_until = datetime.now(UTC) - timedelta(seconds=1)
+    assert await marketplace.release_eligible_marketplace_earnings(db_session) == 1
+    assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
+    balances = await finance.creator_balances(db_session, creator.id, "EUR")
+    assert balances == {"pending_amount_minor": 0, "available_amount_minor": 500}

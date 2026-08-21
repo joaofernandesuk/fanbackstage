@@ -31,6 +31,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.publish_scheduled_posts": {"queue": "scheduled"},
     "app.worker.tasks.process_scheduled_mass_messages": {"queue": "scheduled"},
     "app.worker.tasks.reconcile_private_session_grace": {"queue": "scheduled"},
+    "app.worker.tasks.release_marketplace_earnings": {"queue": "financial"},
     "app.worker.tasks.*": {"queue": "default"},
 }
 celery_app.conf.beat_schedule = {
@@ -61,5 +62,9 @@ celery_app.conf.beat_schedule = {
     "private-session-reconnect-grace": {
         "task": "app.worker.tasks.reconcile_private_session_grace",
         "schedule": 10.0,
+    },
+    "marketplace-earnings-release": {
+        "task": "app.worker.tasks.release_marketplace_earnings",
+        "schedule": 300.0,
     },
 }

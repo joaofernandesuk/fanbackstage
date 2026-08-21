@@ -83,6 +83,21 @@ def reconcile_financial_settlement() -> dict[str, int]:
 
 
 @celery_app.task
+def release_marketplace_earnings() -> dict[str, int]:
+    """Durably release only delivery-confirmed, hold-expired marketplace orders."""
+    from app.db.session import SessionLocal
+    from app.marketplace.service import release_eligible_marketplace_earnings
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            released = await release_eligible_marketplace_earnings(session)
+            await session.commit()
+            return released
+
+    return {"released": run_async(run())}
+
+
+@celery_app.task
 def process_subscription_renewals() -> dict[str, int]:
     """Create one replay-safe renewal attempt per due subscription period."""
     from app.db.session import SessionLocal

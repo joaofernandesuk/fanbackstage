@@ -63,6 +63,19 @@ class MarketplaceOrderStatus(str, enum.Enum):
     chargeback = "chargeback"
 
 
+class MarketplaceSellerTier(str, enum.Enum):
+    trusted = "trusted"
+    standard = "standard"
+    new_seller = "new_seller"
+    high_risk = "high_risk"
+
+
+class MarketplaceEarningsReleaseStatus(str, enum.Enum):
+    pending = "pending"
+    blocked = "blocked"
+    released = "released"
+
+
 class MarketplaceListing(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "marketplace_listings"
     __table_args__ = (
@@ -153,6 +166,33 @@ class MarketplaceShippingAllowance(UUIDPrimaryKey, Timestamped, Base):
     active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
 
+class MarketplaceSellerRiskProfile(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "marketplace_seller_risk_profiles"
+    creator_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    tier: Mapped[MarketplaceSellerTier] = mapped_column(
+        Enum(MarketplaceSellerTier, name="marketplace_seller_tier"),
+        default=MarketplaceSellerTier.new_seller,
+        index=True,
+    )
+    marketplace_suspended: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+
+class MarketplaceEarningsHoldPolicy(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "marketplace_earnings_hold_policies"
+    __table_args__ = (
+        CheckConstraint("hold_duration_seconds >= 0", name="ck_marketplace_hold_nonnegative"),
+        UniqueConstraint("seller_tier", name="uq_marketplace_hold_policy_tier"),
+    )
+    seller_tier: Mapped[MarketplaceSellerTier] = mapped_column(
+        Enum(MarketplaceSellerTier, name="marketplace_seller_tier", create_type=False), index=True
+    )
+    hold_duration_seconds: Mapped[int] = mapped_column(Integer)
+    active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    is_default: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+
 class MarketplaceOrder(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "marketplace_orders"
     __table_args__ = (
@@ -235,3 +275,20 @@ class MarketplaceOrder(UUIDPrimaryKey, Timestamped, Base):
         ForeignKey("ledger_transactions.id", ondelete="RESTRICT"), unique=True
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tracking_reference: Mapped[str | None] = mapped_column(String(255))
+    seller_tier_snapshot: Mapped[MarketplaceSellerTier | None] = mapped_column(
+        Enum(MarketplaceSellerTier, name="marketplace_seller_tier", create_type=False)
+    )
+    hold_duration_seconds_snapshot: Mapped[int | None] = mapped_column(Integer)
+    earnings_hold_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    earnings_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    earnings_release_status: Mapped[MarketplaceEarningsReleaseStatus] = mapped_column(
+        Enum(MarketplaceEarningsReleaseStatus, name="marketplace_earnings_release_status"),
+        default=MarketplaceEarningsReleaseStatus.pending,
+        index=True,
+    )
+    release_block_reason: Mapped[str | None] = mapped_column(String(255))

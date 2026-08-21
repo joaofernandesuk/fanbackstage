@@ -24,17 +24,22 @@ from app.models.creator import CreatorProfile
 from app.models.finance import (
     LedgerAccountKind,
     LedgerDirection,
+    LedgerTransaction,
     LedgerTransactionType,
     PaymentAttempt,
     PaymentStatus,
 )
 from app.models.identity import User
 from app.models.marketplace import (
+    MarketplaceEarningsHoldPolicy,
+    MarketplaceEarningsReleaseStatus,
     MarketplaceListing,
     MarketplaceListingMedia,
     MarketplaceListingStatus,
     MarketplaceOrder,
     MarketplaceOrderStatus,
+    MarketplaceSellerRiskProfile,
+    MarketplaceSellerTier,
     MarketplaceShippingAllowance,
     ShippingAllowanceScope,
 )
@@ -42,6 +47,42 @@ from app.models.marketplace import (
 
 class MarketplaceError(ValueError):
     pass
+
+
+async def seller_risk_profile(db: AsyncSession, creator_id: UUID) -> MarketplaceSellerRiskProfile:
+    profile = await db.scalar(
+        select(MarketplaceSellerRiskProfile)
+        .where(MarketplaceSellerRiskProfile.creator_id == creator_id)
+        .with_for_update()
+    )
+    if profile:
+        return profile
+    profile = MarketplaceSellerRiskProfile(creator_id=creator_id)
+    db.add(profile)
+    await db.flush()
+    return profile
+
+
+async def hold_policy_for_tier(
+    db: AsyncSession, tier: MarketplaceSellerTier
+) -> MarketplaceEarningsHoldPolicy:
+    policy = await db.scalar(
+        select(MarketplaceEarningsHoldPolicy).where(
+            MarketplaceEarningsHoldPolicy.seller_tier == tier,
+            MarketplaceEarningsHoldPolicy.active.is_(True),
+        )
+    )
+    if policy:
+        return policy
+    policy = await db.scalar(
+        select(MarketplaceEarningsHoldPolicy).where(
+            MarketplaceEarningsHoldPolicy.active.is_(True),
+            MarketplaceEarningsHoldPolicy.is_default.is_(True),
+        )
+    )
+    if not policy:
+        raise MarketplaceError("No active marketplace earnings hold policy is configured")
+    return policy
 
 
 def _country_code(value: str, field: str = "Country") -> str:
@@ -568,3 +609,190 @@ async def settle_order(db: AsyncSession, order: MarketplaceOrder) -> Marketplace
         metadata={"ledger_transaction_id": str(ledger.id)},
     )
     return order
+
+
+async def mark_order_processing(
+    db: AsyncSession, order_id: UUID, actor: User, creator_id: UUID
+) -> MarketplaceOrder:
+    order = await db.scalar(
+        select(MarketplaceOrder)
+        .where(MarketplaceOrder.id == order_id, MarketplaceOrder.seller_creator_id == creator_id)
+        .with_for_update()
+    )
+    if not order or order.status is not MarketplaceOrderStatus.paid:
+        raise MarketplaceError("Order cannot be marked as processing")
+    order.status = MarketplaceOrderStatus.processing
+    await record_event(
+        db,
+        "marketplace.order_processing",
+        actor_user_id=actor.id,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+    )
+    return order
+
+
+async def mark_order_shipped(
+    db: AsyncSession,
+    order_id: UUID,
+    actor: User,
+    creator_id: UUID,
+    tracking_reference: str | None,
+) -> MarketplaceOrder:
+    order = await db.scalar(
+        select(MarketplaceOrder)
+        .where(MarketplaceOrder.id == order_id, MarketplaceOrder.seller_creator_id == creator_id)
+        .with_for_update()
+    )
+    if not order or order.status not in {
+        MarketplaceOrderStatus.paid,
+        MarketplaceOrderStatus.processing,
+    }:
+        raise MarketplaceError("Order cannot be marked as shipped")
+    order.status = MarketplaceOrderStatus.shipped
+    order.shipped_at = datetime.now(UTC)
+    order.tracking_reference = tracking_reference.strip() if tracking_reference else None
+    await record_event(
+        db,
+        "marketplace.order_shipped",
+        actor_user_id=actor.id,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"has_tracking_reference": bool(order.tracking_reference)},
+    )
+    return order
+
+
+async def confirm_order_delivery(db: AsyncSession, order_id: UUID, buyer: User) -> MarketplaceOrder:
+    """Buyer confirmation is the Phase 9 authoritative delivery signal."""
+    order = await db.scalar(
+        select(MarketplaceOrder)
+        .where(MarketplaceOrder.id == order_id, MarketplaceOrder.buyer_user_id == buyer.id)
+        .with_for_update()
+    )
+    if not order or order.status is not MarketplaceOrderStatus.shipped:
+        raise MarketplaceError("Order cannot be marked as delivered")
+    profile = await seller_risk_profile(db, order.seller_creator_id)
+    policy = await hold_policy_for_tier(db, profile.tier)
+    now = datetime.now(UTC)
+    order.status = MarketplaceOrderStatus.delivered
+    order.delivered_at = now
+    order.seller_tier_snapshot = profile.tier
+    order.hold_duration_seconds_snapshot = policy.hold_duration_seconds
+    order.earnings_hold_until = now + timedelta(seconds=policy.hold_duration_seconds)
+    order.earnings_release_status = MarketplaceEarningsReleaseStatus.pending
+    order.release_block_reason = None
+    await record_event(
+        db,
+        "marketplace.order_delivered",
+        actor_user_id=buyer.id,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={
+            "seller_tier": profile.tier.value,
+            "hold_duration_seconds": policy.hold_duration_seconds,
+        },
+    )
+    return order
+
+
+async def release_order_earnings(db: AsyncSession, order: MarketplaceOrder) -> bool:
+    """Move exactly this order's historical pending allocations once delivery hold expires."""
+    order = await db.scalar(
+        select(MarketplaceOrder).where(MarketplaceOrder.id == order.id).with_for_update()
+    )
+    assert order
+    now = datetime.now(UTC)
+    if order.earnings_release_status is MarketplaceEarningsReleaseStatus.released:
+        return False
+    if (
+        order.status is not MarketplaceOrderStatus.delivered
+        or not order.earnings_hold_until
+        or order.earnings_hold_until > now
+    ):
+        return False
+    if not order.ledger_transaction_id:
+        raise MarketplaceError("Order settlement ledger is missing")
+    original = await db.get(LedgerTransaction, order.ledger_transaction_id)
+    assert original
+    creator_pending = await _account(
+        db, LedgerAccountKind.creator_pending, order.currency, order.seller_creator_id
+    )
+    creator_available = await _account(
+        db, LedgerAccountKind.creator_available, order.currency, order.seller_creator_id
+    )
+    creator_amount = int(original.metadata_json["creator_amount_minor"]) + int(
+        original.metadata_json.get("shipping_pass_through_minor", 0)
+    )
+    entries = [
+        (creator_pending, LedgerDirection.debit, creator_amount),
+        (creator_available, LedgerDirection.credit, creator_amount),
+    ]
+    group_amount = int(original.metadata_json.get("group_amount_minor", 0))
+    if group_amount:
+        group_id = original.metadata_json.get("group_id")
+        if not group_id:
+            raise MarketplaceError("Order group allocation snapshot is incomplete")
+        group_pending = await _account(
+            db, LedgerAccountKind.group_pending, order.currency, owner_group_id=UUID(group_id)
+        )
+        group_available = await _account(
+            db, LedgerAccountKind.group_available, order.currency, owner_group_id=UUID(group_id)
+        )
+        entries.extend(
+            [
+                (group_pending, LedgerDirection.debit, group_amount),
+                (group_available, LedgerDirection.credit, group_amount),
+            ]
+        )
+    transaction = await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.earnings_release,
+        currency=order.currency,
+        idempotency_key=f"marketplace-release:{order.id}",
+        reference=f"marketplace_release:{order.id}",
+        entries=entries,
+        metadata={
+            "marketplace_order_id": str(order.id),
+            "original_ledger_transaction_id": str(original.id),
+            "seller_tier_snapshot": order.seller_tier_snapshot.value
+            if order.seller_tier_snapshot
+            else "",
+            "hold_duration_seconds_snapshot": str(order.hold_duration_seconds_snapshot or 0),
+            "creator_amount_minor": str(creator_amount),
+            "group_amount_minor": str(group_amount),
+        },
+    )
+    order.earnings_release_status = MarketplaceEarningsReleaseStatus.released
+    order.earnings_released_at = now
+    await record_event(
+        db,
+        "marketplace.order_earnings_released",
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"ledger_transaction_id": str(transaction.id)},
+    )
+    return True
+
+
+async def release_eligible_marketplace_earnings(db: AsyncSession, limit: int = 100) -> int:
+    """Database-backed replay-safe worker query; no process-local delivery timer exists."""
+    rows = (
+        await db.scalars(
+            select(MarketplaceOrder)
+            .where(
+                MarketplaceOrder.status == MarketplaceOrderStatus.delivered,
+                MarketplaceOrder.earnings_release_status
+                == MarketplaceEarningsReleaseStatus.pending,
+                MarketplaceOrder.earnings_hold_until <= datetime.now(UTC),
+            )
+            .order_by(MarketplaceOrder.earnings_hold_until)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    released = 0
+    for order in rows:
+        if await release_order_earnings(db, order):
+            released += 1
+    return released

@@ -26,9 +26,11 @@ from app.models.groups import (
 )
 from app.models.identity import Role, SecurityToken, User, UserRole, UserSession
 from app.models.marketplace import (
+    MarketplaceEarningsHoldPolicy,
     MarketplaceListing,
     MarketplaceListingMedia,
     MarketplaceOrder,
+    MarketplaceSellerRiskProfile,
     MarketplaceShippingAllowance,
 )
 from app.models.messaging import (
@@ -108,9 +110,11 @@ __all__ = [
     "LiveRecording",
     "LiveReport",
     "LiveRoom",
+    "MarketplaceEarningsHoldPolicy",
     "MarketplaceListing",
     "MarketplaceListingMedia",
     "MarketplaceOrder",
+    "MarketplaceSellerRiskProfile",
     "MarketplaceShippingAllowance",
     "MassMessageCampaign",
     "MassMessageRecipient",

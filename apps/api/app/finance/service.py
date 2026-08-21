@@ -631,6 +631,44 @@ async def release_creator_earnings(
     )
     if not balance or balance <= 0:
         return None
+    # Physical marketplace allocations are not governed by the generic global
+    # settlement window.  They remain in the same creator-pending account, but
+    # are excluded here until their delivery-specific hold worker releases the
+    # exact historical order allocation.
+    from app.models.marketplace import (
+        MarketplaceEarningsReleaseStatus,
+        MarketplaceOrder,
+        MarketplaceOrderStatus,
+    )
+
+    marketplace_held = await db.scalar(
+        select(
+            func.coalesce(
+                func.sum(
+                    MarketplaceOrder.creator_amount_minor
+                    + MarketplaceOrder.shipping_pass_through_minor
+                ),
+                0,
+            )
+        ).where(
+            MarketplaceOrder.seller_creator_id == creator_id,
+            MarketplaceOrder.currency == currency,
+            MarketplaceOrder.earnings_release_status != MarketplaceEarningsReleaseStatus.released,
+            MarketplaceOrder.status.in_(
+                [
+                    MarketplaceOrderStatus.paid,
+                    MarketplaceOrderStatus.processing,
+                    MarketplaceOrderStatus.shipped,
+                    MarketplaceOrderStatus.delivered,
+                    MarketplaceOrderStatus.disputed,
+                    MarketplaceOrderStatus.chargeback,
+                ]
+            ),
+        )
+    )
+    balance = int(balance) - int(marketplace_held or 0)
+    if balance <= 0:
+        return None
     release_number = await db.scalar(
         select(func.count())
         .select_from(LedgerTransaction)
