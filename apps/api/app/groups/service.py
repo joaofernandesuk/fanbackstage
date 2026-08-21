@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.audit.service import record_event
 from app.models.creator import CreatorProfile
@@ -415,7 +416,7 @@ async def group_financial_dashboard(
 ) -> dict[str, int | str]:
     """Return group-owned ledger projections; never recompute old contract terms."""
     await require_group_manager(db, group_id, actor.id)
-    from app.models.finance import LedgerAccount, LedgerDirection, LedgerEntry
+    from app.models.finance import LedgerAccount, LedgerDirection, LedgerEntry, LedgerTransaction
 
     balances = await db.execute(
         select(
@@ -435,6 +436,38 @@ async def group_financial_dashboard(
         .group_by(LedgerAccount.kind)
     )
     values = {kind.value: int(amount) for kind, amount in balances}
+    original_transaction = aliased(LedgerTransaction)
+    source_rows = await db.execute(
+        select(
+            LedgerTransaction.transaction_type,
+            original_transaction.transaction_type,
+            func.coalesce(
+                func.sum(
+                    case(
+                        (LedgerEntry.direction == LedgerDirection.credit, LedgerEntry.amount_minor),
+                        else_=-LedgerEntry.amount_minor,
+                    )
+                ),
+                0,
+            ),
+        )
+        .join(LedgerEntry, LedgerEntry.transaction_id == LedgerTransaction.id)
+        .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+        .outerjoin(
+            original_transaction,
+            original_transaction.id == LedgerTransaction.reversal_of_transaction_id,
+        )
+        .where(LedgerAccount.owner_group_id == group_id, LedgerAccount.currency == currency.upper())
+        .group_by(LedgerTransaction.transaction_type, original_transaction.transaction_type)
+    )
+    source_values: dict[str, int] = {}
+    for transaction_type, original_type, amount in source_rows:
+        source_type = (
+            original_type
+            if transaction_type.value in {"refund", "chargeback"} and original_type is not None
+            else transaction_type
+        )
+        source_values[source_type.value] = source_values.get(source_type.value, 0) + int(amount)
     active_creators = await db.scalar(
         select(func.count())
         .select_from(GroupCreatorMembership)
@@ -448,4 +481,10 @@ async def group_financial_dashboard(
         "active_creators": int(active_creators or 0),
         "pending_amount_minor": values.get("group_pending", 0),
         "available_amount_minor": values.get("group_available", 0),
+        "source_amounts_minor": {
+            "ppv": source_values.get("ppv_purchase", 0),
+            "subscriptions": source_values.get("subscription_charge", 0),
+            "messaging": source_values.get("messaging_charge", 0),
+            "private_live": source_values.get("private_live_session", 0),
+        },
     }

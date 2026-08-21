@@ -1,17 +1,85 @@
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.content import service as content_service
 from app.creators import service as creator_service
+from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
+from app.models.groups import Group, GroupCreatorMembership
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
 from app.permissions.policies import Permission, authorize
 from app.schemas.auth import MessageResponse
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/groups")
+async def groups_oversight(identity: CurrentIdentity, db: Db) -> list[dict]:
+    """Platform-only inventory for group lifecycle and financial oversight."""
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    rows = (await db.scalars(select(Group).order_by(Group.created_at.desc()))).all()
+    result = []
+    for group in rows:
+        memberships = await db.scalars(
+            select(GroupCreatorMembership).where(GroupCreatorMembership.group_id == group.id)
+        )
+        memberships = list(memberships)
+        result.append(
+            {
+                "id": str(group.id),
+                "name": group.name,
+                "slug": group.slug,
+                "status": group.status.value,
+                "creator_memberships": len(memberships),
+                "active_creators": sum(item.status.value == "active" for item in memberships),
+            }
+        )
+    return result
+
+
+@router.get("/groups/{group_id}/audit")
+async def group_audit(group_id: str, identity: CurrentIdentity, db: Db) -> list[dict]:
+    """Platform-only audit trail scoped to a group and its memberships."""
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    group = await db.get(Group, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    membership_ids = [
+        str(value)
+        for value in (
+            await db.scalars(
+                select(GroupCreatorMembership.id).where(GroupCreatorMembership.group_id == group.id)
+            )
+        )
+    ]
+    rows = (
+        await db.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.event_type.like("group.%"),
+                or_(
+                    AuditEvent.target_id == str(group.id),
+                    AuditEvent.target_id.in_(membership_ids) if membership_ids else False,
+                ),
+            )
+            .order_by(AuditEvent.created_at.desc())
+        )
+    ).all()
+    return [
+        {
+            "id": str(event.id),
+            "event_type": event.event_type,
+            "actor_user_id": str(event.actor_user_id) if event.actor_user_id else None,
+            "target_type": event.target_type,
+            "target_id": event.target_id,
+            "metadata": event.metadata_json,
+            "created_at": event.created_at,
+        }
+        for event in rows
+    ]
 
 
 @router.get("/foundation", response_model=MessageResponse)

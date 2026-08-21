@@ -493,6 +493,31 @@ async def dashboard(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+@router.get("/{group_id}/public-affiliations")
+async def public_affiliations(group_id: UUID, db: Db) -> list[dict[str, str]]:
+    """Expose only affiliations which the creator has explicitly made public."""
+    rows = (
+        await db.execute(
+            select(GroupCreatorMembership, CreatorProfile)
+            .join(CreatorProfile, CreatorProfile.id == GroupCreatorMembership.creator_id)
+            .where(
+                GroupCreatorMembership.group_id == group_id,
+                GroupCreatorMembership.status == "active",
+                GroupCreatorMembership.affiliation_public.is_(True),
+            )
+            .order_by(CreatorProfile.username)
+        )
+    ).all()
+    return [
+        {
+            "creator_id": str(membership.creator_id),
+            "username": creator.username or "",
+            "display_name": creator.display_name or "",
+        }
+        for membership, creator in rows
+    ]
+
+
 @router.get("/{group_id}", response_model=GroupResponse)
 async def get_group(group_id: UUID, db: Db) -> GroupResponse:
     group = await db.get(Group, group_id)

@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy import case, func, select
 
 from app.accounts import service as accounts
+from app.api.routes import admin as admin_routes
 from app.api.routes import groups as group_routes
 from app.content import service as content_service
 from app.content.access import can_access_content
@@ -104,9 +105,9 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
     assert credits[LedgerAccountKind.platform_revenue] == 400
     assert credits[LedgerAccountKind.creator_pending] == 800
     assert credits[LedgerAccountKind.group_pending] == 800
-    assert (await groups.group_financial_dashboard(db_session, group.id, manager, "EUR"))[
-        "pending_amount_minor"
-    ] == 800
+    dashboard_after_ppv = await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+    assert dashboard_after_ppv["pending_amount_minor"] == 800
+    assert dashboard_after_ppv["source_amounts_minor"]["ppv"] == 800
 
     refunded = await finance.refund_purchase(db_session, settled, manager, "Support refund")
     assert refunded.status.value == "refunded"
@@ -137,7 +138,30 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
         "active_creators": 1,
         "pending_amount_minor": 0,
         "available_amount_minor": 0,
+        "source_amounts_minor": {
+            "ppv": 0,
+            "subscriptions": 0,
+            "messaging": 0,
+            "private_live": 0,
+        },
     }
+    membership.affiliation_public = True
+    public_rows = await group_routes.public_affiliations(group.id, db_session)
+    assert public_rows == [
+        {
+            "creator_id": str(creator.id),
+            "username": creator.username,
+            "display_name": creator.display_name,
+        }
+    ]
+    admin, _ = await accounts.register(
+        db_session, "group-oversight@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
+    overview = await admin_routes.groups_oversight((admin, None), db_session)
+    assert next(row for row in overview if row["id"] == str(group.id))["active_creators"] == 1
+    audit_rows = await admin_routes.group_audit(str(group.id), (admin, None), db_session)
+    assert any(row["event_type"] == "group.invitation_accepted" for row in audit_rows)
 
     # Defaults are future-only: Creator A's accepted 50/50 contract does not
     # change when the group offers 30/70 to a later creator.
