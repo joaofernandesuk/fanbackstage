@@ -17,7 +17,9 @@ from app.models.content import (
     ContentItem,
     ContentStatus,
     ContentType,
+    DerivativeType,
     MediaAsset,
+    MediaDerivative,
     MediaStatus,
     MediaType,
     ModerationStatus,
@@ -217,6 +219,71 @@ async def test_paid_attachment_unlocks_only_after_settlement(db_session):
     assert purchase.status == "paid"
     assert await can_access_asset(db_session, asset.id, buyer)
     assert await finance.process_development_webhook(db_session, payload, signature) is None
+
+
+@pytest.mark.asyncio
+async def test_attachment_access_exposes_preview_but_not_full_media_before_unlock(db_session):
+    owner, profile = await creator(db_session, "attachment-access-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "attachment-access-buyer@example.com", "strong-password-123", None
+    )
+    initiated = await messaging.send_message(db_session, buyer, profile.id, "hello")
+    sent = await messaging.send_in_conversation(
+        db_session, owner, initiated.conversation_id, "locked"
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        storage_key="private/phase6-locked-preview",
+        original_filename="locked.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            MediaDerivative(
+                media_asset_id=asset.id,
+                derivative_type=DerivativeType.blurred_preview,
+                status=MediaStatus.ready,
+                storage_key="derivative/preview.webp",
+                mime_type="image/webp",
+            ),
+            MediaDerivative(
+                media_asset_id=asset.id,
+                derivative_type=DerivativeType.display,
+                status=MediaStatus.ready,
+                storage_key="derivative/display.webp",
+                mime_type="image/webp",
+            ),
+        ]
+    )
+    attachment = await messaging.attach_media(db_session, owner, sent.id, asset.id, 700, "EUR")
+    await db_session.commit()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as buyer_client:
+        await buyer_client.post(
+            "/api/v1/auth/login",
+            json={"email": buyer.email, "password": "strong-password-123"},
+        )
+        access = await buyer_client.get(f"/api/v1/messages/attachments/{attachment.id}/access")
+        assert access.status_code == 200
+        assert access.json()["locked"] is True
+        assert access.json()["preview_delivery_path"]
+        assert access.json()["full_delivery_path"] is None
+        purchase = await messaging.create_unlock_purchase(
+            db_session, buyer, attachment.id, "unlock-access"
+        )
+        attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
+        payload, signature = finance.development_webhook_payload(attempt)
+        await finance.process_development_webhook(db_session, payload, signature)
+        await db_session.commit()
+        unlocked = await buyer_client.get(f"/api/v1/messages/attachments/{attachment.id}/access")
+        assert unlocked.status_code == 200
+        assert unlocked.json()["locked"] is False
+        assert unlocked.json()["full_delivery_path"].startswith("/media/derivatives/")
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,16 @@ class AttachmentInput(BaseModel):
     unlock_currency: str | None = Field(default=None, min_length=3, max_length=3)
 
 
+class AttachmentAccessResponse(BaseModel):
+    id: UUID
+    media_type: str
+    locked: bool
+    amount_minor: int | None
+    currency: str | None
+    preview_delivery_path: str | None
+    full_delivery_path: str | None
+
+
 class MessageResponse(BaseModel):
     id: UUID
     conversation_id: UUID

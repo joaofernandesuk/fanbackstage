@@ -1,11 +1,16 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 
 from app.api.deps import CurrentIdentity, Db
+from app.content.access import can_access_asset
+from app.core.config import get_settings
 from app.core.rate_limit import enforce_messaging_rate_limit
+from app.media.storage import storage_provider
 from app.messaging import service
+from app.models.content import DerivativeType, MediaAsset, MediaDerivative, MediaStatus
 from app.models.creator import CreatorProfile
 from app.models.messaging import (
     AudienceSegment,
@@ -14,11 +19,13 @@ from app.models.messaging import (
     ConversationParticipant,
     MassMessageCampaign,
     Message,
+    MessageAttachment,
     MessageReport,
     MessagingPermission,
     UserBlock,
 )
 from app.schemas.messaging import (
+    AttachmentAccessResponse,
     AttachmentInput,
     CampaignInput,
     ConversationResponse,
@@ -285,6 +292,92 @@ async def unlock(
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+async def attachment_context(db: Db, attachment_id: UUID, identity: CurrentIdentity):
+    attachment = await db.get(MessageAttachment, attachment_id)
+    message = await db.get(Message, attachment.message_id) if attachment else None
+    conversation = await db.get(Conversation, message.conversation_id) if message else None
+    if not attachment or not message or not conversation:
+        raise HTTPException(404, "Attachment not found")
+    try:
+        await service.assert_participant(db, conversation, identity[0])
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    asset = await db.get(MediaAsset, attachment.media_asset_id)
+    if (
+        not asset
+        or asset.status is not MediaStatus.ready
+        or asset.deleted_at is not None
+        or asset.moderation_status.name in {"flagged", "rejected", "removed"}
+    ):
+        raise HTTPException(404, "Attachment not found")
+    return attachment, asset
+
+
+@router.get("/attachments/{attachment_id}/access", response_model=AttachmentAccessResponse)
+async def attachment_access(
+    attachment_id: UUID, identity: CurrentIdentity, db: Db
+) -> AttachmentAccessResponse:
+    attachment, asset = await attachment_context(db, attachment_id, identity)
+    preview_type = (
+        DerivativeType.blurred_preview
+        if asset.media_type.value == "image"
+        else DerivativeType.preview_clip
+    )
+    preview = await db.scalar(
+        select(MediaDerivative.id).where(
+            MediaDerivative.media_asset_id == asset.id,
+            MediaDerivative.derivative_type == preview_type,
+            MediaDerivative.status == MediaStatus.ready,
+        )
+    )
+    full_type = (
+        DerivativeType.display if asset.media_type.value == "image" else DerivativeType.playback
+    )
+    full = await db.scalar(
+        select(MediaDerivative.id).where(
+            MediaDerivative.media_asset_id == asset.id,
+            MediaDerivative.derivative_type == full_type,
+            MediaDerivative.status == MediaStatus.ready,
+        )
+    )
+    allowed = await can_access_asset(db, asset.id, identity[0])
+    return AttachmentAccessResponse(
+        id=attachment.id,
+        media_type=asset.media_type.value,
+        locked=attachment.unlock_price_minor is not None and not allowed,
+        amount_minor=attachment.unlock_price_minor,
+        currency=attachment.unlock_currency,
+        preview_delivery_path=f"/messages/attachments/{attachment.id}/preview" if preview else None,
+        full_delivery_path=f"/media/derivatives/{full}" if allowed and full else None,
+    )
+
+
+@router.get("/attachments/{attachment_id}/preview")
+async def attachment_preview(
+    attachment_id: UUID, identity: CurrentIdentity, db: Db
+) -> RedirectResponse:
+    _attachment, asset = await attachment_context(db, attachment_id, identity)
+    preview_type = (
+        DerivativeType.blurred_preview
+        if asset.media_type.value == "image"
+        else DerivativeType.preview_clip
+    )
+    derivative = await db.scalar(
+        select(MediaDerivative).where(
+            MediaDerivative.media_asset_id == asset.id,
+            MediaDerivative.derivative_type == preview_type,
+            MediaDerivative.status == MediaStatus.ready,
+        )
+    )
+    if not derivative:
+        raise HTTPException(404, "Attachment preview not found")
+    return RedirectResponse(
+        storage_provider().create_download_url(
+            derivative.storage_key, get_settings().media_url_ttl_seconds
+        )
+    )
 
 
 @router.post("/messages/{message_id}/attachments")
