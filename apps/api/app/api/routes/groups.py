@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from app.api.deps import CurrentIdentity, Db
 from app.content import service as content_service
 from app.groups import service
+from app.models.creator import CreatorProfile
 from app.models.groups import Group, GroupContract, GroupCreatorMembership, GroupPermission
 from app.permissions.policies import Permission, authorize
 from app.schemas.content import ContentUpdate
@@ -216,6 +217,21 @@ async def update_managed_content(
         raise HTTPException(
             status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)
         ) from exc
+
+
+@router.get("/mine/memberships", response_model=list[MembershipResponse])
+async def my_memberships(identity: CurrentIdentity, db: Db) -> list[MembershipResponse]:
+    from sqlalchemy import select
+
+    rows = (
+        await db.scalars(
+            select(GroupCreatorMembership)
+            .join(CreatorProfile, CreatorProfile.id == GroupCreatorMembership.creator_id)
+            .where(CreatorProfile.user_id == identity[0].id)
+            .order_by(GroupCreatorMembership.created_at.desc())
+        )
+    ).all()
+    return [membership_response(row) for row in rows]
 
 
 @router.get("/{group_id}/dashboard")
