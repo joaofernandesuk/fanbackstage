@@ -10,7 +10,10 @@ run "alembic upgrade head"
 run "python tests/e2e_seed.py"
 run "celery -A app.worker.celery_app worker --loglevel=WARNING --pool=solo -n e2e-media@%h" &
 worker_pid=$!
-run "uvicorn app.main:app --host 127.0.0.1 --port $api_port" &
+# LiveKit runs in Docker and delivers signed lifecycle callbacks through the
+# host-gateway address.  Binding only loopback makes the API readiness probe
+# pass while silently dropping those provider callbacks in Linux CI.
+run "uvicorn app.main:app --host 0.0.0.0 --port $api_port" &
 api_pid=$!
 cleanup() { kill "$worker_pid" "$api_pid" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
