@@ -45,8 +45,11 @@ class ConversationResponse(BaseModel):
     id: UUID
     creator_id: UUID
     viewer_user_id: UUID
+    other_user_id: UUID
     last_message_at: datetime | None
     unread_count: int
+    archived: bool
+    muted: bool
 
 
 class CampaignInput(BaseModel):

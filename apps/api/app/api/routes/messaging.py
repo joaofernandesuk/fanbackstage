@@ -196,13 +196,20 @@ async def inbox(identity: CurrentIdentity, db: Db, limit: int = 20) -> list[Conv
             )
             or 0
         )
+        creator = await db.get(CreatorProfile, row.creator_id)
+        if not creator:
+            continue
+        is_creator = bool(creator and creator.user_id == identity[0].id)
         result.append(
             ConversationResponse(
                 id=row.id,
                 creator_id=row.creator_id,
                 viewer_user_id=row.viewer_user_id,
+                other_user_id=row.viewer_user_id if is_creator else creator.user_id,
                 last_message_at=row.last_message_at,
                 unread_count=unread,
+                archived=row.archived_by_creator if is_creator else row.archived_by_viewer,
+                muted=row.muted_by_creator if is_creator else row.muted_by_viewer,
             )
         )
     return result
@@ -264,6 +271,16 @@ async def unarchive(conversation_id: UUID, identity: CurrentIdentity, db: Db) ->
 async def mute(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
     try:
         await service.set_inbox_state(db, identity[0], conversation_id, muted=True)
+        await db.commit()
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.delete("/conversations/{conversation_id}/mute", status_code=204)
+async def unmute(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+    try:
+        await service.set_inbox_state(db, identity[0], conversation_id, muted=False)
         await db.commit()
     except PermissionError as exc:
         await db.rollback()
