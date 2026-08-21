@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.accounts import service as accounts
 from app.creators import service as creators
 from app.models.creator import CreatorStatus
-from app.models.finance import LedgerTransaction
+from app.models.finance import LedgerTransaction, PaymentAttempt, PaymentStatus
 from app.models.streaming import (
     LiveAccessMode,
     LiveRecording,
@@ -175,6 +175,26 @@ async def test_disconnect_pauses_billable_time_and_reconnect_resumes(db_session)
         db_session, payer, session.id, start + timedelta(seconds=30)
     )
     assert session.status is PrivateSessionStatus.active
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_only_authorizes_verified_private_payment(db_session):
+    owner, profile = await creator(db_session, "authorization-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "authorization-payer@example.com", "strong-password-123", None
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    assert session.status is PrivateSessionStatus.awaiting_payment_authorization
+    assert await streaming.reconcile_private_authorizations(db_session) == 0
+    attempt = await db_session.get(PaymentAttempt, session.payment_attempt_id)
+    assert attempt is not None
+    attempt.status = PaymentStatus.succeeded
+    assert await streaming.reconcile_private_authorizations(db_session) == 1
+    assert session.status is PrivateSessionStatus.ready
+    assert await streaming.reconcile_private_authorizations(db_session) == 0
 
 
 @pytest.mark.asyncio
