@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -6,6 +7,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_streaming_rate_limit
+from app.finance.service import currency_code
 from app.integrations.streaming import LiveKitStreamingProvider
 from app.models.streaming import (
     LiveAccessMode,
@@ -17,6 +19,8 @@ from app.models.streaming import (
 from app.permissions.policies import Permission, authorize
 from app.schemas.streaming import (
     ChatInput,
+    CreatorLiveSettingsInput,
+    CreatorLiveSettingsResponse,
     LiveBanInput,
     LiveReportInput,
     LiveRoomResponse,
@@ -29,6 +33,7 @@ from app.schemas.streaming import (
 from app.streaming import service
 
 router = APIRouter(prefix="/live", tags=["streaming"])
+logger = logging.getLogger("fanbackstage.streaming")
 
 
 def room_response(room: LiveRoom) -> LiveRoomResponse:
@@ -56,6 +61,18 @@ def private_session_response(session) -> PrivateSessionResponse:
         minimum_charge_minor=session.minimum_charge_minor,
         currency=session.currency,
         billable_seconds=session.billable_seconds,
+        payment_attempt_id=session.payment_attempt_id,
+    )
+
+
+def live_settings_response(settings) -> CreatorLiveSettingsResponse:
+    return CreatorLiveSettingsResponse(
+        private_sessions_enabled=settings.private_sessions_enabled,
+        one_to_one_price_minor=settings.one_to_one_price_minor,
+        two_to_one_price_minor=settings.two_to_one_price_minor,
+        currency=settings.currency,
+        minimum_minutes=settings.minimum_minutes,
+        max_authorization_minor=settings.max_authorization_minor,
     )
 
 
@@ -71,6 +88,9 @@ async def livekit_webhook(request: Request, db: Db) -> None:
         await db.commit()
     except (PermissionError, ValueError) as exc:
         await db.rollback()
+        # Never log the authorization header or body: either may contain a
+        # signed provider credential or private-room metadata.
+        logger.warning("livekit_webhook_rejected: %s", exc)
         raise HTTPException(401, str(exc)) from exc
 
 
@@ -113,6 +133,40 @@ async def discovery(db: Db) -> list[LiveRoomResponse]:
             )
         ).all()
     ]
+
+
+@router.get("/settings", response_model=CreatorLiveSettingsResponse)
+async def get_live_settings(identity: CurrentIdentity, db: Db) -> CreatorLiveSettingsResponse:
+    creator = await service.approved_creator(db, identity[0])
+    return live_settings_response(await service.settings_for_creator(db, creator.id))
+
+
+@router.patch("/settings", response_model=CreatorLiveSettingsResponse)
+async def update_live_settings(
+    payload: CreatorLiveSettingsInput, identity: CurrentIdentity, db: Db
+) -> CreatorLiveSettingsResponse:
+    try:
+        creator = await service.approved_creator(db, identity[0])
+        settings = await service.settings_for_creator(db, creator.id)
+        for field, value in payload.model_dump(exclude_unset=True).items():
+            if field == "currency" and value is not None:
+                value = currency_code(value)
+            setattr(settings, field, value)
+        if (
+            settings.max_authorization_minor
+            < settings.one_to_one_price_minor * settings.minimum_minutes
+        ):
+            raise ValueError("Authorization cap must cover the 1-to-1 minimum charge")
+        if (
+            settings.max_authorization_minor
+            < settings.two_to_one_price_minor * settings.minimum_minutes
+        ):
+            raise ValueError("Authorization cap must cover the 2-to-1 minimum charge")
+        await db.commit()
+        return live_settings_response(settings)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
 @router.post("/rooms/{room_id}/join")

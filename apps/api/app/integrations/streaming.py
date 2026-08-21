@@ -81,9 +81,14 @@ class LiveKitStreamingProvider(StreamingProvider):
 
     def verify_webhook(self, body: bytes, authorization: str | None) -> dict:
         """Verify LiveKit's signed JWT and raw-body SHA-256 claim before parsing."""
-        if not authorization or not authorization.startswith("Bearer "):
+        # LiveKit webhook delivery places the signed JWT directly in
+        # ``Authorization``. This deliberately differs from the Twirp service
+        # API, which uses a ``Bearer`` token. Do not accept a browser-style
+        # bearer prefix here: the provider's exact signed transport format is
+        # part of the ingress contract.
+        if not authorization or authorization.startswith("Bearer "):
             raise ValueError("Missing LiveKit webhook authorization")
-        token = authorization.removeprefix("Bearer ")
+        token = authorization
         try:
             header, payload, signature = token.split(".")
             claims = json.loads(urlsafe_b64decode(f"{payload}{'=' * (-len(payload) % 4)}"))

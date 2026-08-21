@@ -1,9 +1,17 @@
 port: 7880
 bind_addresses: ["0.0.0.0"]
 rtc:
+  # Docker Desktop's container address is not browser-routable. The local
+  # development server is published on loopback, so advertise that mapped host
+  # candidate and use one explicitly published UDP port for deterministic E2E.
+  use_external_ip: false
+  node_ip: 127.0.0.1
   tcp_port: 7881
-  port_range_start: 50000
-  port_range_end: 50020
+  udp_port: 7882
 keys:
-  devkey: secret
-
+  devkey: fanbackstage-livekit-development-secret-2026
+webhook:
+  # The isolated Playwright API listens on the host. LiveKit, not the browser,
+  # reports participant lifecycle changes to this signed ingress.
+  api_key: devkey
+  urls: ["http://host.docker.internal:38180/api/v1/live/webhooks/livekit"]

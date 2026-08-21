@@ -1,5 +1,5 @@
 import json
-from base64 import b64encode, urlsafe_b64encode
+from base64 import b64encode, urlsafe_b64decode, urlsafe_b64encode
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from hmac import new as hmac_new
@@ -51,11 +51,17 @@ def signed_livekit_webhook(body: bytes) -> str:
         urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).rstrip(b"=").decode()
     )
     signature = (
-        urlsafe_b64encode(hmac_new(b"secret", f"{header}.{payload}".encode(), sha256).digest())
+        urlsafe_b64encode(
+            hmac_new(
+                b"fanbackstage-livekit-development-secret-2026",
+                f"{header}.{payload}".encode(),
+                sha256,
+            ).digest()
+        )
         .rstrip(b"=")
         .decode()
     )
-    return f"Bearer {header}.{payload}.{signature}"
+    return f"{header}.{payload}.{signature}"
 
 
 def test_livekit_webhook_requires_valid_signature_and_raw_body_hash():
@@ -66,6 +72,8 @@ def test_livekit_webhook_requires_valid_signature_and_raw_body_hash():
         provider.verify_webhook(body, None)
     with pytest.raises(ValueError, match="authorization"):
         provider.verify_webhook(body, "Bearer invalid")
+    with pytest.raises(ValueError, match="authorization"):
+        provider.verify_webhook(body, f"Bearer {signed_livekit_webhook(body)}")
     with pytest.raises(ValueError, match="hash"):
         provider.verify_webhook(b"{}", signed_livekit_webhook(body))
 
@@ -145,9 +153,7 @@ async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_sessio
 
 
 @pytest.mark.asyncio
-async def test_two_to_one_cannot_bill_or_issue_invitee_token_before_all_participants_join(
-    db_session,
-):
+async def test_two_to_one_real_lifecycle_has_one_payer_timer_and_settlement(db_session):
     owner, profile = await creator(db_session, "waiting-owner@example.com")
     payer, _ = await accounts.register(
         db_session, "waiting-payer@example.com", "strong-password-123", None
@@ -162,24 +168,70 @@ async def test_two_to_one_cannot_bill_or_issue_invitee_token_before_all_particip
         db_session, payer, profile.id, PrivateSessionMode.two_to_one, invited.id
     )
     session = await streaming.accept_private_request(db_session, owner, request.id)
-    session.status = PrivateSessionStatus.ready
+    assert session.mode is PrivateSessionMode.two_to_one
+    assert session.payer_user_id == payer.id
+    assert session.per_minute_price_minor == request.per_minute_price_minor
+    with pytest.raises(PermissionError, match="unavailable"):
+        await streaming.issue_private_token(db_session, payer, session.id)
+
+    attempt = await db_session.get(PaymentAttempt, session.payment_attempt_id)
+    assert attempt is not None and attempt.buyer_user_id == payer.id
+    attempt.status = PaymentStatus.succeeded
+    await streaming.authorize_private_session(db_session, session)
+    assert session.status is PrivateSessionStatus.ready
+
     with pytest.raises(PermissionError, match="not invited"):
         await streaming.issue_private_token(db_session, stranger, session.id)
+    for participant in (owner, payer, invited):
+        _, token = await streaming.issue_private_token(db_session, participant, session.id)
+        encoded_claims = token.split(".")[1]
+        payload = json.loads(urlsafe_b64decode(encoded_claims + "=" * (-len(encoded_claims) % 4)))
+        assert payload["sub"] == str(participant.id)
+        assert payload["video"]["room"] == session.provider_room_name
+        assert payload["video"]["roomJoin"] is True
+        assert payload["video"]["canPublish"] is True
+
     start = datetime(2026, 8, 21, tzinfo=UTC)
     await streaming.private_participant_connected(db_session, owner, session.id, start)
     await streaming.private_participant_connected(db_session, payer, session.id, start)
     assert session.status is PrivateSessionStatus.connecting
-    ended = await streaming.end_private_session(
-        db_session, owner, session.id, "invitee_absent", start
+    assert session.billable_seconds == 0
+    await streaming.private_participant_connected(db_session, invited, session.id, start)
+    assert session.status is PrivateSessionStatus.active
+    await streaming.private_participant_disconnected(
+        db_session, invited, session.id, start + timedelta(seconds=30)
     )
-    assert ended.status is PrivateSessionStatus.cancelled
-    assert (
-        await db_session.scalar(
-            select(LedgerTransaction).where(
-                LedgerTransaction.reference == f"private_session:{session.id}"
-            )
+    assert session.status is PrivateSessionStatus.reconnecting
+    assert session.billable_seconds == 30
+    await streaming.private_participant_connected(
+        db_session, invited, session.id, start + timedelta(seconds=45)
+    )
+    assert session.status is PrivateSessionStatus.active
+    settled = await streaming.end_private_session(
+        db_session, owner, session.id, "ended_by_creator", start + timedelta(seconds=75)
+    )
+    assert settled.status is PrivateSessionStatus.settled
+    assert settled.mode is PrivateSessionMode.two_to_one
+    assert settled.billable_seconds == 60
+    assert await db_session.scalar(
+        select(LedgerTransaction).where(
+            LedgerTransaction.reference == f"private_session:{session.id}"
         )
-        is None
+    )
+    assert (
+        await streaming.end_private_session(db_session, owner, session.id, "replay")
+    ).status is (PrivateSessionStatus.settled)
+    assert (
+        len(
+            (
+                await db_session.scalars(
+                    select(LedgerTransaction).where(
+                        LedgerTransaction.reference == f"private_session:{session.id}"
+                    )
+                )
+            ).all()
+        )
+        == 1
     )
 
 
@@ -281,6 +333,64 @@ async def test_provider_event_replay_cannot_inflate_private_billable_time(db_ses
         is None
     )
     assert session.billable_seconds == 15
+
+
+@pytest.mark.asyncio
+async def test_terminal_private_session_rejects_delayed_provider_events_and_reconciliation(
+    db_session,
+):
+    owner, profile = await creator(db_session, "terminal-event-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "terminal-event-payer@example.com", "strong-password-123", None
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    session.status = PrivateSessionStatus.active
+    session.active_started_at = datetime(2026, 8, 21, tzinfo=UTC)
+    await streaming.end_private_session(
+        db_session,
+        owner,
+        session.id,
+        "ended_by_participant",
+        datetime(2026, 8, 21, 0, 0, 1, tzinfo=UTC),
+    )
+    assert session.status is PrivateSessionStatus.settled
+
+    await streaming.process_private_provider_event(
+        db_session,
+        event_id="late-leave-after-settlement",
+        event_type="participant_left",
+        session_id=session.id,
+        user_id=payer.id,
+        now=datetime(2026, 8, 21, 0, 0, 2, tzinfo=UTC),
+    )
+    await streaming.process_private_provider_event(
+        db_session,
+        event_id="late-join-after-settlement",
+        event_type="participant_joined",
+        session_id=session.id,
+        user_id=payer.id,
+        now=datetime(2026, 8, 21, 0, 0, 3, tzinfo=UTC),
+    )
+    assert (
+        await streaming.process_private_provider_event(
+            db_session,
+            event_id="late-join-after-settlement",
+            event_type="participant_joined",
+            session_id=session.id,
+            user_id=payer.id,
+            now=datetime(2026, 8, 21, 0, 0, 4, tzinfo=UTC),
+        )
+        is None
+    )
+
+    assert session.status is PrivateSessionStatus.settled
+    assert session.billable_seconds == 1
+    # Terminal sessions are excluded from provider reconciliation, so a room
+    # that happens to contain a stale participant can never reopen settlement.
+    assert await streaming.reconcile_private_provider_presence(db_session) == 0
 
 
 @pytest.mark.asyncio

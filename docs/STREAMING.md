@@ -8,6 +8,12 @@ Private-session requests may queue while a creator is public live, but the creat
 
 Public transport uses short-lived LiveKit tokens issued only after FanBackstage's PostgreSQL authorization decision. Creator tokens may publish; public-viewer tokens are subscribe-only. Durable chat and REST polling remain available if realtime transport degrades. Public-recording requests are persisted for provider egress processing; private sessions deliberately have no recording command and remain unrecorded by default. Live report context requires moderation permission and is audited.
 
+## Local LiveKit integration and E2E transport
+
+The local Compose stack exposes browser-reachable LiveKit signalling on `ws://localhost:7880`, TCP fallback on `7881`, and a single UDP mux port on `7882`. Its development-only LiveKit node advertises `127.0.0.1`, rather than its Docker bridge address, so a browser on the host can establish ICE against the published UDP/TCP ports. This is intentionally local-only: deployed environments must advertise their own externally reachable RTC address and provide appropriate UDP/TCP/TURN infrastructure.
+
+The real-stack Playwright configuration grants camera/microphone permissions to the isolated frontend origin and launches Chromium with deterministic fake-media flags. The Phase 7 journey verifies that synthetic creator A/V is actually published, a subscribe-only viewer renders the video track, and a viewer token does not contain publish authority. No browser-side presence or media mock is used.
+
 # 9. Live Webcam and Streaming
 
 
@@ -113,3 +119,6 @@ LeaderboardPeriod
 LeaderboardEntry
 Gamification consumes canonical domain events from purchases, subscriptions, Lives, content engagement and referrals. It must not become the source of truth for those domains.
 - Public leaderboard opt-out never removes legitimate private accounting/progress records.
+# Terminal callback safety
+
+LiveKit callbacks are signed and their provider IDs are persisted before private-session state changes. A callback delivered after a session is ending, ended, or settled is retained for replay auditing but is a no-op; it cannot reopen the session, restart billing, or alter the final settlement.

@@ -10,6 +10,24 @@ class LiveStartInput(BaseModel):
     access_mode: str = "public"
 
 
+class CreatorLiveSettingsInput(BaseModel):
+    private_sessions_enabled: bool | None = None
+    one_to_one_price_minor: int | None = Field(default=None, ge=1)
+    two_to_one_price_minor: int | None = Field(default=None, ge=1)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    minimum_minutes: int | None = Field(default=None, ge=1, le=120)
+    max_authorization_minor: int | None = Field(default=None, ge=1)
+
+
+class CreatorLiveSettingsResponse(BaseModel):
+    private_sessions_enabled: bool
+    one_to_one_price_minor: int
+    two_to_one_price_minor: int
+    currency: str
+    minimum_minutes: int
+    max_authorization_minor: int
+
+
 class PrivateRequestInput(BaseModel):
     mode: str = "one_to_one"
     invited_user_id: UUID | None = None
@@ -63,6 +81,7 @@ class PrivateSessionResponse(BaseModel):
     minimum_charge_minor: int
     currency: str
     billable_seconds: int
+    payment_attempt_id: UUID | None
 
 
 class ProviderTokenResponse(BaseModel):

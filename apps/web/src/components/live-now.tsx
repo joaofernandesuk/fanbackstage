@@ -31,12 +31,24 @@ export function LiveNow() {
       disconnect();
       const authorization = await api<Token>(`/live/rooms/${room.id}/token`, { method: "POST" });
       const livekitRoom = new Room();
-      livekitRoom.on(RoomEvent.TrackSubscribed, (track) => {
+      const attachVideo = (track: Track) => {
         if (track.kind === Track.Kind.Video && videoRef.current) videoRef.current.append(track.attach());
-      });
+      };
+      livekitRoom.on(RoomEvent.TrackSubscribed, attachVideo);
       livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((element) => element.remove()));
-      await livekitRoom.connect(authorization.provider_url, authorization.token);
+      await livekitRoom.connect(authorization.provider_url, authorization.token, {
+        autoSubscribe: true,
+      });
       roomRef.current = livekitRoom; setActive(room);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      // A publication can arrive as part of the initial connection state before
+      // React has rendered the viewer shell. Attach both the event-driven and
+      // already-known tracks so a real publisher is never missed.
+      for (const participant of livekitRoom.remoteParticipants.values()) {
+        for (const publication of participant.trackPublications.values()) {
+          if (publication.track) attachVideo(publication.track);
+        }
+      }
       setChat(await api<Chat[]>(`/live/rooms/${room.id}/chat`));
     } catch (caught) {
       disconnect(); setError(caught instanceof ApiError ? caught.message : "Unable to connect to this live room");
@@ -56,6 +68,18 @@ export function LiveNow() {
     void refresh(); const timer = setInterval(() => void refresh(), 15_000);
     return () => { clearInterval(timer); disconnect(); };
   }, []);
+
+  useEffect(() => {
+    const livekitRoom = roomRef.current;
+    if (!active || !livekitRoom || !videoRef.current) return;
+    for (const participant of livekitRoom.remoteParticipants.values()) {
+      for (const publication of participant.trackPublications.values()) {
+        if (publication.track?.kind === Track.Kind.Video) {
+          videoRef.current.append(publication.track.attach());
+        }
+      }
+    }
+  }, [active]);
 
   return <section className="card" aria-label="Live now">
     <p className="eyebrow">LIVE NOW</p><h1>Live creators</h1>{error && <p className="error">{error}</p>}

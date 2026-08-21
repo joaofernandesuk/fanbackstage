@@ -25,7 +25,13 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 120000,
   workers: 1,
-  use: { baseURL: webUrl, trace: "retain-on-failure", screenshot: "only-on-failure" },
+  use: {
+    baseURL: webUrl,
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+    permissions: ["camera", "microphone"],
+    launchOptions: { args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] },
+  },
   webServer: [
     {
       command: "./scripts/start-e2e-api.sh",

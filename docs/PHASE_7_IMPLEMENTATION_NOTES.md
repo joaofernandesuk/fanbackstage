@@ -7,3 +7,10 @@ For 2-to-1, one requesting viewer is the sole payer, one specifically identified
 Settlement rounds in integer minor units as `ceil(rate_minor * authoritative_seconds / 60)`, applies the stored minimum once, and never exceeds the stored authorization cap. Permanent tests cover 1, 30, 60, 61 and 95 second intervals, reconnect exclusion, replay-safe participant events, and idempotent final ledger settlement. A session that never reaches ACTIVE is cancelled without a minimum charge.
 
 The LiveKit client receives only API-issued short-lived tokens. Private tokens are session- and user-scoped; uninvited users cannot obtain one. Public viewer tokens cannot publish. Public recording is an egress foundation only; private recording is disabled by design.
+
+Local real-stack validation uses a browser-reachable LiveKit signalling endpoint and a loopback-advertised, published UDP mux port. This avoids Docker bridge ICE candidates being offered to host Chromium. The E2E browser is granted camera/microphone permission and uses Chromium's fake-media device flags; it proves actual creator track publication and viewer subscription without provider or presence mocks.
+# Release hardening update
+
+- The real isolated LiveKit suite covers creator synthetic A/V publication over UDP, a subscribe-only public viewer, and a private 1:1 authorization/presence/reconnect/settlement journey.
+- A 2-to-1 request snapshots its separate creator rate and has one requester/payer, one creator, and one named invited viewer. It becomes active only after all three named participants are present; it has one billable timer and one ledger settlement.
+- Signed LiveKit events are persisted before state changes. Events arriving after a private session is ending, ended, or settled are persisted and deduplicated but are no-ops: neither joins nor leaves can reopen the lifecycle or alter settled billable seconds.

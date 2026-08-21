@@ -25,7 +25,8 @@ services:
   livekit:
     image: livekit/livekit-server:latest
     command: --config /etc/livekit.yaml
-    ports: ["7880:7880", "7881:7881", "50000-50020:50000-50020/udp"]
+    ports: ["7880:7880", "7881:7881", "7882:7882/udp"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
     volumes: [./infra/livekit/livekit.yaml:/etc/livekit.yaml:ro]
 volumes:
   postgres_data:

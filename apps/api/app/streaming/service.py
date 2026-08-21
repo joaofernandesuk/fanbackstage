@@ -600,9 +600,29 @@ async def private_participant_connected(
 ) -> PrivateSession:
     now = now or datetime.now(UTC)
     session = await db.scalar(
-        select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+        select(PrivateSession)
+        .where(PrivateSession.id == session_id)
+        .with_for_update()
+        # A signed callback can have been queued before a concurrent explicit
+        # end settles the session.  Refresh after obtaining the row lock so a
+        # stale identity-map instance cannot reopen a terminal session.
+        .execution_options(populate_existing=True)
     )
-    if session is None or session.status not in (
+    if session is None:
+        raise PermissionError("Private session is unavailable")
+    # A valid signed join can arrive after explicit end/settlement. Keep its
+    # persisted provider-event identity for replay safety, but never allow it
+    # to revive a terminal private-session lifecycle.
+    if session.status in {
+        PrivateSessionStatus.ending,
+        PrivateSessionStatus.ended,
+        PrivateSessionStatus.settled,
+        PrivateSessionStatus.cancelled,
+        PrivateSessionStatus.failed,
+        PrivateSessionStatus.disputed,
+    }:
+        return session
+    if session.status not in (
         PrivateSessionStatus.ready,
         PrivateSessionStatus.connecting,
         PrivateSessionStatus.reconnecting,
@@ -638,10 +658,26 @@ async def private_participant_disconnected(
 ) -> PrivateSession:
     now = now or datetime.now(UTC)
     session = await db.scalar(
-        select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+        select(PrivateSession)
+        .where(PrivateSession.id == session_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if session is None:
         raise PermissionError("Private session is unavailable")
+    # Delivery of a provider leave event is asynchronous.  It remains useful
+    # to persist/deduplicate that event, but it must never move an already
+    # ended, settled, cancelled, failed, or disputed session back to
+    # reconnecting (or add billable time).
+    if session.status in {
+        PrivateSessionStatus.ending,
+        PrivateSessionStatus.ended,
+        PrivateSessionStatus.settled,
+        PrivateSessionStatus.cancelled,
+        PrivateSessionStatus.failed,
+        PrivateSessionStatus.disputed,
+    }:
+        return session
     participant = await db.scalar(
         select(SessionParticipant)
         .where(

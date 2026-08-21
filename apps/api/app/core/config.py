@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     subscription_renewal_retry_seconds: int = 300
     livekit_url: str = "ws://localhost:7880"
     livekit_api_key: str = "devkey"
-    livekit_api_secret: str = "secret"
+    livekit_api_secret: str = "fanbackstage-livekit-development-secret-2026"
     livekit_token_ttl_seconds: int = 300
     streaming_reconnect_grace_seconds: int = 30
     streaming_rate_limit_attempts: int = 30
@@ -64,6 +64,11 @@ class Settings(BaseSettings):
             raise RuntimeError("The development KYC provider cannot run in production")
         if self.environment == "production" and self.payment_provider == "development":
             raise RuntimeError("The development payment provider cannot run in production")
+        if (
+            self.environment == "production"
+            and self.livekit_api_secret == "fanbackstage-livekit-development-secret-2026"
+        ):
+            raise RuntimeError("FANBACKSTAGE_LIVEKIT_API_SECRET must be set in production")
         if not 0 <= self.finance_default_commission_basis_points <= 10000:
             raise RuntimeError("FANBACKSTAGE_FINANCE_DEFAULT_COMMISSION_BASIS_POINTS is invalid")
         if self.creator_earnings_settlement_seconds < 0:
