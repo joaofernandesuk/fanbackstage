@@ -61,20 +61,28 @@ def commission_amount(gross_amount_minor: int, basis_points: int) -> tuple[int, 
     return platform_fee, gross_amount_minor - platform_fee
 
 
-async def ppv_commission(db: AsyncSession) -> int:
+async def commission_for(db: AsyncSession, revenue_type: str) -> int:
+    """Return the server-owned commission rule for one revenue type."""
+    if not revenue_type or len(revenue_type) > 64:
+        raise FinancialError("Invalid revenue type")
     rule = await db.scalar(
         select(CommissionRule).where(
-            CommissionRule.revenue_type == "ppv", CommissionRule.active.is_(True)
+            CommissionRule.revenue_type == revenue_type, CommissionRule.active.is_(True)
         )
     )
     if rule:
         return rule.basis_points
     rule = CommissionRule(
-        revenue_type="ppv", basis_points=get_settings().finance_default_commission_basis_points
+        revenue_type=revenue_type,
+        basis_points=get_settings().finance_default_commission_basis_points,
     )
     db.add(rule)
     await db.flush()
     return rule.basis_points
+
+
+async def ppv_commission(db: AsyncSession) -> int:
+    return await commission_for(db, "ppv")
 
 
 async def _account(
@@ -380,9 +388,20 @@ async def process_development_webhook(
                 if session:
                     await authorize_private_session(db, session)
                 else:
-                    from app.subscriptions.service import settle_payment_attempt
+                    from app.marketplace.service import settle_order
+                    from app.models.marketplace import MarketplaceOrder, MarketplaceOrderStatus
 
-                    await settle_payment_attempt(db, attempt)
+                    order = await db.scalar(
+                        select(MarketplaceOrder)
+                        .where(MarketplaceOrder.payment_attempt_id == attempt.id)
+                        .with_for_update()
+                    )
+                    if order and order.status is MarketplaceOrderStatus.awaiting_payment:
+                        await settle_order(db, order)
+                    else:
+                        from app.subscriptions.service import settle_payment_attempt
+
+                        await settle_payment_attempt(db, attempt)
     webhook_event.processed_at = datetime.now(UTC)
     return purchase
 
@@ -498,6 +517,32 @@ async def reconcile_succeeded_payments(db: AsyncSession, limit: int = 100) -> in
     for attempt in subscription_attempts:
         subscription = await settle_payment_attempt(db, attempt)
         if subscription:
+            reconciled += 1
+    # Physical orders use the same provider-confirmed settlement boundary as
+    # other paid domains.  Their frozen shipping snapshot is never recomputed.
+    from app.marketplace.service import settle_order
+    from app.models.marketplace import MarketplaceOrder, MarketplaceOrderStatus
+
+    marketplace_attempts = (
+        await db.scalars(
+            select(PaymentAttempt)
+            .join(MarketplaceOrder, MarketplaceOrder.payment_attempt_id == PaymentAttempt.id)
+            .where(
+                PaymentAttempt.status == PaymentStatus.succeeded,
+                MarketplaceOrder.status == MarketplaceOrderStatus.awaiting_payment,
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    for attempt in marketplace_attempts:
+        order = await db.scalar(
+            select(MarketplaceOrder)
+            .where(MarketplaceOrder.payment_attempt_id == attempt.id)
+            .with_for_update()
+        )
+        if order and order.status is MarketplaceOrderStatus.awaiting_payment:
+            await settle_order(db, order)
             reconciled += 1
     return reconciled
 

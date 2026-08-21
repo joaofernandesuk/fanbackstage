@@ -41,6 +41,7 @@ class LedgerTransactionType(str, enum.Enum):
     subscription_charge = "subscription_charge"
     messaging_charge = "messaging_charge"
     private_live_session = "private_live_session"
+    marketplace_order = "marketplace_order"
 
 
 class PaymentStatus(str, enum.Enum):

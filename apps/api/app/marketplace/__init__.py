@@ -1,0 +1,1 @@
+"""Physical-goods marketplace domain."""

@@ -10,6 +10,7 @@ from app.media.service import approved_creator
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
+from app.models.marketplace import MarketplaceOrder
 from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
 from app.models.streaming import PrivateSession
 from app.models.subscription import SubscriptionPeriod
@@ -130,6 +131,13 @@ async def complete_development_payment(
             id=private_session.id,
             status=private_session.status.value,
             payment_attempt_id=attempt.id,
+        )
+    order = await db.scalar(
+        select(MarketplaceOrder).where(MarketplaceOrder.payment_attempt_id == attempt.id)
+    )
+    if order is not None:
+        return DevelopmentPaymentCompletionResponse(
+            id=order.id, status=order.status.value, payment_attempt_id=attempt.id
         )
     raise HTTPException(status_code=409, detail="Payment settlement was not found")
 
