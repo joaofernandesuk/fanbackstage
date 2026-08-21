@@ -6,6 +6,8 @@ Public Live, private sessions, 2-to-1/multi-party rooms, realtime effects, billi
 
 Private-session requests may queue while a creator is public live, but the creator cannot accept or start one until the public room has been explicitly ended. FanBackstage does not automatically end a public room, pause it, or move viewers to a holding state. A private request remains queued and the creator dashboard must state that ending the public live is required before acceptance. A private-break / be-right-back mode is deferred to a future streaming enhancement.
 
+Public transport uses short-lived LiveKit tokens issued only after FanBackstage's PostgreSQL authorization decision. Creator tokens may publish; public-viewer tokens are subscribe-only. Durable chat and REST polling remain available if realtime transport degrades. Public-recording requests are persisted for provider egress processing; private sessions deliberately have no recording command and remain unrecorded by default. Live report context requires moderation permission and is audited.
+
 # 9. Live Webcam and Streaming
 
 
