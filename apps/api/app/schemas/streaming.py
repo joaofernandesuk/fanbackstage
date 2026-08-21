@@ -12,6 +12,7 @@ class LiveStartInput(BaseModel):
 
 class PrivateRequestInput(BaseModel):
     mode: str = "one_to_one"
+    invited_user_id: UUID | None = None
     note: str | None = Field(default=None, max_length=500)
 
 

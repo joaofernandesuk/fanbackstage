@@ -49,3 +49,34 @@ async def test_private_requests_queue_during_live_but_cannot_be_accepted_until_l
     assert session.status is PrivateSessionStatus.awaiting_payment_authorization
     assert session.payment_attempt_id is None
     assert session.provider_room_name
+
+
+@pytest.mark.asyncio
+async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_session):
+    owner, profile = await creator(db_session, "two-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "two-payer@example.com", "strong-password-123", None
+    )
+    invited, _ = await accounts.register(
+        db_session, "two-invited@example.com", "strong-password-123", None
+    )
+    settings = await streaming.settings_for_creator(db_session, profile.id)
+    settings.one_to_one_price_minor, settings.two_to_one_price_minor = 100, 275
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.two_to_one, invited.id
+    )
+    assert request.per_minute_price_minor == 275
+    assert request.requester_user_id == payer.id and request.invited_user_id == invited.id
+    with pytest.raises(streaming.StreamingError, match="specific second viewer"):
+        await streaming.request_private_session(
+            db_session, payer, profile.id, PrivateSessionMode.two_to_one
+        )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    participants = (
+        await db_session.scalars(
+            select(streaming.SessionParticipant).where(
+                streaming.SessionParticipant.private_session_id == session.id
+            )
+        )
+    ).all()
+    assert {participant.user_id for participant in participants} == {owner.id, payer.id, invited.id}

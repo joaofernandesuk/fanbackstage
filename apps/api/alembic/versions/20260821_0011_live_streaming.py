@@ -173,6 +173,7 @@ def upgrade() -> None:
             sa.ForeignKey("users.id", ondelete="RESTRICT"),
             nullable=False,
         ),
+        sa.Column("invited_user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="RESTRICT")),
         sa.Column(
             "mode", postgresql.ENUM(name="private_session_mode", create_type=False), nullable=False
         ),

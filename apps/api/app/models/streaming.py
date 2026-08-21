@@ -174,6 +174,9 @@ class PrivateSessionRequest(UUIDPrimaryKey, Timestamped, Base):
     requester_user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), index=True
     )
+    invited_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
     mode: Mapped[PrivateSessionMode] = mapped_column(
         Enum(PrivateSessionMode, name="private_session_mode")
     )

@@ -226,6 +226,7 @@ async def request_private_session(
     requester: User,
     creator_id: UUID,
     mode: PrivateSessionMode,
+    invited_user_id: UUID | None = None,
     note: str | None = None,
 ) -> PrivateSessionRequest:
     creator = await db.get(CreatorProfile, creator_id)
@@ -238,6 +239,12 @@ async def request_private_session(
     settings = await settings_for_creator(db, creator.id)
     if not settings.private_sessions_enabled:
         raise StreamingError("Private sessions are disabled")
+    if mode is PrivateSessionMode.two_to_one and (
+        not invited_user_id or invited_user_id == requester.id
+    ):
+        raise StreamingError("A specific second viewer is required for a 2-to-1 session")
+    if mode is PrivateSessionMode.one_to_one and invited_user_id:
+        raise StreamingError("A 1-to-1 session cannot include an invited viewer")
     rate = (
         settings.one_to_one_price_minor
         if mode is PrivateSessionMode.one_to_one
@@ -247,6 +254,7 @@ async def request_private_session(
     request = PrivateSessionRequest(
         creator_id=creator.id,
         requester_user_id=requester.id,
+        invited_user_id=invited_user_id,
         mode=mode,
         per_minute_price_minor=rate,
         minimum_minutes=settings.minimum_minutes,
@@ -337,6 +345,17 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
                 user_id=creator.user_id,
                 role=SessionParticipantRole.creator,
             ),
+            *(
+                [
+                    SessionParticipant(
+                        private_session_id=session.id,
+                        user_id=request.invited_user_id,
+                        role=SessionParticipantRole.invited_viewer,
+                    )
+                ]
+                if request.invited_user_id
+                else []
+            ),
             SessionParticipant(
                 private_session_id=session.id,
                 user_id=request.requester_user_id,
@@ -350,6 +369,75 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
         actor_user_id=actor.id,
         target_type="private_session",
         target_id=str(session.id),
+    )
+    return session
+
+
+async def private_participant_connected(
+    db: AsyncSession, actor: User, session_id: UUID, now: datetime | None = None
+) -> PrivateSession:
+    now = now or datetime.now(UTC)
+    session = await db.scalar(
+        select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+    )
+    if session is None or session.status not in (
+        PrivateSessionStatus.ready,
+        PrivateSessionStatus.connecting,
+        PrivateSessionStatus.reconnecting,
+    ):
+        raise PermissionError("Private session is unavailable")
+    participant = await db.scalar(
+        select(SessionParticipant)
+        .where(
+            SessionParticipant.private_session_id == session.id,
+            SessionParticipant.user_id == actor.id,
+        )
+        .with_for_update()
+    )
+    if participant is None:
+        raise PermissionError("You are not invited to this private session")
+    participant.joined_at, participant.left_at = now, None
+    required = await db.scalars(
+        select(SessionParticipant).where(SessionParticipant.private_session_id == session.id)
+    )
+    if all(item.joined_at and item.left_at is None for item in required):
+        session.status, session.active_started_at, session.last_heartbeat_at = (
+            PrivateSessionStatus.active,
+            now,
+            now,
+        )
+    else:
+        session.status = PrivateSessionStatus.connecting
+    return session
+
+
+async def private_participant_disconnected(
+    db: AsyncSession, actor: User, session_id: UUID, now: datetime | None = None
+) -> PrivateSession:
+    now = now or datetime.now(UTC)
+    session = await db.scalar(
+        select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+    )
+    if session is None:
+        raise PermissionError("Private session is unavailable")
+    participant = await db.scalar(
+        select(SessionParticipant)
+        .where(
+            SessionParticipant.private_session_id == session.id,
+            SessionParticipant.user_id == actor.id,
+        )
+        .with_for_update()
+    )
+    if participant is None:
+        raise PermissionError("You are not a private-session participant")
+    if participant.left_at:
+        return session
+    if session.status is PrivateSessionStatus.active and session.active_started_at:
+        session.billable_seconds += max(0, int((now - session.active_started_at).total_seconds()))
+    participant.left_at, session.disconnected_at, session.status = (
+        now,
+        now,
+        PrivateSessionStatus.reconnecting,
     )
     return session
 

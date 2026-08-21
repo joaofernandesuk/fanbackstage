@@ -145,7 +145,12 @@ async def request_private(
     try:
         await enforce_streaming_rate_limit(request, str(identity[0].id), "private_request")
         item = await service.request_private_session(
-            db, identity[0], creator_id, PrivateSessionMode(payload.mode), payload.note
+            db,
+            identity[0],
+            creator_id,
+            PrivateSessionMode(payload.mode),
+            payload.invited_user_id,
+            payload.note,
         )
         await db.commit()
         return PrivateRequestResponse(
