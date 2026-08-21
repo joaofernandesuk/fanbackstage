@@ -56,3 +56,7 @@ async def test_paid_send_settles_once_and_only_delivers_after_payment(db_session
     )
     assert await finance.process_development_webhook(db_session, payload, signature) is None
     assert await db_session.scalar(select(func.count()).select_from(Message)) == 1
+    await finance.refund_message_charge(db_session, pending, buyer, "support refund")
+    await db_session.flush()
+    assert pending.status == "refunded"
+    assert await db_session.scalar(select(func.count()).select_from(Message)) == 1

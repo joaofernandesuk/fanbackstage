@@ -10,6 +10,7 @@ from app.media.service import approved_creator
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
+from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
 from app.models.subscription import SubscriptionPeriod
 from app.permissions.policies import Permission, authorize
 from app.schemas.finance import (
@@ -181,6 +182,36 @@ async def refund_subscription_period(
     except service.FinancialError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/finance/message-unlocks/{purchase_id}/refund", response_model=dict)
+async def refund_message_unlock(
+    purchase_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    purchase = await db.get(MessageUnlockPurchase, purchase_id)
+    if not purchase:
+        raise HTTPException(404, "Message unlock not found")
+    purchase = await service.refund_message_charge(db, purchase, identity[0], payload.reason)
+    await db.commit()
+    return {"id": str(purchase.id), "status": purchase.status}
+
+
+@router.post("/admin/finance/message-sends/{send_id}/refund", response_model=dict)
+async def refund_message_send(
+    send_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    pending = await db.get(PendingMessageSend, send_id)
+    if not pending:
+        raise HTTPException(404, "Message send not found")
+    pending = await service.refund_message_charge(db, pending, identity[0], payload.reason)
+    await db.commit()
+    return {
+        "id": str(pending.id),
+        "status": pending.status,
+        "message_id": str(pending.message_id) if pending.message_id else None,
+    }
 
 
 @router.get("/admin/finance/commission", response_model=dict)

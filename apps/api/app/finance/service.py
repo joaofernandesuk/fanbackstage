@@ -579,6 +579,74 @@ async def refund_purchase(
     return purchase
 
 
+async def refund_message_charge(db: AsyncSession, charge, actor: User, reason: str):
+    """Reverse a settled paid send or attachment unlock without deleting its message history."""
+    if charge.status == "refunded":
+        return charge
+    if charge.status != "paid" or not charge.ledger_transaction_id:
+        raise FinancialError("Only settled messaging charges can be refunded")
+    clearing = await _account(db, LedgerAccountKind.platform_clearing, charge.currency)
+    revenue = await _account(db, LedgerAccountKind.platform_revenue, charge.currency)
+    pending = await _account(
+        db,
+        LedgerAccountKind.creator_pending,
+        charge.currency,
+        charge.creator_id if hasattr(charge, "creator_id") else charge.seller_creator_id,
+    )
+    balance = await db.scalar(
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (LedgerEntry.direction == LedgerDirection.credit, LedgerEntry.amount_minor),
+                        else_=-LedgerEntry.amount_minor,
+                    )
+                ),
+                0,
+            )
+        ).where(LedgerEntry.ledger_account_id == pending.id)
+    )
+    pending_reversal = min(max(int(balance or 0), 0), charge.creator_amount_minor)
+    available_reversal = charge.creator_amount_minor - pending_reversal
+    available = await _account(
+        db,
+        LedgerAccountKind.creator_available,
+        charge.currency,
+        charge.creator_id if hasattr(charge, "creator_id") else charge.seller_creator_id,
+    )
+    entries = [
+        (clearing, LedgerDirection.credit, charge.gross_amount_minor),
+        (revenue, LedgerDirection.debit, charge.platform_fee_minor),
+    ]
+    if pending_reversal:
+        entries.append((pending, LedgerDirection.debit, pending_reversal))
+    if available_reversal:
+        entries.append((available, LedgerDirection.debit, available_reversal))
+    refund = await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.refund,
+        currency=charge.currency,
+        idempotency_key=f"messaging_refund:{charge.id}",
+        reference=f"messaging_refund:{charge.id}",
+        reversal_of_transaction_id=charge.ledger_transaction_id,
+        entries=entries,
+        metadata={"messaging_charge_id": str(charge.id), "reason": reason},
+    )
+    charge.status = "refunded"
+    attempt = await db.get(PaymentAttempt, charge.payment_attempt_id)
+    if attempt:
+        attempt.status = PaymentStatus.refunded
+    await record_event(
+        db,
+        "messaging.refunded",
+        actor_user_id=actor.id,
+        target_type=type(charge).__tablename__,
+        target_id=str(charge.id),
+        metadata={"refund_transaction_id": str(refund.id), "reason": reason},
+    )
+    return charge
+
+
 async def refund_subscription_period(
     db: AsyncSession, period: SubscriptionPeriod, actor: User, reason: str
 ) -> SubscriptionPeriod:

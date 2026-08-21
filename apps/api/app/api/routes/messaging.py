@@ -231,6 +231,36 @@ async def read(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None
         raise HTTPException(403, str(exc)) from exc
 
 
+@router.post("/conversations/{conversation_id}/archive", status_code=204)
+async def archive(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+    try:
+        await service.set_inbox_state(db, identity[0], conversation_id, archived=True)
+        await db.commit()
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.delete("/conversations/{conversation_id}/archive", status_code=204)
+async def unarchive(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+    try:
+        await service.set_inbox_state(db, identity[0], conversation_id, archived=False)
+        await db.commit()
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.post("/conversations/{conversation_id}/mute", status_code=204)
+async def mute(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+    try:
+        await service.set_inbox_state(db, identity[0], conversation_id, muted=True)
+        await db.commit()
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+
+
 @router.post("/attachments/{attachment_id}/unlock")
 async def unlock(
     attachment_id: UUID,
@@ -290,6 +320,18 @@ async def block(user_id: UUID, identity: CurrentIdentity, db: Db) -> None:
         )
     ):
         db.add(UserBlock(blocker_user_id=identity[0].id, blocked_user_id=user_id))
+        await db.commit()
+
+
+@router.delete("/block/{user_id}", status_code=204)
+async def unblock(user_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+    row = await db.scalar(
+        select(UserBlock).where(
+            UserBlock.blocker_user_id == identity[0].id, UserBlock.blocked_user_id == user_id
+        )
+    )
+    if row:
+        await db.delete(row)
         await db.commit()
 
 

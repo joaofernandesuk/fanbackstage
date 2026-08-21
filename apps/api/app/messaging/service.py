@@ -303,6 +303,34 @@ async def mark_read(db: AsyncSession, user: User, conversation_id: UUID) -> None
     )
 
 
+async def set_inbox_state(
+    db: AsyncSession,
+    user: User,
+    conversation_id: UUID,
+    *,
+    archived: bool | None = None,
+    muted: bool | None = None,
+) -> Conversation:
+    conversation = await db.get(Conversation, conversation_id)
+    if not conversation:
+        raise PermissionError("Conversation not found")
+    creator = await assert_participant(db, conversation, user)
+    suffix = "creator" if user.id == creator.user_id else "viewer"
+    if archived is not None:
+        setattr(conversation, f"archived_by_{suffix}", archived)
+    if muted is not None:
+        setattr(conversation, f"muted_by_{suffix}", muted)
+    await record_event(
+        db,
+        "conversation.inbox_state_changed",
+        actor_user_id=user.id,
+        target_type="conversation",
+        target_id=str(conversation.id),
+        metadata={"archived": archived, "muted": muted},
+    )
+    return conversation
+
+
 async def attach_media(
     db: AsyncSession,
     creator_user: User,
