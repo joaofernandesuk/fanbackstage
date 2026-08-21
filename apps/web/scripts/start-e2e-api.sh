@@ -8,7 +8,11 @@ runner="${E2E_API_RUNNER:-uv run }"
 run() { sh -c "$runner$1"; }
 run "alembic upgrade head"
 run "python tests/e2e_seed.py"
-run "celery -A app.worker.celery_app worker --loglevel=WARNING --pool=solo -n e2e-media@%h" &
+# The private-live E2E exercises provider-authoritative presence repair when a
+# webhook is delayed or unavailable. Run the production beat schedule inside
+# this isolated one-process worker so the bounded Playwright polls observe the
+# same reconciliation path used after a missed callback.
+run "celery -A app.worker.celery_app worker --beat --loglevel=WARNING --pool=solo -n e2e-media@%h" &
 worker_pid=$!
 # LiveKit runs in Docker and delivers signed lifecycle callbacks through the
 # host-gateway address.  Binding only loopback makes the API readiness probe
