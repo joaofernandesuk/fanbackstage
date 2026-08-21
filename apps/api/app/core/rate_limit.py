@@ -84,3 +84,22 @@ async def enforce_messaging_rate_limit(request: Request, subject: str, action: s
             )
     finally:
         await redis.aclose()
+
+
+async def enforce_streaming_rate_limit(request: Request, subject: str, action: str) -> None:
+    """Streaming command throttle; durable authorization remains in the domain."""
+    settings = get_settings()
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"fanbackstage:rate-limit:streaming:{action}:{_key(f'{client_ip}:{subject}')}"
+    redis = Redis.from_url(settings.redis_url)
+    try:
+        attempts = await redis.incr(key)
+        if attempts == 1:
+            await redis.expire(key, settings.streaming_rate_limit_window_seconds)
+        if attempts > settings.streaming_rate_limit_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many streaming actions. Please try again later.",
+            )
+    finally:
+        await redis.aclose()

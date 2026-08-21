@@ -139,6 +139,7 @@ Business rules must live in backend domain/application services, not duplicated 
 - Media service produces preview/transcoded derivatives.
 - Moderation service controls content review, publish/restrict status. Phase 2 provides only the minimal approve/reject queue required to enforce content lifecycle transitions; case management remains a later boundary.
 - Feed service owns post lifecycle, social interactions and cursor queries; it delegates all asset/content authorization to the existing access resolver.
+- The future notifications domain owns provider-neutral transactional and marketing delivery. Product services create durable, SFW notification intents rather than sending vendor-specific email themselves; workers handle idempotent delivery, preferences, unsubscribe/suppression, and provider-event reconciliation.
 
 # 39. Security Requirements
 

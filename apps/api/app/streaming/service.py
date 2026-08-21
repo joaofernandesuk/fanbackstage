@@ -1,0 +1,359 @@
+"""Streaming domain state. LiveKit transports media; PostgreSQL owns product truth."""
+
+from __future__ import annotations
+
+import secrets
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+from sqlalchemy import exists, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.audit.service import record_event
+from app.finance.service import currency_code, ppv_commission
+from app.integrations.streaming import LiveKitStreamingProvider
+from app.media.service import approved_creator
+from app.models.creator import CreatorProfile
+from app.models.identity import User
+from app.models.messaging import UserBlock
+from app.models.streaming import (
+    CreatorLiveSettings,
+    LiveAccessMode,
+    LiveBan,
+    LiveChatKind,
+    LiveChatMessage,
+    LiveParticipant,
+    LiveParticipantRole,
+    LiveRoom,
+    LiveRoomStatus,
+    PrivateRequestStatus,
+    PrivateSession,
+    PrivateSessionMode,
+    PrivateSessionRequest,
+    PrivateSessionStatus,
+    SessionParticipant,
+    SessionParticipantRole,
+)
+
+
+class StreamingError(ValueError):
+    pass
+
+
+def _opaque(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_urlsafe(18)}"
+
+
+async def is_blocked(db: AsyncSession, first_user_id: UUID, second_user_id: UUID) -> bool:
+    return bool(
+        await db.scalar(
+            select(
+                exists().where(
+                    (
+                        (UserBlock.blocker_user_id == first_user_id)
+                        & (UserBlock.blocked_user_id == second_user_id)
+                    )
+                    | (
+                        (UserBlock.blocker_user_id == second_user_id)
+                        & (UserBlock.blocked_user_id == first_user_id)
+                    )
+                )
+            )
+        )
+    )
+
+
+async def settings_for_creator(db: AsyncSession, creator_id: UUID) -> CreatorLiveSettings:
+    settings = await db.scalar(
+        select(CreatorLiveSettings).where(CreatorLiveSettings.creator_id == creator_id)
+    )
+    if settings is None:
+        settings = CreatorLiveSettings(creator_id=creator_id)
+        db.add(settings)
+        await db.flush()
+    return settings
+
+
+async def start_live(
+    db: AsyncSession,
+    actor: User,
+    title: str,
+    access_mode: LiveAccessMode,
+    description: str | None = None,
+) -> LiveRoom:
+    creator = await approved_creator(db, actor)
+    active = await db.scalar(
+        select(LiveRoom)
+        .where(
+            LiveRoom.creator_id == creator.id,
+            LiveRoom.status.in_(
+                [LiveRoomStatus.starting, LiveRoomStatus.live, LiveRoomStatus.ending]
+            ),
+        )
+        .with_for_update()
+    )
+    if active:
+        raise StreamingError("Creator already has an active public live room")
+    room = LiveRoom(
+        creator_id=creator.id,
+        public_id=_opaque("live"),
+        provider_room_name=_opaque("lk"),
+        status=LiveRoomStatus.live,
+        access_mode=access_mode,
+        title=title.strip(),
+        description=description.strip() if description else None,
+        started_at=datetime.now(UTC),
+    )
+    db.add(room)
+    await db.flush()
+    db.add(
+        LiveParticipant(
+            live_room_id=room.id,
+            user_id=actor.id,
+            role=LiveParticipantRole.creator,
+            joined_at=datetime.now(UTC),
+        )
+    )
+    await record_event(
+        db, "live.started", actor_user_id=actor.id, target_type="live_room", target_id=str(room.id)
+    )
+    return room
+
+
+async def end_live(db: AsyncSession, actor: User, room_id: UUID) -> LiveRoom:
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    if room is None or room.creator_id != (await approved_creator(db, actor)).id:
+        raise PermissionError("Live room not found")
+    if room.status is LiveRoomStatus.ended:
+        return room
+    if room.status is not LiveRoomStatus.live:
+        raise StreamingError("Live room cannot be ended from its current state")
+    room.status = LiveRoomStatus.ended
+    room.ended_at = datetime.now(UTC)
+    await record_event(
+        db, "live.ended", actor_user_id=actor.id, target_type="live_room", target_id=str(room.id)
+    )
+    return room
+
+
+async def can_join_live(db: AsyncSession, viewer: User, room: LiveRoom) -> bool:
+    if room.status is not LiveRoomStatus.live:
+        return False
+    creator = await db.get(CreatorProfile, room.creator_id)
+    if creator is None or await is_blocked(db, viewer.id, creator.user_id):
+        return False
+    if room.access_mode is LiveAccessMode.public:
+        return True
+    from app.messaging.service import is_active_subscriber
+    from app.models.social import Follow
+
+    if room.access_mode is LiveAccessMode.followers:
+        return bool(
+            await db.scalar(
+                select(Follow).where(
+                    Follow.creator_id == room.creator_id, Follow.user_id == viewer.id
+                )
+            )
+        )
+    return await is_active_subscriber(db, viewer.id, room.creator_id)
+
+
+async def join_live(db: AsyncSession, viewer: User, room_id: UUID) -> LiveParticipant:
+    room = await db.get(LiveRoom, room_id)
+    if room is None or not await can_join_live(db, viewer, room):
+        raise PermissionError("Live room is unavailable")
+    if await db.scalar(
+        select(LiveBan).where(LiveBan.live_room_id == room.id, LiveBan.user_id == viewer.id)
+    ):
+        raise PermissionError("You are banned from this live room")
+    participant = await db.scalar(
+        select(LiveParticipant)
+        .where(LiveParticipant.live_room_id == room.id, LiveParticipant.user_id == viewer.id)
+        .with_for_update()
+    )
+    if participant is None:
+        participant = LiveParticipant(
+            live_room_id=room.id,
+            user_id=viewer.id,
+            role=LiveParticipantRole.viewer,
+            joined_at=datetime.now(UTC),
+        )
+        db.add(participant)
+        room.viewer_count += 1
+        room.peak_viewer_count = max(room.peak_viewer_count, room.viewer_count)
+    elif participant.left_at:
+        participant.left_at = None
+        participant.joined_at = datetime.now(UTC)
+        room.viewer_count += 1
+        room.peak_viewer_count = max(room.peak_viewer_count, room.viewer_count)
+    return participant
+
+
+async def issue_live_token(db: AsyncSession, viewer: User, room_id: UUID) -> tuple[LiveRoom, str]:
+    room = await db.get(LiveRoom, room_id)
+    if room is None:
+        raise PermissionError("Live room not found")
+    participant = await join_live(db, viewer, room_id)
+    creator = await db.get(CreatorProfile, room.creator_id)
+    can_publish = bool(creator and creator.user_id == viewer.id)
+    token = await LiveKitStreamingProvider().participant_token(
+        room.provider_room_name, str(viewer.id), can_publish=can_publish, can_subscribe=True
+    )
+    participant.left_at = None
+    return room, token
+
+
+async def post_chat(db: AsyncSession, actor: User, room_id: UUID, body: str) -> LiveChatMessage:
+    participant = await db.scalar(
+        select(LiveParticipant).where(
+            LiveParticipant.live_room_id == room_id,
+            LiveParticipant.user_id == actor.id,
+            LiveParticipant.left_at.is_(None),
+        )
+    )
+    if participant is None or not body.strip():
+        raise PermissionError("Live chat requires active room membership")
+    message = LiveChatMessage(
+        live_room_id=room_id, sender_user_id=actor.id, kind=LiveChatKind.text, body=body.strip()
+    )
+    db.add(message)
+    await db.flush()
+    return message
+
+
+async def request_private_session(
+    db: AsyncSession,
+    requester: User,
+    creator_id: UUID,
+    mode: PrivateSessionMode,
+    note: str | None = None,
+) -> PrivateSessionRequest:
+    creator = await db.get(CreatorProfile, creator_id)
+    if (
+        creator is None
+        or creator.user_id == requester.id
+        or await is_blocked(db, requester.id, creator.user_id)
+    ):
+        raise PermissionError("Private session is unavailable")
+    settings = await settings_for_creator(db, creator.id)
+    if not settings.private_sessions_enabled:
+        raise StreamingError("Private sessions are disabled")
+    rate = (
+        settings.one_to_one_price_minor
+        if mode is PrivateSessionMode.one_to_one
+        else settings.two_to_one_price_minor
+    )
+    minimum = rate * settings.minimum_minutes
+    request = PrivateSessionRequest(
+        creator_id=creator.id,
+        requester_user_id=requester.id,
+        mode=mode,
+        per_minute_price_minor=rate,
+        minimum_minutes=settings.minimum_minutes,
+        minimum_charge_minor=minimum,
+        max_authorization_minor=settings.max_authorization_minor,
+        commission_basis_points=await ppv_commission(db),
+        currency=currency_code(settings.currency),
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        note=note.strip() if note else None,
+    )
+    db.add(request)
+    await db.flush()
+    await record_event(
+        db,
+        "private_session.requested",
+        actor_user_id=requester.id,
+        target_type="private_session_request",
+        target_id=str(request.id),
+    )
+    return request
+
+
+async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID) -> PrivateSession:
+    creator = await approved_creator(db, actor)
+    request = await db.scalar(
+        select(PrivateSessionRequest)
+        .where(PrivateSessionRequest.id == request_id)
+        .with_for_update()
+    )
+    if request is None or request.creator_id != creator.id:
+        raise PermissionError("Private session request not found")
+    if request.status is not PrivateRequestStatus.pending or request.expires_at <= datetime.now(
+        UTC
+    ):
+        raise StreamingError("Private session request is not pending")
+    public_room = await db.scalar(
+        select(LiveRoom)
+        .where(
+            LiveRoom.creator_id == creator.id,
+            LiveRoom.status.in_(
+                [LiveRoomStatus.starting, LiveRoomStatus.live, LiveRoomStatus.ending]
+            ),
+        )
+        .with_for_update()
+    )
+    if public_room:
+        raise StreamingError("End the public live before accepting a private session request")
+    active = await db.scalar(
+        select(PrivateSession)
+        .where(
+            PrivateSession.creator_id == creator.id,
+            PrivateSession.status.in_(
+                [
+                    PrivateSessionStatus.awaiting_payment_authorization,
+                    PrivateSessionStatus.ready,
+                    PrivateSessionStatus.connecting,
+                    PrivateSessionStatus.active,
+                    PrivateSessionStatus.reconnecting,
+                ]
+            ),
+        )
+        .with_for_update()
+    )
+    if active:
+        raise StreamingError("Creator already has an active private session")
+    request.status = PrivateRequestStatus.accepted
+    request.accepted_at = datetime.now(UTC)
+    session = PrivateSession(
+        request_id=request.id,
+        creator_id=creator.id,
+        payer_user_id=request.requester_user_id,
+        mode=request.mode,
+        provider_room_name=_opaque("private"),
+        per_minute_price_minor=request.per_minute_price_minor,
+        minimum_minutes=request.minimum_minutes,
+        minimum_charge_minor=request.minimum_charge_minor,
+        max_authorization_minor=request.max_authorization_minor,
+        commission_basis_points=request.commission_basis_points,
+        currency=request.currency,
+        accepted_at=request.accepted_at,
+    )
+    db.add(session)
+    await db.flush()
+    db.add_all(
+        [
+            SessionParticipant(
+                private_session_id=session.id,
+                user_id=creator.user_id,
+                role=SessionParticipantRole.creator,
+            ),
+            SessionParticipant(
+                private_session_id=session.id,
+                user_id=request.requester_user_id,
+                role=SessionParticipantRole.payer,
+            ),
+        ]
+    )
+    await record_event(
+        db,
+        "private_session.accepted",
+        actor_user_id=actor.id,
+        target_type="private_session",
+        target_id=str(session.id),
+    )
+    return session
+
+
+def settlement_amount(session: PrivateSession) -> int:
+    elapsed_charge = (session.per_minute_price_minor * session.billable_seconds + 59) // 60
+    return min(session.max_authorization_minor, max(session.minimum_charge_minor, elapsed_charge))

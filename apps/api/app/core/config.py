@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     subscription_grace_period_days: int = 3
     subscription_renewal_retry_limit: int = 3
     subscription_renewal_retry_seconds: int = 300
+    livekit_url: str = "ws://localhost:7880"
+    livekit_api_key: str = "devkey"
+    livekit_api_secret: str = "secret"
+    livekit_token_ttl_seconds: int = 300
+    streaming_reconnect_grace_seconds: int = 30
+    streaming_rate_limit_attempts: int = 30
+    streaming_rate_limit_window_seconds: int = 60
 
     def validate_production(self) -> None:
         if (

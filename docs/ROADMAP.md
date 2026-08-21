@@ -21,6 +21,17 @@ Phased implementation and engineering acceptance gates. Codex should implement o
 | 12 - Referral/Affiliate | Attribution, rewards, earnings and fraud controls. |
 | 13 - Trust & Safety expansion | Reporting, moderation cases, appeals, consent/release workflows. |
 | 14 - Analytics/BI | Creator, group and platform dashboards and attribution. |
+| 15 - Notifications & Email | Central transactional and marketing notification orchestration, preference/consent controls, provider webhooks, delivery/suppression handling and auditability. |
+
+## Future centralized Notifications & Email domain
+
+Notification delivery is a future domain, not a collection of vendor calls embedded in product features. Product domains will create durable notification intents; a provider-neutral worker will own idempotent delivery, preferences, unsubscribe/suppression, rate limits, audit metadata, and provider-webhook reconciliation.
+
+- Transactional delivery: account verification, password reset, security alerts, receipts, subscription lifecycle, renewal failure/grace, refunds, safe private-message and paid-unlock notices, creator-live and private-session lifecycle, and future marketplace/payout events.
+- Marketing/lifecycle delivery: creator newsletters, new-content announcements, reactivation, promotions, follower/subscriber campaigns, and platform campaigns. It requires explicit consent and marketing eligibility.
+- Provider boundaries: `TransactionalEmailProvider` and `MarketingEmailProvider`. SendX is the current marketing direction and SendPost or SendX transactional API the current transactional direction, but providers remain replaceable because adult-industry policies change.
+- FanBackstage email is SFW by default: no explicit imagery, paid-content previews, or sensitive private-message content. It uses neutral copy and an authenticated secure link back to FanBackstage.
+- Production must use separate reputation/subdomains where possible (for example `notify.fanbackstage.com` for transactional and `updates.fanbackstage.com` for marketing), SPF, DKIM, DMARC, bounce/complaint suppression, and no sensitive email-body content in audit/logs.
 
 # 43. Codex Engineering Rules
 

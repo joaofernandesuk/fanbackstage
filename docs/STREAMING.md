@@ -2,6 +2,10 @@
 
 Public Live, private sessions, 2-to-1/multi-party rooms, realtime effects, billing and interactive engagement.
 
+## Phase 7 public-live/private-session policy
+
+Private-session requests may queue while a creator is public live, but the creator cannot accept or start one until the public room has been explicitly ended. FanBackstage does not automatically end a public room, pause it, or move viewers to a holding state. A private request remains queued and the creator dashboard must state that ending the public live is required before acceptance. A private-break / be-right-back mode is deferred to a future streaming enhancement.
+
 # 9. Live Webcam and Streaming
 
 

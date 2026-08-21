@@ -12,6 +12,7 @@ from app.api.routes import (
     messaging,
     messaging_moderation,
     social,
+    streaming,
     subscriptions,
 )
 
@@ -27,4 +28,5 @@ api_router.include_router(subscriptions.router)
 api_router.include_router(social.router)
 api_router.include_router(messaging.router)
 api_router.include_router(messaging_moderation.router)
+api_router.include_router(streaming.router)
 health_router = health.router

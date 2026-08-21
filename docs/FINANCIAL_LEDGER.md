@@ -2,6 +2,8 @@
 
 Phase 6 message unlocks are a `messaging_charge` ledger transaction. They snapshot gross, platform fee, creator amount, currency, and commission basis points in `message_unlock_purchases`; webhook replay uses the same payment-attempt and ledger idempotency guarantees as PPV. Paid send fees are intentionally not settled until their command is implemented.
 
+Phase 7 private sessions use the `private_live_session` transaction type. The request snapshots the per-minute rate, minimum charge, currency, authorization cap, participant mode and commission before acceptance. Server-persisted billable seconds—not browser timers—produce one deterministic final charge: `ceil(rate_minor * billable_seconds / 60)`, bounded by the authorization cap and raised to the configured minimum where applicable. Settlement and refunds use the existing immutable-ledger compensating-entry path; never mutable session balances.
+
 Financial source-of-truth rules. Any feature creating economic value must integrate here rather than maintaining its own balance.
 
 # 22. Unified Wallet and Immutable Financial Ledger
