@@ -35,6 +35,7 @@ from app.schemas.marketplace import (
 from app.schemas.referral import (
     AffiliatePartnerInput,
     AffiliatePartnerResponse,
+    AffiliatePartnerStatusInput,
     ReferralLinkInput,
     ReferralLinkResponse,
     ReferralPolicyInput,
@@ -42,6 +43,15 @@ from app.schemas.referral import (
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def affiliate_response(partner: referral_service.AffiliatePartner) -> AffiliatePartnerResponse:
+    return AffiliatePartnerResponse(
+        id=partner.id,
+        public_id=partner.public_id,
+        name=partner.name,
+        status=partner.status.value,
+    )
 
 
 @router.post("/affiliates", response_model=AffiliatePartnerResponse)
@@ -54,13 +64,40 @@ async def create_affiliate(
             db, identity[0], name=payload.name, external_reference=payload.external_reference
         )
         await db.commit()
-        return AffiliatePartnerResponse(
-            id=partner.id,
-            public_id=partner.public_id,
-            name=partner.name,
-            status=partner.status.value,
-        )
+        return affiliate_response(partner)
     except referral_service.ReferralError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/affiliates", response_model=list[AffiliatePartnerResponse])
+async def list_affiliates(identity: CurrentIdentity, db: Db) -> list[AffiliatePartnerResponse]:
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
+    rows = (
+        await db.scalars(
+            select(referral_service.AffiliatePartner).order_by(
+                referral_service.AffiliatePartner.created_at
+            )
+        )
+    ).all()
+    return [affiliate_response(row) for row in rows]
+
+
+@router.put("/affiliates/{partner_id}/status", response_model=AffiliatePartnerResponse)
+async def change_affiliate_status(
+    partner_id: UUID, payload: AffiliatePartnerStatusInput, identity: CurrentIdentity, db: Db
+) -> AffiliatePartnerResponse:
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
+    partner = await db.get(referral_service.AffiliatePartner, partner_id)
+    if not partner:
+        raise HTTPException(status_code=404, detail="Affiliate partner not found")
+    try:
+        await referral_service.set_affiliate_partner_status(
+            db, identity[0], partner, referral_service.AffiliatePartnerStatus(payload.status)
+        )
+        await db.commit()
+        return affiliate_response(partner)
+    except (ValueError, referral_service.ReferralError) as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

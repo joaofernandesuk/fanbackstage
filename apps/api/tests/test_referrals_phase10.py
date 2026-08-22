@@ -309,3 +309,57 @@ async def test_subscription_window_is_timestamp_based_and_invalid_fee_policy_fai
             platform_fee_minor=100,
             occurred_at=start + timedelta(days=1),
         )
+
+
+@pytest.mark.asyncio
+async def test_self_referral_and_suspended_affiliate_cannot_generate_new_commission(db_session):
+    creator_user, creator = await approved_creator(db_session, "phase10-self@example.com")
+    creator_program = await referrals.create_program(
+        db_session,
+        actor_type=ReferralActorType.creator,
+        program_type=ReferralProgramType.creator_buyer_referral,
+        owner_creator_id=creator.id,
+    )
+    creator_policy = await referrals.create_policy(
+        db_session, creator_program, basis_points=1_000, eligible_revenue_types=["ppv"]
+    )
+    await referrals.create_link(
+        db_session, creator_program, creator_policy, code="SELF-CREATOR", destination_path="/"
+    )
+    _, token = await referrals.resolve_click(db_session, "SELF-CREATOR", "self-session")
+    assert await referrals.snapshot_signup_attribution(db_session, creator_user, token) is None
+
+    admin, _ = await accounts.register(
+        db_session, "phase10-affiliate-admin@example.com", "strong-password-123", None
+    )
+    partner = await referrals.create_affiliate_partner(db_session, admin, name="Partner")
+    program = await referrals.create_program(
+        db_session,
+        actor_type=ReferralActorType.affiliate_partner,
+        program_type=ReferralProgramType.affiliate_referral,
+        affiliate_partner_id=partner.id,
+    )
+    policy = await referrals.create_policy(
+        db_session, program, basis_points=1_000, eligible_revenue_types=["ppv"]
+    )
+    await referrals.create_link(
+        db_session, program, policy, code="PAUSED-PARTNER", destination_path="/"
+    )
+    _, token = await referrals.resolve_click(db_session, "PAUSED-PARTNER", "affiliate-session")
+    buyer, _ = await accounts.register(
+        db_session, "phase10-affiliate-buyer@example.com", "strong-password-123", None
+    )
+    assert await referrals.snapshot_signup_attribution(db_session, buyer, token)
+    await referrals.set_affiliate_partner_status(
+        db_session, admin, partner, referrals.AffiliatePartnerStatus.suspended
+    )
+    assert (
+        await referrals.revenue_allocation(
+            db_session,
+            buyer_user_id=buyer.id,
+            revenue_type="ppv",
+            currency="EUR",
+            platform_fee_minor=100,
+            occurred_at=datetime.now(UTC),
+        )
+    ) == ([], None)

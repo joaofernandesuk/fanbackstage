@@ -16,6 +16,10 @@ class AffiliatePartnerResponse(BaseModel):
     status: str
 
 
+class AffiliatePartnerStatusInput(BaseModel):
+    status: str = Field(pattern="^(active|paused|suspended|terminated)$")
+
+
 class ReferralProgramInput(BaseModel):
     actor_type: str
     program_type: str

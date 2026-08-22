@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
 from app.core.config import get_settings
+from app.models.creator import CreatorProfile
 from app.models.identity import User
 from app.models.referral import (
     AffiliatePartner,
@@ -117,6 +118,17 @@ async def create_program(
     affiliate_partner_id: UUID | None = None,
     terms_reference: str | None = None,
 ) -> ReferralProgram:
+    required_owner = {
+        ReferralActorType.creator: owner_creator_id,
+        ReferralActorType.user: owner_user_id,
+        ReferralActorType.affiliate_partner: affiliate_partner_id,
+    }.get(actor_type)
+    if (
+        program_type is not ReferralProgramType.creator_creator_referral
+        and actor_type is not ReferralActorType.platform_campaign
+        and not required_owner
+    ):
+        raise ReferralError("Referral program beneficiary is required")
     if program_type is ReferralProgramType.creator_creator_referral:
         status = ReferralProgramStatus.paused
     else:
@@ -230,6 +242,28 @@ async def create_affiliate_partner(
     return partner
 
 
+async def set_affiliate_partner_status(
+    db: AsyncSession,
+    actor: User,
+    partner: AffiliatePartner,
+    status: AffiliatePartnerStatus,
+) -> AffiliatePartner:
+    if partner.status is AffiliatePartnerStatus.terminated:
+        raise ReferralError("A terminated affiliate partner cannot be reactivated")
+    old_status = partner.status
+    partner.status = status
+    partner.suspended_at = now() if status is AffiliatePartnerStatus.suspended else None
+    await record_event(
+        db,
+        "referral.affiliate_partner_status_changed",
+        actor_user_id=actor.id,
+        target_type="affiliate_partner",
+        target_id=str(partner.id),
+        metadata={"old_status": old_status.value, "new_status": status.value},
+    )
+    return partner
+
+
 async def resolve_click(
     db: AsyncSession,
     code: str,
@@ -317,7 +351,10 @@ async def snapshot_signup_attribution(
     # A newly-created account can never validly earn through its own program.
     # Existing accounts are not re-attributed, so this deterministic check is
     # sufficient for the Phase 10 signup boundary.
-    if program.owner_user_id == user.id:
+    owner_creator = (
+        await db.get(CreatorProfile, program.owner_creator_id) if program.owner_creator_id else None
+    )
+    if program.owner_user_id == user.id or (owner_creator and owner_creator.user_id == user.id):
         touch.eligible = False
         return None
     first_touch = await db.scalar(
@@ -413,6 +450,10 @@ async def revenue_allocation(
     program = await db.get(ReferralProgram, link.program_id)
     if not program or program.program_type is ReferralProgramType.creator_creator_referral:
         return [], None
+    if program.actor_type is ReferralActorType.affiliate_partner:
+        partner = await db.get(AffiliatePartner, program.affiliate_partner_id)
+        if not partner or partner.status is not AffiliatePartnerStatus.active:
+            return [], None
 
     # Import lazily: finance is the ledger owner and calls this resolver while
     # settling a payment, so an import at module load would form a cycle.
