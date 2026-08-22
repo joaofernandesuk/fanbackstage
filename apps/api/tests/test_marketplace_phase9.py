@@ -17,7 +17,7 @@ from app.models.audit import AuditEvent
 from app.models.content import ModerationStatus
 from app.models.creator import CreatorStatus
 from app.models.finance import CommissionRule, LedgerTransaction, PaymentAttempt
-from app.models.groups import GroupPermission
+from app.models.groups import GroupManagerMembership, GroupPermission, GroupPermissionGrant
 from app.models.marketplace import (
     MarketplaceCondition,
     MarketplaceListing,
@@ -477,9 +477,17 @@ async def test_shipping_address_is_restricted_and_access_is_audited_without_addr
     buyer, _ = await accounts.register(
         db_session, "address-buyer@example.com", "strong-password-123", None
     )
-    outsider, _ = await accounts.register(
-        db_session, "address-outsider@example.com", "strong-password-123", None
+    another_buyer, _ = await accounts.register(
+        db_session, "address-other-buyer@example.com", "strong-password-123", None
     )
+    other_creator_user, _ = await approved_creator(db_session, "address-other-creator@example.com")
+    manager, _ = await accounts.register(
+        db_session, "address-manager@example.com", "strong-password-123", None
+    )
+    admin, _ = await accounts.register(
+        db_session, "address-admin@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
     await marketplace_commission(db_session)
     await allowance(db_session, 100, "AH")
     row = await listing(db_session, creator, creator_user, shipping=100)
@@ -507,7 +515,42 @@ async def test_shipping_address_is_restricted_and_access_is_audited_without_addr
     assert buyer_address.id == seller_address.id
     assert buyer_address.line1 == "1 Private Street"
     with pytest.raises(PermissionError, match="shipping address permission"):
-        await marketplace.shipping_address_for_order(db_session, order.id, outsider)
+        await marketplace.shipping_address_for_order(db_session, order.id, another_buyer)
+    with pytest.raises(PermissionError, match="shipping address permission"):
+        await marketplace.shipping_address_for_order(db_session, order.id, other_creator_user)
+    group = await groups.create_group(
+        db_session, manager, "Address group", "address-group", 10_000, None
+    )
+    membership = await groups.invite_creator(
+        db_session, group.id, manager, creator.id, 10_000, [GroupPermission.manage_content]
+    )
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    with pytest.raises(PermissionError, match="shipping address permission"):
+        await marketplace.shipping_address_for_order(db_session, order.id, manager)
+    manager_membership = await db_session.scalar(
+        select(GroupManagerMembership).where(
+            GroupManagerMembership.group_id == group.id,
+            GroupManagerMembership.user_id == manager.id,
+        )
+    )
+    assert manager_membership
+    grant = GroupPermissionGrant(
+        membership_id=membership.id,
+        manager_membership_id=manager_membership.id,
+        permission=GroupPermission.manage_marketplace_orders,
+    )
+    db_session.add(grant)
+    await db_session.flush()
+    assert (
+        await marketplace.shipping_address_for_order(db_session, order.id, manager)
+    ).id == buyer_address.id
+    await db_session.delete(grant)
+    await db_session.flush()
+    with pytest.raises(PermissionError, match="shipping address permission"):
+        await marketplace.shipping_address_for_order(db_session, order.id, manager)
+    assert (
+        await marketplace.shipping_address_for_order(db_session, order.id, admin)
+    ).id == buyer_address.id
     audit = (
         await db_session.scalars(
             select(AuditEvent).where(
@@ -516,5 +559,5 @@ async def test_shipping_address_is_restricted_and_access_is_audited_without_addr
             )
         )
     ).all()
-    assert len(audit) == 2
+    assert len(audit) == 4
     assert all("Private Street" not in str(event.metadata_json) for event in audit)
