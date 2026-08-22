@@ -6,6 +6,13 @@ const apiUrl = process.env.E2E_API_URL ?? `http://127.0.0.1:${apiPort}`;
 const webUrl = process.env.E2E_WEB_URL ?? `http://127.0.0.1:${webPort}`;
 const mailpitUiPort = process.env.E2E_MAILPIT_UI_PORT ?? "8025";
 const mailpitSmtpPort = process.env.E2E_MAILPIT_SMTP_PORT ?? process.env.FANBACKSTAGE_SMTP_PORT ?? "1025";
+// The API must sign browser-reachable object-storage URLs. Keep this E2E
+// override separate from production storage configuration so isolated stacks
+// can use a non-default Compose port without changing application behavior.
+const storageEndpoint =
+  process.env.E2E_STORAGE_ENDPOINT_URL ??
+  process.env.FANBACKSTAGE_STORAGE_ENDPOINT_URL ??
+  `http://127.0.0.1:${process.env.E2E_MINIO_PORT ?? process.env.FANBACKSTAGE_MINIO_PORT ?? "9000"}`;
 const environment = {
   ...process.env,
   FANBACKSTAGE_DATABASE_URL:
@@ -14,8 +21,7 @@ const environment = {
   FANBACKSTAGE_REDIS_URL: process.env.FANBACKSTAGE_REDIS_URL ?? "redis://127.0.0.1:6379/1",
   FANBACKSTAGE_SMTP_PORT: mailpitSmtpPort,
   E2E_MAILPIT_URL: process.env.E2E_MAILPIT_URL ?? `http://127.0.0.1:${mailpitUiPort}`,
-  FANBACKSTAGE_STORAGE_ENDPOINT_URL:
-    process.env.FANBACKSTAGE_STORAGE_ENDPOINT_URL ?? "http://127.0.0.1:9000",
+  FANBACKSTAGE_STORAGE_ENDPOINT_URL: storageEndpoint,
   FANBACKSTAGE_WEB_ORIGIN: webUrl,
   NEXT_PUBLIC_FANBACKSTAGE_API_URL: apiUrl,
   E2E_API_URL: apiUrl,
