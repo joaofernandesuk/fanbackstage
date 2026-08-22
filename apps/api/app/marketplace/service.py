@@ -40,6 +40,7 @@ from app.models.marketplace import (
     MarketplaceOrderStatus,
     MarketplaceSellerRiskProfile,
     MarketplaceSellerTier,
+    MarketplaceShippingAddress,
     MarketplaceShippingAllowance,
     ShippingAllowanceScope,
 )
@@ -540,6 +541,7 @@ async def initiate_order(
     destination_country_code: str,
     idempotency_key: str,
     destination_region_code: str | None = None,
+    shipping_address: dict[str, str | None] | None = None,
 ) -> MarketplaceOrder:
     """Reserve stock and snapshot server-owned pricing and shipping treatment."""
     if not idempotency_key or len(idempotency_key) > 128:
@@ -624,6 +626,35 @@ async def initiate_order(
     )
     db.add(order)
     await db.flush()
+    if shipping_address:
+        address_country = _country_code(
+            shipping_address["country_code"], "Shipping address country"
+        )
+        if address_country != order.destination_country_code:
+            raise MarketplaceError("Shipping address country must match checkout destination")
+        address_region = shipping_address.get("region_code")
+        if (
+            destination_region_code
+            and address_region
+            and (address_region.upper().strip() != destination_region_code.upper().strip())
+        ):
+            raise MarketplaceError("Shipping address region must match checkout destination")
+        db.add(
+            MarketplaceShippingAddress(
+                order_id=order.id,
+                recipient_name=str(shipping_address["recipient_name"]).strip(),
+                line1=str(shipping_address["line1"]).strip(),
+                line2=(
+                    str(shipping_address["line2"]).strip()
+                    if shipping_address.get("line2")
+                    else None
+                ),
+                city=str(shipping_address["city"]).strip(),
+                region_code=address_region.upper().strip() if address_region else None,
+                postal_code=str(shipping_address["postal_code"]).strip(),
+                country_code=address_country,
+            )
+        )
     await record_event(
         db,
         "marketplace.order_reserved",
@@ -637,6 +668,45 @@ async def initiate_order(
         },
     )
     return order
+
+
+async def shipping_address_for_order(
+    db: AsyncSession, order_id: UUID, actor: User
+) -> MarketplaceShippingAddress:
+    """Return restricted address only to buyer, seller/order manager, or platform admin."""
+    order = await db.get(MarketplaceOrder, order_id)
+    if not order:
+        raise MarketplaceError("Marketplace order not found")
+    is_buyer = order.buyer_user_id == actor.id
+    from app.groups.service import has_delegated_permission
+    from app.models.creator import CreatorProfile
+    from app.models.groups import GroupPermission
+
+    seller = await db.scalar(
+        select(CreatorProfile).where(
+            CreatorProfile.id == order.seller_creator_id, CreatorProfile.user_id == actor.id
+        )
+    )
+    delegated = await has_delegated_permission(
+        db, actor.id, order.seller_creator_id, GroupPermission.manage_marketplace_orders
+    )
+    is_admin = any(role.name in {"admin", "super_admin"} for role in actor.roles)
+    if not (is_buyer or seller or delegated or is_admin):
+        raise PermissionError("Marketplace shipping address permission denied")
+    address = await db.scalar(
+        select(MarketplaceShippingAddress).where(MarketplaceShippingAddress.order_id == order.id)
+    )
+    if not address:
+        raise MarketplaceError("Marketplace shipping address is not available")
+    await record_event(
+        db,
+        "marketplace.shipping_address_accessed",
+        actor_user_id=actor.id,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"access_kind": "buyer" if is_buyer else "seller_or_support"},
+    )
+    return address
 
 
 async def settle_order(db: AsyncSession, order: MarketplaceOrder) -> MarketplaceOrder:

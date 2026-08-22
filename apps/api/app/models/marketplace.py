@@ -193,6 +193,22 @@ class MarketplaceEarningsHoldPolicy(UUIDPrimaryKey, Timestamped, Base):
     is_default: Mapped[bool] = mapped_column(default=False, nullable=False)
 
 
+class MarketplaceShippingAddress(UUIDPrimaryKey, Timestamped, Base):
+    """Restricted buyer fulfilment data; intentionally separate from public orders."""
+
+    __tablename__ = "marketplace_shipping_addresses"
+    order_id: Mapped[UUID] = mapped_column(
+        ForeignKey("marketplace_orders.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    recipient_name: Mapped[str] = mapped_column(String(160))
+    line1: Mapped[str] = mapped_column(String(160))
+    line2: Mapped[str | None] = mapped_column(String(160))
+    city: Mapped[str] = mapped_column(String(120))
+    region_code: Mapped[str | None] = mapped_column(String(16))
+    postal_code: Mapped[str] = mapped_column(String(32))
+    country_code: Mapped[str] = mapped_column(String(2))
+
+
 class MarketplaceOrder(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "marketplace_orders"
     __table_args__ = (

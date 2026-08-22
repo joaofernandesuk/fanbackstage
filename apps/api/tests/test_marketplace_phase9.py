@@ -68,6 +68,17 @@ async def listing(db, creator, user, *, shipping: int) -> MarketplaceListing:
 
 
 async def allowance(db, amount: int, country_code: str = "PT") -> MarketplaceShippingAllowance:
+    existing = await db.scalar(
+        select(MarketplaceShippingAllowance).where(
+            MarketplaceShippingAllowance.scope == ShippingAllowanceScope.country,
+            MarketplaceShippingAllowance.destination_code == country_code,
+            MarketplaceShippingAllowance.currency == "EUR",
+        )
+    )
+    if existing:
+        existing.allowed_shipping_minor = amount
+        existing.active = True
+        return existing
     row = MarketplaceShippingAllowance(
         scope=ShippingAllowanceScope.country,
         destination_code=country_code,
@@ -456,3 +467,54 @@ async def test_admin_tier_and_hold_changes_are_audited_and_do_not_rewrite_order_
         "marketplace.seller_tier_changed",
         "marketplace.hold_policy_updated",
     }
+
+
+@pytest.mark.asyncio
+async def test_shipping_address_is_restricted_and_access_is_audited_without_address_data(
+    db_session,
+):
+    creator_user, creator = await approved_creator(db_session, "address-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "address-buyer@example.com", "strong-password-123", None
+    )
+    outsider, _ = await accounts.register(
+        db_session, "address-outsider@example.com", "strong-password-123", None
+    )
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AH")
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    order = await marketplace.initiate_order(
+        db_session,
+        buyer,
+        row.id,
+        1,
+        "AH",
+        "private-address",
+        shipping_address={
+            "recipient_name": "Buyer Name",
+            "line1": "1 Private Street",
+            "line2": None,
+            "city": "Lisbon",
+            "region_code": None,
+            "postal_code": "1000-001",
+            "country_code": "AH",
+        },
+    )
+    buyer_address = await marketplace.shipping_address_for_order(db_session, order.id, buyer)
+    seller_address = await marketplace.shipping_address_for_order(
+        db_session, order.id, creator_user
+    )
+    assert buyer_address.id == seller_address.id
+    assert buyer_address.line1 == "1 Private Street"
+    with pytest.raises(PermissionError, match="shipping address permission"):
+        await marketplace.shipping_address_for_order(db_session, order.id, outsider)
+    audit = (
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "marketplace.shipping_address_accessed",
+                AuditEvent.target_id == str(order.id),
+            )
+        )
+    ).all()
+    assert len(audit) == 2
+    assert all("Private Street" not in str(event.metadata_json) for event in audit)

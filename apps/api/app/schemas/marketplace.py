@@ -81,6 +81,21 @@ class MarketplaceCheckoutInput(BaseModel):
     quantity: int = Field(gt=0, le=1_000)
     destination_country_code: str = Field(min_length=2, max_length=2)
     destination_region_code: str | None = Field(default=None, min_length=1, max_length=16)
+    shipping_address: "MarketplaceShippingAddressInput"
+
+
+class MarketplaceShippingAddressInput(BaseModel):
+    recipient_name: str = Field(min_length=1, max_length=160)
+    line1: str = Field(min_length=1, max_length=160)
+    line2: str | None = Field(default=None, max_length=160)
+    city: str = Field(min_length=1, max_length=120)
+    region_code: str | None = Field(default=None, min_length=1, max_length=16)
+    postal_code: str = Field(min_length=1, max_length=32)
+    country_code: str = Field(min_length=2, max_length=2)
+
+
+class MarketplaceShippingAddressResponse(MarketplaceShippingAddressInput):
+    order_id: UUID
 
 
 class MarketplaceOrderResponse(BaseModel):

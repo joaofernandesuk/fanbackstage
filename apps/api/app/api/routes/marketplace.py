@@ -15,6 +15,7 @@ from app.schemas.marketplace import (
     MarketplaceListingCreate,
     MarketplaceListingResponse,
     MarketplaceOrderResponse,
+    MarketplaceShippingAddressResponse,
 )
 
 router = APIRouter(prefix="/marketplace", tags=["marketplace"])
@@ -174,12 +175,39 @@ async def checkout(
             payload.destination_country_code,
             idempotency_key or "",
             payload.destination_region_code,
+            payload.shipping_address.model_dump(),
         )
         await db.commit()
         return order_response(order)
     except service.MarketplaceError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/orders/{order_id}/shipping-address", response_model=MarketplaceShippingAddressResponse
+)
+async def order_shipping_address(
+    order_id: UUID, identity: CurrentIdentity, db: Db
+) -> MarketplaceShippingAddressResponse:
+    try:
+        address = await service.shipping_address_for_order(db, order_id, identity[0])
+        await db.commit()
+        return MarketplaceShippingAddressResponse(
+            order_id=address.order_id,
+            recipient_name=address.recipient_name,
+            line1=address.line1,
+            line2=address.line2,
+            city=address.city,
+            region_code=address.region_code,
+            postal_code=address.postal_code,
+            country_code=address.country_code,
+        )
+    except (PermissionError, service.MarketplaceError) as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=403 if isinstance(exc, PermissionError) else 404, detail=str(exc)
+        ) from exc
 
 
 @router.post("/admin/listings/{listing_id}/moderation", response_model=MarketplaceListingResponse)
