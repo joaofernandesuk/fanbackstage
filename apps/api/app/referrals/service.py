@@ -243,7 +243,10 @@ async def create_affiliate_partner(
         actor_user_id=actor.id,
         target_type="affiliate_partner",
         target_id=str(partner.id),
-        metadata={"public_id": partner.public_id},
+        metadata={
+            "public_id": partner.public_id,
+            "owner_user_id": str(owner_user_id) if owner_user_id else None,
+        },
     )
     return partner
 
@@ -695,3 +698,25 @@ async def release_entries(
         (pending, LedgerDirection.debit, allocation.amount_minor),
         (available, LedgerDirection.credit, allocation.amount_minor),
     ], allocation
+
+
+async def affiliate_dashboard_allocations(
+    db: AsyncSession, authenticated_user_id: UUID
+) -> list[ReferralCommissionAllocation]:
+    """Return allocations only for affiliate partners owned by this account."""
+    partner_ids = list(
+        await db.scalars(
+            select(AffiliatePartner.id).where(
+                AffiliatePartner.owner_user_id == authenticated_user_id
+            )
+        )
+    )
+    if not partner_ids:
+        return []
+    return list(
+        await db.scalars(
+            select(ReferralCommissionAllocation)
+            .where(ReferralCommissionAllocation.beneficiary_affiliate_partner_id.in_(partner_ids))
+            .order_by(ReferralCommissionAllocation.allocated_at.desc())
+        )
+    )
