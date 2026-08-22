@@ -33,6 +33,7 @@ from app.models.marketplace import (
     MarketplaceListing,
     MarketplaceListingStatus,
     MarketplaceOrderStatus,
+    MarketplaceSellerTier,
     MarketplaceShippingAllowance,
     MarketplaceShippingMode,
     MarketplaceTrackingEvent,
@@ -397,6 +398,13 @@ async def test_marketplace_earnings_release_requires_delivery_and_hold(db_sessio
         db_session, "hold-buyer@example.com", "strong-password-123", None
     )
     await marketplace_commission(db_session)
+    # The hold is configuration, not a test fixture default: set the expected
+    # active tier policy explicitly so prior E2E/admin changes cannot make the
+    # delivery-hold invariant depend on shared database state.
+    hold_policy = await marketplace.hold_policy_for_tier(
+        db_session, MarketplaceSellerTier.new_seller
+    )
+    hold_policy.hold_duration_seconds = 3_600
     await allowance(db_session, 100, "AF")
     row = await listing(db_session, creator, creator_user, shipping=100)
     row.status = MarketplaceListingStatus.published
