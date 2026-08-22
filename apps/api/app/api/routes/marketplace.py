@@ -231,9 +231,7 @@ async def creator_fulfilment_orders(
     return [order_response(row) for row in rows]
 
 
-async def require_managed_marketplace_orders(
-    db: Db, actor_id: UUID, creator_id: UUID
-) -> None:
+async def require_managed_marketplace_orders(db: Db, actor_id: UUID, creator_id: UUID) -> None:
     if not await has_delegated_permission(
         db, actor_id, creator_id, GroupPermission.manage_marketplace_orders
     ):

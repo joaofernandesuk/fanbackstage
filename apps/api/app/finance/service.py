@@ -358,7 +358,9 @@ async def process_development_webhook(
             if event["type"] == "payment.refunded":
                 await marketplace_service.refund_order(db, order.id, None, "provider_refund")
             elif event["type"] == "payment.chargeback":
-                await marketplace_service.chargeback_order(db, order.id, None, "provider_chargeback")
+                await marketplace_service.chargeback_order(
+                    db, order.id, None, "provider_chargeback"
+                )
             else:
                 await marketplace_service.block_order_for_dispute(
                     db, order, None, "provider_dispute"

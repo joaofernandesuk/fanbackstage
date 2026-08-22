@@ -1214,7 +1214,10 @@ async def cancel_order(
         )
         .with_for_update()
     )
-    if not order or order.status not in {MarketplaceOrderStatus.paid, MarketplaceOrderStatus.processing}:
+    if not order or order.status not in {
+        MarketplaceOrderStatus.paid,
+        MarketplaceOrderStatus.processing,
+    }:
         raise MarketplaceError("Only an unshipped paid order can be cancelled")
     return await refund_order(db, order.id, actor, reason)
 

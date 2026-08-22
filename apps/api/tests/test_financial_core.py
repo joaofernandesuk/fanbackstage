@@ -276,10 +276,10 @@ async def test_creator_summary_excludes_refunded_sales_and_keeps_currency_isolat
         "pending_amount_minor": 81,
         "available_amount_minor": 0,
         "ppv_gross_amount_minor": 101,
-            "platform_fee_amount_minor": 20,
-            "creator_net_amount_minor": 81,
-            "marketplace_net_amount_minor": 0,
-        }
+        "platform_fee_amount_minor": 20,
+        "creator_net_amount_minor": 81,
+        "marketplace_net_amount_minor": 0,
+    }
     await finance.refund_purchase(db_session, settled, admin, "support")
     assert (await finance.creator_financial_summary(db_session, profile.id, "EUR"))[
         "ppv_gross_amount_minor"

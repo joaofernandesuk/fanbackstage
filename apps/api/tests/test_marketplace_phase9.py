@@ -692,7 +692,9 @@ async def test_unshipped_refund_reverses_original_pending_split_and_restores_sto
     buyer, _ = await accounts.register(
         db_session, "refund-buyer@example.com", "strong-password-123", None
     )
-    group = await groups.create_group(db_session, manager, "Refund group", "refund-group", 5_000, None)
+    group = await groups.create_group(
+        db_session, manager, "Refund group", "refund-group", 5_000, None
+    )
     membership = await groups.invite_creator(db_session, group.id, manager, creator.id, 5_000, [])
     await groups.accept_invitation(db_session, membership.id, creator_user)
     await marketplace_commission(db_session)
@@ -708,20 +710,28 @@ async def test_unshipped_refund_reverses_original_pending_split_and_restores_sto
     assert original and original.metadata_json["group_amount_minor"] != "0"
     assert row.quantity_available == 0
 
-    refunded = await marketplace.cancel_order(db_session, order.id, creator_user, creator.id, "out of stock")
+    refunded = await marketplace.cancel_order(
+        db_session, order.id, creator_user, creator.id, "out of stock"
+    )
     assert refunded.status is MarketplaceOrderStatus.refunded
     assert row.quantity_available == 1
-    assert (await finance.creator_balances(db_session, creator.id, "EUR"))["pending_amount_minor"] == 0
+    assert (await finance.creator_balances(db_session, creator.id, "EUR"))[
+        "pending_amount_minor"
+    ] == 0
     reversal = await db_session.scalar(
         select(LedgerTransaction).where(
-                LedgerTransaction.transaction_type == LedgerTransactionType.refund,
+            LedgerTransaction.transaction_type == LedgerTransactionType.refund,
             LedgerTransaction.reversal_of_transaction_id == original.id,
         )
     )
-    assert reversal and reversal.metadata_json["original_group_contract_id"] == original.metadata_json[
-        "group_contract_id"
-    ]
-    assert await marketplace.refund_order(db_session, order.id, creator_user, "duplicate") is refunded
+    assert (
+        reversal
+        and reversal.metadata_json["original_group_contract_id"]
+        == original.metadata_json["group_contract_id"]
+    )
+    assert (
+        await marketplace.refund_order(db_session, order.id, creator_user, "duplicate") is refunded
+    )
     assert row.quantity_available == 1
     assert (
         await db_session.scalar(
@@ -733,7 +743,9 @@ async def test_unshipped_refund_reverses_original_pending_split_and_restores_sto
 
 
 @pytest.mark.asyncio
-async def test_dispute_and_chargeback_block_release_and_refund_after_release_compensates(db_session):
+async def test_dispute_and_chargeback_block_release_and_refund_after_release_compensates(
+    db_session,
+):
     creator_user, creator = await approved_creator(db_session, "dispute-creator@example.com")
     buyer, _ = await accounts.register(
         db_session, "dispute-buyer@example.com", "strong-password-123", None
@@ -750,22 +762,28 @@ async def test_dispute_and_chargeback_block_release_and_refund_after_release_com
     assert attempt
     payload, signature = finance.development_webhook_payload(attempt)
     await finance.process_development_webhook(db_session, payload, signature)
-    await marketplace.mark_order_shipped(db_session, order.id, creator_user, creator.id, "CTT", "DISC-1")
+    await marketplace.mark_order_shipped(
+        db_session, order.id, creator_user, creator.id, "CTT", "DISC-1"
+    )
     await marketplace.confirm_order_delivery(db_session, order.id, buyer)
     order.earnings_hold_until = datetime.now(UTC) - timedelta(seconds=1)
     await marketplace.open_order_dispute(db_session, order.id, buyer, "delivery issue")
     assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
     await marketplace.resolve_order_dispute(db_session, order.id, admin, False, "resolved")
     assert await marketplace.release_eligible_marketplace_earnings(db_session) == 1
-    assert (await finance.creator_balances(db_session, creator.id, "EUR"))["available_amount_minor"] == 500
+    assert (await finance.creator_balances(db_session, creator.id, "EUR"))[
+        "available_amount_minor"
+    ] == 500
     original = await db_session.get(LedgerTransaction, order.ledger_transaction_id)
     assert original
     await marketplace.refund_order(db_session, order.id, admin, "post-delivery refund")
     assert order.status is MarketplaceOrderStatus.refunded
-    assert (await finance.creator_balances(db_session, creator.id, "EUR"))["available_amount_minor"] == 0
+    assert (await finance.creator_balances(db_session, creator.id, "EUR"))[
+        "available_amount_minor"
+    ] == 0
     refund = await db_session.scalar(
         select(LedgerTransaction).where(
-                LedgerTransaction.transaction_type == LedgerTransactionType.refund,
+            LedgerTransaction.transaction_type == LedgerTransactionType.refund,
             LedgerTransaction.reversal_of_transaction_id == original.id,
         )
     )
@@ -777,7 +795,9 @@ async def test_dispute_and_chargeback_block_release_and_refund_after_release_com
     )
     chargeback_attempt = await db_session.get(PaymentAttempt, chargeback.payment_attempt_id)
     assert chargeback_attempt
-    chargeback_payload, chargeback_signature = finance.development_webhook_payload(chargeback_attempt)
+    chargeback_payload, chargeback_signature = finance.development_webhook_payload(
+        chargeback_attempt
+    )
     await finance.process_development_webhook(db_session, chargeback_payload, chargeback_signature)
     await marketplace.mark_order_shipped(
         db_session, chargeback.id, creator_user, creator.id, "CTT", "CB-1"
@@ -819,9 +839,16 @@ async def test_suspension_and_delegated_order_controls_are_creator_scoped_and_re
         db_session, "market-suspension-admin@example.com", "strong-password-123", None
     )
     await accounts.assign_role(db_session, admin, "admin", admin.id, None)
-    group = await groups.create_group(db_session, manager, "Orders group", "orders-group", 10_000, None)
+    group = await groups.create_group(
+        db_session, manager, "Orders group", "orders-group", 10_000, None
+    )
     membership = await groups.invite_creator(
-        db_session, group.id, manager, creator.id, 10_000, [GroupPermission.manage_marketplace_orders]
+        db_session,
+        group.id,
+        manager,
+        creator.id,
+        10_000,
+        [GroupPermission.manage_marketplace_orders],
     )
     await groups.accept_invitation(db_session, membership.id, creator_user)
     await marketplace_commission(db_session)
@@ -866,12 +893,16 @@ async def test_suspension_and_delegated_order_controls_are_creator_scoped_and_re
             creator.id, (manager, None), db_session
         )
 
-    await marketplace.set_marketplace_suspension(db_session, admin, creator.id, True, "policy review")
+    await marketplace.set_marketplace_suspension(
+        db_session, admin, creator.id, True, "policy review"
+    )
     with pytest.raises(marketplace.MarketplaceError, match="not available"):
         await marketplace.initiate_order(db_session, buyer, row.id, 1, "AL", "suspended-checkout")
     events = (
         await db_session.scalars(
-            select(AuditEvent).where(AuditEvent.event_type == "marketplace.seller_suspension_changed")
+            select(AuditEvent).where(
+                AuditEvent.event_type == "marketplace.seller_suspension_changed"
+            )
         )
     ).all()
     assert len(events) == 1 and events[0].actor_user_id == admin.id
@@ -911,7 +942,9 @@ async def test_prohibited_marketplace_listing_reports_are_deduped_and_moderation
         )
     ).all()
     assert len(reports) == 1
-    await admin_routes.remove_reported_marketplace_listing(reports[0].id, (moderator, None), db_session)
+    await admin_routes.remove_reported_marketplace_listing(
+        reports[0].id, (moderator, None), db_session
+    )
     assert row.status is MarketplaceListingStatus.removed
     audit = await db_session.scalar(
         select(AuditEvent).where(
