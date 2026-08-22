@@ -15,7 +15,14 @@ from app.models.content import (
     ModerationStatus,
 )
 from app.models.creator import CreatorStatus
-from app.models.finance import LedgerAccount, LedgerAccountKind, LedgerDirection, LedgerEntry
+from app.models.finance import (
+    LedgerAccount,
+    LedgerAccountKind,
+    LedgerDirection,
+    LedgerEntry,
+    LedgerTransaction,
+    LedgerTransactionType,
+)
 from app.models.referral import (
     ReferralActorType,
     ReferralCommissionAllocation,
@@ -435,3 +442,84 @@ async def test_attribution_window_qualifies_at_day_29_and_expires_at_day_31(
         db_session, "phase10-day31@example.com", "strong-password-123", None
     )
     assert await referrals.snapshot_signup_attribution(db_session, expired, token) is None
+
+
+@pytest.mark.asyncio
+async def test_cross_affiliate_dashboard_isolation_and_suspension_history(db_session):
+    affiliate_a, _ = await accounts.register(
+        db_session, "affiliate-a@example.com", "strong-password-123", None
+    )
+    affiliate_b, _ = await accounts.register(
+        db_session, "affiliate-b@example.com", "strong-password-123", None
+    )
+
+    async def allocation_for(owner, code: str):
+        partner = await referrals.create_affiliate_partner(
+            db_session, owner, name=code, owner_user_id=owner.id
+        )
+        program = await referrals.create_program(
+            db_session,
+            actor_type=ReferralActorType.affiliate_partner,
+            program_type=ReferralProgramType.affiliate_referral,
+            affiliate_partner_id=partner.id,
+        )
+        policy = await referrals.create_policy(
+            db_session, program, basis_points=1_000, eligible_revenue_types=["ppv"]
+        )
+        await referrals.create_link(db_session, program, policy, code=code, destination_path="/")
+        _, token = await referrals.resolve_click(db_session, code, f"{code}-session")
+        buyer, _ = await accounts.register(
+            db_session, f"{code.lower()}-buyer@example.com", "strong-password-123", None
+        )
+        assert await referrals.snapshot_signup_attribution(db_session, buyer, token)
+        _, allocation = await referrals.revenue_allocation(
+            db_session,
+            buyer_user_id=buyer.id,
+            revenue_type="ppv",
+            currency="EUR",
+            platform_fee_minor=100,
+            occurred_at=datetime.now(UTC),
+        )
+        source = LedgerTransaction(
+            transaction_type=LedgerTransactionType.ppv_purchase,
+            currency="EUR",
+            idempotency_key=f"source:{code}",
+            reference=f"source:{code}",
+            effective_at=datetime.now(UTC),
+            metadata_json={},
+        )
+        db_session.add(source)
+        await db_session.flush()
+        row = await referrals.record_revenue_allocation(
+            db_session, source_ledger_transaction_id=source.id, allocation=allocation
+        )
+        assert row
+        return partner, buyer, row
+
+    partner_a, buyer_a, allocation_a = await allocation_for(affiliate_a, "AFF-A")
+    _, _, allocation_b = await allocation_for(affiliate_b, "AFF-B")
+    assert [
+        row.id
+        for row in await referrals.affiliate_dashboard_allocations(db_session, affiliate_a.id)
+    ] == [allocation_a.id]
+    assert [
+        row.id
+        for row in await referrals.affiliate_dashboard_allocations(db_session, affiliate_b.id)
+    ] == [allocation_b.id]
+    await referrals.set_affiliate_partner_status(
+        db_session, affiliate_a, partner_a, referrals.AffiliatePartnerStatus.suspended
+    )
+    assert [
+        row.id
+        for row in await referrals.affiliate_dashboard_allocations(db_session, affiliate_a.id)
+    ] == [allocation_a.id]
+    assert (
+        await referrals.revenue_allocation(
+            db_session,
+            buyer_user_id=buyer_a.id,
+            revenue_type="ppv",
+            currency="EUR",
+            platform_fee_minor=100,
+            occurred_at=datetime.now(UTC),
+        )
+    ) == ([], None)
