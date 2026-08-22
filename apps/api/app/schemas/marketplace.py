@@ -21,6 +21,31 @@ class ShippingAllowanceResponse(BaseModel):
     active: bool
 
 
+class MarketplaceHoldPolicyInput(BaseModel):
+    hold_duration_seconds: int = Field(ge=0, le=365 * 24 * 60 * 60)
+    active: bool = True
+    is_default: bool = False
+
+
+class MarketplaceHoldPolicyResponse(BaseModel):
+    id: UUID
+    seller_tier: str
+    hold_duration_seconds: int
+    active: bool
+    is_default: bool
+
+
+class MarketplaceSellerTierInput(BaseModel):
+    tier: str
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class MarketplaceSellerTierResponse(BaseModel):
+    creator_id: UUID
+    tier: str
+    marketplace_suspended: bool
+
+
 class MarketplaceListingCreate(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=5000)

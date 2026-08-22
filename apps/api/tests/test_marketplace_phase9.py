@@ -26,7 +26,11 @@ from app.models.marketplace import (
     MarketplaceShippingMode,
     ShippingAllowanceScope,
 )
-from app.schemas.marketplace import ShippingAllowanceInput
+from app.schemas.marketplace import (
+    MarketplaceHoldPolicyInput,
+    MarketplaceSellerTierInput,
+    ShippingAllowanceInput,
+)
 
 
 async def approved_creator(db, email: str):
@@ -383,3 +387,72 @@ async def test_marketplace_earnings_release_requires_delivery_and_hold(db_sessio
     assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
     balances = await finance.creator_balances(db_session, creator.id, "EUR")
     assert balances == {"pending_amount_minor": 0, "available_amount_minor": 500}
+
+
+@pytest.mark.asyncio
+async def test_admin_tier_and_hold_changes_are_audited_and_do_not_rewrite_order_snapshot(
+    db_session,
+):
+    admin, _ = await accounts.register(
+        db_session, "tier-admin@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
+    creator_user, creator = await approved_creator(db_session, "tier-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "tier-buyer@example.com", "strong-password-123", None
+    )
+    await admin_routes.change_marketplace_seller_tier(
+        creator.id,
+        MarketplaceSellerTierInput(tier="trusted", reason="Established fulfilment history"),
+        (admin, None),
+        db_session,
+    )
+    await admin_routes.configure_marketplace_hold_policy(
+        "trusted",
+        MarketplaceHoldPolicyInput(hold_duration_seconds=123, active=True),
+        (admin, None),
+        db_session,
+    )
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AG")
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    row.status = MarketplaceListingStatus.published
+    row.moderation_status = ModerationStatus.approved
+    order = await marketplace.initiate_order(db_session, buyer, row.id, 1, "AG", "tier-snapshot")
+    attempt = await db_session.get(PaymentAttempt, order.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    assert await finance.process_development_webhook(db_session, payload, signature) is None
+    await marketplace.mark_order_shipped(db_session, order.id, creator_user, creator.id, None)
+    await marketplace.confirm_order_delivery(db_session, order.id, buyer)
+    assert order.seller_tier_snapshot.value == "trusted"
+    assert order.hold_duration_seconds_snapshot == 123
+
+    await admin_routes.change_marketplace_seller_tier(
+        creator.id,
+        MarketplaceSellerTierInput(tier="high_risk", reason="Manual review"),
+        (admin, None),
+        db_session,
+    )
+    await admin_routes.configure_marketplace_hold_policy(
+        "trusted",
+        MarketplaceHoldPolicyInput(hold_duration_seconds=999, active=True),
+        (admin, None),
+        db_session,
+    )
+    assert order.seller_tier_snapshot.value == "trusted"
+    assert order.hold_duration_seconds_snapshot == 123
+    events = (
+        await db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.actor_user_id == admin.id,
+                AuditEvent.event_type.in_(
+                    ["marketplace.seller_tier_changed", "marketplace.hold_policy_updated"]
+                ),
+            )
+        )
+    ).all()
+    assert {event.event_type for event in events} == {
+        "marketplace.seller_tier_changed",
+        "marketplace.hold_policy_updated",
+    }

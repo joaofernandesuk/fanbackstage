@@ -85,6 +85,100 @@ async def hold_policy_for_tier(
     return policy
 
 
+def hold_policy_snapshot(policy: MarketplaceEarningsHoldPolicy) -> dict[str, object]:
+    return {
+        "id": str(policy.id),
+        "seller_tier": policy.seller_tier.value,
+        "hold_duration_seconds": policy.hold_duration_seconds,
+        "active": policy.active,
+        "is_default": policy.is_default,
+    }
+
+
+async def configure_hold_policy(
+    db: AsyncSession,
+    actor: User,
+    *,
+    tier_value: str,
+    hold_duration_seconds: int,
+    active: bool,
+    is_default: bool,
+) -> MarketplaceEarningsHoldPolicy:
+    if hold_duration_seconds < 0:
+        raise MarketplaceError("Marketplace hold duration must be nonnegative")
+    try:
+        tier = MarketplaceSellerTier(tier_value)
+    except ValueError as exc:
+        raise MarketplaceError("Marketplace seller tier is invalid") from exc
+    policy = await db.scalar(
+        select(MarketplaceEarningsHoldPolicy)
+        .where(MarketplaceEarningsHoldPolicy.seller_tier == tier)
+        .with_for_update()
+    )
+    old_value = hold_policy_snapshot(policy) if policy else None
+    if is_default:
+        defaults = (
+            await db.scalars(
+                select(MarketplaceEarningsHoldPolicy)
+                .where(MarketplaceEarningsHoldPolicy.is_default.is_(True))
+                .with_for_update()
+            )
+        ).all()
+        for default in defaults:
+            default.is_default = False
+    if not policy:
+        policy = MarketplaceEarningsHoldPolicy(
+            seller_tier=tier,
+            hold_duration_seconds=hold_duration_seconds,
+            active=active,
+            is_default=is_default,
+        )
+        db.add(policy)
+        await db.flush()
+        event_type = "marketplace.hold_policy_created"
+    else:
+        policy.hold_duration_seconds = hold_duration_seconds
+        policy.active = active
+        policy.is_default = is_default
+        event_type = "marketplace.hold_policy_updated"
+    await record_event(
+        db,
+        event_type,
+        actor_user_id=actor.id,
+        target_type="marketplace_earnings_hold_policy",
+        target_id=str(policy.id),
+        metadata={"old": old_value, "new": hold_policy_snapshot(policy)},
+    )
+    return policy
+
+
+async def set_seller_tier(
+    db: AsyncSession, actor: User, creator_id: UUID, tier_value: str, reason: str
+) -> MarketplaceSellerRiskProfile:
+    try:
+        tier = MarketplaceSellerTier(tier_value)
+    except ValueError as exc:
+        raise MarketplaceError("Marketplace seller tier is invalid") from exc
+    if not reason.strip():
+        raise MarketplaceError("Seller tier change reason is required")
+    profile = await seller_risk_profile(db, creator_id)
+    previous = profile.tier
+    profile.tier = tier
+    await record_event(
+        db,
+        "marketplace.seller_tier_changed",
+        actor_user_id=actor.id,
+        target_type="creator_profile",
+        target_id=str(creator_id),
+        metadata={
+            "previous_tier": previous.value,
+            "new_tier": tier.value,
+            "reason": reason.strip(),
+        },
+    )
+    return profile
+
+
 def _country_code(value: str, field: str = "Country") -> str:
     normalized = value.upper().strip()
     if len(normalized) != 2 or not normalized.isalpha():

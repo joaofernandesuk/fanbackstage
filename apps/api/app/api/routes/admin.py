@@ -12,11 +12,22 @@ from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import Group, GroupCreatorMembership
-from app.models.marketplace import MarketplaceShippingAllowance
+from app.models.marketplace import (
+    MarketplaceEarningsHoldPolicy,
+    MarketplaceSellerRiskProfile,
+    MarketplaceShippingAllowance,
+)
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
 from app.permissions.policies import Permission, authorize
 from app.schemas.auth import MessageResponse
-from app.schemas.marketplace import ShippingAllowanceInput, ShippingAllowanceResponse
+from app.schemas.marketplace import (
+    MarketplaceHoldPolicyInput,
+    MarketplaceHoldPolicyResponse,
+    MarketplaceSellerTierInput,
+    MarketplaceSellerTierResponse,
+    ShippingAllowanceInput,
+    ShippingAllowanceResponse,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -25,6 +36,102 @@ def shipping_allowance_response(
     allowance: MarketplaceShippingAllowance,
 ) -> ShippingAllowanceResponse:
     return ShippingAllowanceResponse(**marketplace_service.allowance_snapshot(allowance))
+
+
+def hold_policy_response(policy: MarketplaceEarningsHoldPolicy) -> MarketplaceHoldPolicyResponse:
+    return MarketplaceHoldPolicyResponse(**marketplace_service.hold_policy_snapshot(policy))
+
+
+def seller_tier_response(profile: MarketplaceSellerRiskProfile) -> MarketplaceSellerTierResponse:
+    return MarketplaceSellerTierResponse(
+        creator_id=profile.creator_id,
+        tier=profile.tier.value,
+        marketplace_suspended=profile.marketplace_suspended,
+    )
+
+
+@router.get("/marketplace/hold-policies", response_model=list[MarketplaceHoldPolicyResponse])
+async def list_marketplace_hold_policies(
+    identity: CurrentIdentity, db: Db
+) -> list[MarketplaceHoldPolicyResponse]:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    rows = (
+        await db.scalars(
+            select(MarketplaceEarningsHoldPolicy).order_by(
+                MarketplaceEarningsHoldPolicy.seller_tier
+            )
+        )
+    ).all()
+    return [hold_policy_response(row) for row in rows]
+
+
+@router.put("/marketplace/hold-policies/{tier}", response_model=MarketplaceHoldPolicyResponse)
+async def configure_marketplace_hold_policy(
+    tier: str, payload: MarketplaceHoldPolicyInput, identity: CurrentIdentity, db: Db
+) -> MarketplaceHoldPolicyResponse:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    try:
+        policy = await marketplace_service.configure_hold_policy(
+            db,
+            identity[0],
+            tier_value=tier,
+            hold_duration_seconds=payload.hold_duration_seconds,
+            active=payload.active,
+            is_default=payload.is_default,
+        )
+        await db.commit()
+        return hold_policy_response(policy)
+    except marketplace_service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/marketplace/sellers/{creator_id}/tier", response_model=MarketplaceSellerTierResponse)
+async def get_marketplace_seller_tier(
+    creator_id: UUID, identity: CurrentIdentity, db: Db
+) -> MarketplaceSellerTierResponse:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    return seller_tier_response(await marketplace_service.seller_risk_profile(db, creator_id))
+
+
+@router.put("/marketplace/sellers/{creator_id}/tier", response_model=MarketplaceSellerTierResponse)
+async def change_marketplace_seller_tier(
+    creator_id: UUID, payload: MarketplaceSellerTierInput, identity: CurrentIdentity, db: Db
+) -> MarketplaceSellerTierResponse:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    try:
+        profile = await marketplace_service.set_seller_tier(
+            db, identity[0], creator_id, payload.tier, payload.reason
+        )
+        await db.commit()
+        return seller_tier_response(profile)
+    except marketplace_service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/marketplace/audit")
+async def marketplace_audit(identity: CurrentIdentity, db: Db) -> list[dict]:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    rows = (
+        await db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.event_type.like("marketplace.%"))
+            .order_by(AuditEvent.created_at.desc())
+        )
+    ).all()
+    return [
+        {
+            "id": str(event.id),
+            "event_type": event.event_type,
+            "actor_user_id": str(event.actor_user_id) if event.actor_user_id else None,
+            "target_type": event.target_type,
+            "target_id": event.target_id,
+            "metadata": event.metadata_json,
+            "created_at": event.created_at,
+        }
+        for event in rows
+    ]
 
 
 @router.get("/marketplace/shipping-allowances", response_model=list[ShippingAllowanceResponse])
