@@ -363,3 +363,37 @@ async def test_self_referral_and_suspended_affiliate_cannot_generate_new_commiss
             occurred_at=datetime.now(UTC),
         )
     ) == ([], None)
+
+
+@pytest.mark.asyncio
+async def test_last_eligible_touch_wins_and_first_touch_is_retained(db_session):
+    referrer, _ = await accounts.register(
+        db_session, "phase10-touch-owner@example.com", "strong-password-123", None
+    )
+    program = await referrals.create_program(
+        db_session,
+        actor_type=ReferralActorType.user,
+        program_type=ReferralProgramType.user_user_referral,
+        owner_user_id=referrer.id,
+    )
+    policy = await referrals.create_policy(
+        db_session, program, basis_points=100, eligible_revenue_types=["ppv"]
+    )
+    first_link = await referrals.create_link(
+        db_session, program, policy, code="FIRST-TOUCH", destination_path="/first"
+    )
+    _, first_token = await referrals.resolve_click(db_session, first_link.code, "touch-session")
+    last_link = await referrals.create_link(
+        db_session, program, policy, code="LAST-TOUCH", destination_path="/last"
+    )
+    await referrals.resolve_click(db_session, last_link.code, "touch-session")
+    user, _ = await accounts.register(
+        db_session, "phase10-touch-user@example.com", "strong-password-123", None
+    )
+    attribution = await referrals.snapshot_signup_attribution(db_session, user, first_token)
+    assert attribution
+    assert attribution.first_touch_id != attribution.last_touch_id
+    assert attribution.effective_link_id == last_link.id
+    # Normal internal navigation creates no new touch, so the established
+    # signup attribution cannot be reassigned by later referral traffic.
+    assert await referrals.snapshot_signup_attribution(db_session, user, first_token) is None

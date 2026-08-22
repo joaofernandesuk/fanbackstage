@@ -343,11 +343,49 @@ async def snapshot_signup_attribution(
         return None
     if not touch or not touch.eligible:
         return None
-    link = await db.get(ReferralLink, touch.referral_link_id)
-    policy = await db.get(ReferralCommissionPolicy, link.policy_id) if link else None
-    program = await db.get(ReferralProgram, link.program_id) if link else None
-    if not link or not policy or not program or program.status is not ReferralProgramStatus.active:
+    candidates = (
+        await db.scalars(
+            select(ReferralTouch)
+            .where(
+                ReferralTouch.session_hash == touch.session_hash,
+                ReferralTouch.eligible.is_(True),
+                ReferralTouch.occurred_at <= now(),
+            )
+            .order_by(ReferralTouch.occurred_at.desc())
+        )
+    ).all()
+    effective: (
+        tuple[ReferralTouch, ReferralLink, ReferralCommissionPolicy, ReferralProgram] | None
+    ) = None
+    first: ReferralTouch | None = None
+    for candidate in candidates:
+        candidate_link = await db.get(ReferralLink, candidate.referral_link_id)
+        candidate_policy = (
+            await db.get(ReferralCommissionPolicy, candidate_link.policy_id)
+            if candidate_link
+            else None
+        )
+        candidate_program = (
+            await db.get(ReferralProgram, candidate_link.program_id) if candidate_link else None
+        )
+        if (
+            not candidate_link
+            or not candidate_policy
+            or not candidate_program
+            or candidate_link.status is not ReferralLinkStatus.active
+            or candidate_policy.status is not ReferralPolicyStatus.active
+            or candidate_program.status is not ReferralProgramStatus.active
+            or (candidate_link.expires_at and candidate_link.expires_at <= now())
+            or candidate.occurred_at
+            < now() - timedelta(days=candidate_policy.attribution_window_days)
+        ):
+            continue
+        if effective is None:
+            effective = (candidate, candidate_link, candidate_policy, candidate_program)
+        first = candidate
+    if not effective:
         return None
+    touch, link, policy, program = effective
     # A newly-created account can never validly earn through its own program.
     # Existing accounts are not re-attributed, so this deterministic check is
     # sufficient for the Phase 10 signup boundary.
@@ -357,17 +395,9 @@ async def snapshot_signup_attribution(
     if program.owner_user_id == user.id or (owner_creator and owner_creator.user_id == user.id):
         touch.eligible = False
         return None
-    first_touch = await db.scalar(
-        select(ReferralTouch)
-        .where(
-            ReferralTouch.session_hash == touch.session_hash,
-            ReferralTouch.occurred_at <= touch.occurred_at,
-        )
-        .order_by(ReferralTouch.occurred_at.asc())
-    )
     attribution = SignupAttribution(
         user_id=user.id,
-        first_touch_id=(first_touch or touch).id,
+        first_touch_id=(first or touch).id,
         last_touch_id=touch.id,
         effective_link_id=link.id,
         policy_id=policy.id,
