@@ -182,6 +182,25 @@ async def set_seller_tier(
     return profile
 
 
+async def set_marketplace_suspension(
+    db: AsyncSession, actor: User, creator_id: UUID, suspended: bool, reason: str
+) -> MarketplaceSellerRiskProfile:
+    if not reason.strip():
+        raise MarketplaceError("Marketplace suspension reason is required")
+    profile = await seller_risk_profile(db, creator_id)
+    previous = profile.marketplace_suspended
+    profile.marketplace_suspended = suspended
+    await record_event(
+        db,
+        "marketplace.seller_suspension_changed",
+        actor_user_id=actor.id,
+        target_type="creator_profile",
+        target_id=str(creator_id),
+        metadata={"previous": previous, "suspended": suspended, "reason": reason.strip()},
+    )
+    return profile
+
+
 def _country_code(value: str, field: str = "Country") -> str:
     normalized = value.upper().strip()
     if len(normalized) != 2 or not normalized.isalpha():
@@ -220,6 +239,8 @@ async def create_listing(
     creator = await db.get(CreatorProfile, creator_id)
     if not creator:
         raise MarketplaceError("Creator not found")
+    if (await seller_risk_profile(db, creator_id)).marketplace_suspended:
+        raise MarketplaceError("Marketplace selling is suspended for this creator")
     if actor.id != creator.user_id:
         from app.groups.service import has_delegated_permission
         from app.models.groups import GroupPermission
@@ -554,6 +575,8 @@ async def initiate_order(
         select(MarketplaceListing).where(MarketplaceListing.id == listing_id).with_for_update()
     )
     if not listing or listing.status is not MarketplaceListingStatus.published:
+        raise MarketplaceError("Marketplace listing is not available")
+    if (await seller_risk_profile(db, listing.owner_creator_id)).marketplace_suspended:
         raise MarketplaceError("Marketplace listing is not available")
     if listing.moderation_status is not ModerationStatus.approved:
         raise MarketplaceError("Marketplace listing is not approved")

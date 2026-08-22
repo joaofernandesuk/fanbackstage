@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.accounts import service as accounts
 from app.api.routes import admin as admin_routes
+from app.api.routes import marketplace as marketplace_routes
 from app.core.config import get_settings
 from app.creators import service as creators
 from app.finance import service as finance
@@ -37,11 +38,14 @@ from app.models.marketplace import (
     MarketplaceTrackingEvent,
     ShippingAllowanceScope,
 )
+from app.models.social import SocialReport
 from app.schemas.marketplace import (
     MarketplaceHoldPolicyInput,
     MarketplaceSellerTierInput,
+    MarketplaceShipmentInput,
     ShippingAllowanceInput,
 )
+from app.schemas.social import ReportInput
 
 
 async def approved_creator(db, email: str):
@@ -800,3 +804,119 @@ async def test_dispute_and_chargeback_block_release_and_refund_after_release_com
     )
     assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
     assert chargeback.status is MarketplaceOrderStatus.chargeback
+
+
+@pytest.mark.asyncio
+async def test_suspension_and_delegated_order_controls_are_creator_scoped_and_revocable(db_session):
+    manager, _ = await accounts.register(
+        db_session, "market-order-manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "market-order-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "market-order-buyer@example.com", "strong-password-123", None
+    )
+    admin, _ = await accounts.register(
+        db_session, "market-suspension-admin@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
+    group = await groups.create_group(db_session, manager, "Orders group", "orders-group", 10_000, None)
+    membership = await groups.invite_creator(
+        db_session, group.id, manager, creator.id, 10_000, [GroupPermission.manage_marketplace_orders]
+    )
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AL")
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    order = await marketplace.initiate_order(db_session, buyer, row.id, 1, "AL", "manager-orders")
+    attempt = await db_session.get(PaymentAttempt, order.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    processed = await marketplace_routes.managed_order_processing(
+        creator.id, order.id, (manager, None), db_session
+    )
+    assert processed.status == MarketplaceOrderStatus.processing.value
+    shipped = await marketplace_routes.managed_order_shipped(
+        creator.id,
+        order.id,
+        MarketplaceShipmentInput(carrier="CTT", tracking_reference="MANAGER-1"),
+        (manager, None),
+        db_session,
+    )
+    assert shipped.tracking_reference == "MANAGER-1"
+    manager_membership = await db_session.scalar(
+        select(GroupManagerMembership).where(
+            GroupManagerMembership.group_id == group.id,
+            GroupManagerMembership.user_id == manager.id,
+        )
+    )
+    assert manager_membership
+    grant = await db_session.scalar(
+        select(GroupPermissionGrant).where(
+            GroupPermissionGrant.membership_id == membership.id,
+            GroupPermissionGrant.manager_membership_id == manager_membership.id,
+            GroupPermissionGrant.permission == GroupPermission.manage_marketplace_orders,
+        )
+    )
+    assert grant
+    await db_session.delete(grant)
+    await db_session.flush()
+    with pytest.raises(HTTPException, match="Delegated marketplace order permission denied"):
+        await marketplace_routes.managed_creator_fulfilment_orders(
+            creator.id, (manager, None), db_session
+        )
+
+    await marketplace.set_marketplace_suspension(db_session, admin, creator.id, True, "policy review")
+    with pytest.raises(marketplace.MarketplaceError, match="not available"):
+        await marketplace.initiate_order(db_session, buyer, row.id, 1, "AL", "suspended-checkout")
+    events = (
+        await db_session.scalars(
+            select(AuditEvent).where(AuditEvent.event_type == "marketplace.seller_suspension_changed")
+        )
+    ).all()
+    assert len(events) == 1 and events[0].actor_user_id == admin.id
+
+
+@pytest.mark.asyncio
+async def test_prohibited_marketplace_listing_reports_are_deduped_and_moderation_removes_listing(
+    db_session,
+):
+    creator_user, creator = await approved_creator(db_session, "report-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "report-buyer@example.com", "strong-password-123", None
+    )
+    moderator, _ = await accounts.register(
+        db_session, "report-moderator@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, moderator, "moderator", moderator.id, None)
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    result = await marketplace_routes.report_listing(
+        row.public_id,
+        ReportInput(reason="prohibited_item", details="Restricted item"),
+        (buyer, None),
+        db_session,
+    )
+    assert result == {"reported": True}
+    await marketplace_routes.report_listing(
+        row.public_id,
+        ReportInput(reason="prohibited_item", details="Repeated report"),
+        (buyer, None),
+        db_session,
+    )
+    reports = (
+        await db_session.scalars(
+            select(SocialReport).where(
+                SocialReport.target_type == "marketplace_listing", SocialReport.target_id == row.id
+            )
+        )
+    ).all()
+    assert len(reports) == 1
+    await admin_routes.remove_reported_marketplace_listing(reports[0].id, (moderator, None), db_session)
+    assert row.status is MarketplaceListingStatus.removed
+    audit = await db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.event_type == "marketplace.listing_removed_after_report",
+            AuditEvent.target_id == str(row.id),
+        )
+    )
+    assert audit and audit.actor_user_id == moderator.id

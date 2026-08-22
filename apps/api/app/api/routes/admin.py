@@ -14,6 +14,8 @@ from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import Group, GroupCreatorMembership
 from app.models.marketplace import (
     MarketplaceEarningsHoldPolicy,
+    MarketplaceListing,
+    MarketplaceListingStatus,
     MarketplaceSellerRiskProfile,
     MarketplaceShippingAllowance,
 )
@@ -23,6 +25,7 @@ from app.schemas.auth import MessageResponse
 from app.schemas.marketplace import (
     MarketplaceHoldPolicyInput,
     MarketplaceHoldPolicyResponse,
+    MarketplaceSellerSuspensionInput,
     MarketplaceSellerTierInput,
     MarketplaceSellerTierResponse,
     ShippingAllowanceInput,
@@ -110,6 +113,24 @@ async def change_marketplace_seller_tier(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.put(
+    "/marketplace/sellers/{creator_id}/suspension", response_model=MarketplaceSellerTierResponse
+)
+async def change_marketplace_seller_suspension(
+    creator_id: UUID, payload: MarketplaceSellerSuspensionInput, identity: CurrentIdentity, db: Db
+) -> MarketplaceSellerTierResponse:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    try:
+        profile = await marketplace_service.set_marketplace_suspension(
+            db, identity[0], creator_id, payload.suspended, payload.reason
+        )
+        await db.commit()
+        return seller_tier_response(profile)
+    except marketplace_service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/marketplace/audit")
 async def marketplace_audit(identity: CurrentIdentity, db: Db) -> list[dict]:
     authorize(identity[0], Permission.ADMIN_ACCESS)
@@ -132,6 +153,58 @@ async def marketplace_audit(identity: CurrentIdentity, db: Db) -> list[dict]:
         }
         for event in rows
     ]
+
+
+@router.get("/marketplace/reports")
+async def marketplace_reports(identity: CurrentIdentity, db: Db) -> list[dict]:
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    rows = (
+        await db.scalars(
+            select(SocialReport)
+            .where(SocialReport.target_type == "marketplace_listing")
+            .order_by(SocialReport.created_at.desc())
+        )
+    ).all()
+    return [
+        {
+            "id": str(row.id),
+            "listing_id": str(row.target_id),
+            "reason": row.reason,
+            "details": row.details,
+            "status": row.status.value,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+@router.post("/marketplace/reports/{report_id}/remove-listing", response_model=MessageResponse)
+async def remove_reported_marketplace_listing(
+    report_id: UUID, identity: CurrentIdentity, db: Db
+) -> MessageResponse:
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    report = await db.scalar(
+        select(SocialReport).where(
+            SocialReport.id == report_id, SocialReport.target_type == "marketplace_listing"
+        )
+    )
+    if not report:
+        raise HTTPException(status_code=404, detail="Marketplace report not found")
+    listing = await db.get(MarketplaceListing, report.target_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Marketplace listing not found")
+    listing.status = MarketplaceListingStatus.removed
+    report.status = ReportStatus.reviewed
+    await record_event(
+        db,
+        "marketplace.listing_removed_after_report",
+        actor_user_id=identity[0].id,
+        target_type="marketplace_listing",
+        target_id=str(listing.id),
+        metadata={"report_id": str(report.id), "reason": report.reason},
+    )
+    await db.commit()
+    return MessageResponse(message="Marketplace listing removed")
 
 
 @router.get("/marketplace/shipping-allowances", response_model=list[ShippingAllowanceResponse])

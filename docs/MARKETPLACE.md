@@ -35,6 +35,8 @@ The purchaser must not automatically receive the creator's residential/return ad
 - Refunds after earnings release debit the original released allocations through compensating entries. Historical price, shipping allowance, tracking, commission, seller-tier and group-split snapshots remain immutable.
 - Buyer order history exposes only buyer-safe order and tracking information. Creator fulfilment controls use the same paid-order state machine and show the pending marketplace hold; neither surface computes commission, split, allowance or release eligibility in the client.
 - Creator and group earnings views include marketplace as a ledger-derived revenue source. Reversal entries are attributed to the original marketplace source so a refund or chargeback cannot be hidden by current seller or group settings.
+- Marketplace listings can be reported for prohibited items. Reports are deduplicated per reporter/reason/listing; moderators can remove a reported listing through an audited action. Marketplace suspension is platform-admin controlled and blocks new listings and checkout of a suspended seller's catalogue without rewriting historical orders.
+- Delegated managers require the separate, current `manage_marketplace_orders` grant for a specific active creator membership to inspect or perform fulfilment actions. The server retains the manager as the audit actor and revocation applies to the next request.
 
 # 17. Custom Content Requests
 

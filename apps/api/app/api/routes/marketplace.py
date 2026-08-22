@@ -15,6 +15,7 @@ from app.models.marketplace import (
     MarketplaceOrder,
     MarketplaceTrackingEvent,
 )
+from app.models.social import SocialReport
 from app.permissions.policies import Permission, authorize
 from app.schemas.marketplace import (
     MarketplaceCheckoutInput,
@@ -27,6 +28,7 @@ from app.schemas.marketplace import (
     MarketplaceShippingAddressResponse,
     MarketplaceTrackingEventResponse,
 )
+from app.schemas.social import ReportInput
 
 router = APIRouter(prefix="/marketplace", tags=["marketplace"])
 
@@ -168,6 +170,40 @@ async def public_listing(public_id: str, db: Db) -> MarketplaceListingResponse:
     return listing_response(listing)
 
 
+@router.post("/listings/{public_id}/report", response_model=dict)
+async def report_listing(
+    public_id: str, payload: ReportInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    listing = await db.scalar(
+        select(MarketplaceListing).where(
+            MarketplaceListing.public_id == public_id,
+            MarketplaceListing.status == MarketplaceListingStatus.published,
+        )
+    )
+    if not listing:
+        raise HTTPException(status_code=404, detail="Marketplace listing not found")
+    existing = await db.scalar(
+        select(SocialReport).where(
+            SocialReport.reporter_user_id == identity[0].id,
+            SocialReport.target_type == "marketplace_listing",
+            SocialReport.target_id == listing.id,
+            SocialReport.reason == payload.reason,
+        )
+    )
+    if not existing:
+        db.add(
+            SocialReport(
+                reporter_user_id=identity[0].id,
+                target_type="marketplace_listing",
+                target_id=listing.id,
+                reason=payload.reason,
+                details=payload.details,
+            )
+        )
+    await db.commit()
+    return {"reported": True}
+
+
 @router.get("/orders/mine", response_model=list[MarketplaceOrderResponse])
 async def buyer_orders(identity: CurrentIdentity, db: Db) -> list[MarketplaceOrderResponse]:
     rows = (
@@ -195,6 +231,32 @@ async def creator_fulfilment_orders(
     return [order_response(row) for row in rows]
 
 
+async def require_managed_marketplace_orders(
+    db: Db, actor_id: UUID, creator_id: UUID
+) -> None:
+    if not await has_delegated_permission(
+        db, actor_id, creator_id, GroupPermission.manage_marketplace_orders
+    ):
+        raise HTTPException(status_code=403, detail="Delegated marketplace order permission denied")
+
+
+@router.get(
+    "/managed/{creator_id}/orders/fulfilment", response_model=list[MarketplaceOrderResponse]
+)
+async def managed_creator_fulfilment_orders(
+    creator_id: UUID, identity: CurrentIdentity, db: Db
+) -> list[MarketplaceOrderResponse]:
+    await require_managed_marketplace_orders(db, identity[0].id, creator_id)
+    rows = (
+        await db.scalars(
+            select(MarketplaceOrder)
+            .where(MarketplaceOrder.seller_creator_id == creator_id)
+            .order_by(MarketplaceOrder.created_at.desc())
+        )
+    ).all()
+    return [order_response(row) for row in rows]
+
+
 @router.post("/orders/{order_id}/processing", response_model=MarketplaceOrderResponse)
 async def order_processing(
     order_id: UUID, identity: CurrentIdentity, db: Db
@@ -202,6 +264,22 @@ async def order_processing(
     creator = await approved_creator(db, identity[0])
     try:
         order = await service.mark_order_processing(db, order_id, identity[0], creator.id)
+        await db.commit()
+        return order_response(order)
+    except service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/managed/{creator_id}/orders/{order_id}/processing", response_model=MarketplaceOrderResponse
+)
+async def managed_order_processing(
+    creator_id: UUID, order_id: UUID, identity: CurrentIdentity, db: Db
+) -> MarketplaceOrderResponse:
+    await require_managed_marketplace_orders(db, identity[0].id, creator_id)
+    try:
+        order = await service.mark_order_processing(db, order_id, identity[0], creator_id)
         await db.commit()
         return order_response(order)
     except service.MarketplaceError as exc:
@@ -217,6 +295,28 @@ async def order_shipped(
     try:
         order = await service.mark_order_shipped(
             db, order_id, identity[0], creator.id, payload.carrier, payload.tracking_reference
+        )
+        await db.commit()
+        return order_response(order)
+    except service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/managed/{creator_id}/orders/{order_id}/shipped", response_model=MarketplaceOrderResponse
+)
+async def managed_order_shipped(
+    creator_id: UUID,
+    order_id: UUID,
+    payload: MarketplaceShipmentInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> MarketplaceOrderResponse:
+    await require_managed_marketplace_orders(db, identity[0].id, creator_id)
+    try:
+        order = await service.mark_order_shipped(
+            db, order_id, identity[0], creator_id, payload.carrier, payload.tracking_reference
         )
         await db.commit()
         return order_response(order)

@@ -41,6 +41,11 @@ class MarketplaceSellerTierInput(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class MarketplaceSellerSuspensionInput(BaseModel):
+    suspended: bool
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class MarketplaceSellerTierResponse(BaseModel):
     creator_id: UUID
     tier: str
