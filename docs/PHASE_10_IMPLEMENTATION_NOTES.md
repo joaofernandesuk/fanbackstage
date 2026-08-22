@@ -15,3 +15,7 @@ The authenticated referral dashboard resolves creator, user and affiliate owners
 ## Real-stack release coverage
 
 The Playwright referral scenario creates creator and affiliate programmes through the restricted super-admin surface, follows the opaque first-party link before registration, and validates marketplace allocation states across pending, available and reversed. It proves that marketplace rewards remain pending until the order is releasable, that release moves the exact allocation, that refund and chargeback reverse exact historical allocations, and that a second affiliate account cannot inspect the first affiliate's dashboard. The isolated E2E operator is explicitly granted `super_admin`; production authorization is unchanged.
+
+## Security review
+
+Referral dashboard ownership is never accepted from a request parameter: the authenticated user determines its creator profile, user beneficiary rows and affiliate partners before any allocation, link or conversion query runs. The public referral route accepts opaque link codes only and records attribution in a signed HTTP-only cookie; registration consumes that server-verified state once. Admin programme, policy, link and affiliate mutations retain the restricted `financial.configure` check, while dashboard UI calls only the authenticated `/r/me/dashboard` projection. Cross-affiliate access is covered both at the domain boundary and through the browser scenario.
