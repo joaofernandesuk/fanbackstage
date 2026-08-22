@@ -33,6 +33,7 @@ from app.models.marketplace import (
     MarketplaceSellerRiskProfile,
     MarketplaceShippingAddress,
     MarketplaceShippingAllowance,
+    MarketplaceTrackingEvent,
 )
 from app.models.messaging import (
     Conversation,
@@ -118,6 +119,7 @@ __all__ = [
     "MarketplaceSellerRiskProfile",
     "MarketplaceShippingAddress",
     "MarketplaceShippingAllowance",
+    "MarketplaceTrackingEvent",
     "MassMessageCampaign",
     "MassMessageRecipient",
     "MediaAsset",

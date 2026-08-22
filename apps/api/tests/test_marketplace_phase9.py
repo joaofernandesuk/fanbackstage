@@ -29,6 +29,7 @@ from app.models.marketplace import (
     MarketplaceOrderStatus,
     MarketplaceShippingAllowance,
     MarketplaceShippingMode,
+    MarketplaceTrackingEvent,
     ShippingAllowanceScope,
 )
 from app.schemas.marketplace import (
@@ -393,7 +394,9 @@ async def test_marketplace_earnings_release_requires_delivery_and_hold(db_sessio
     assert await finance.process_development_webhook(db_session, payload, signature) is None
     assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
     await marketplace.mark_order_processing(db_session, order.id, creator_user, creator.id)
-    await marketplace.mark_order_shipped(db_session, order.id, creator_user, creator.id, "TRACK-1")
+    await marketplace.mark_order_shipped(
+        db_session, order.id, creator_user, creator.id, "CTT", "TRACK-1"
+    )
     await marketplace.confirm_order_delivery(db_session, order.id, buyer)
     assert order.delivered_at
     assert order.earnings_hold_until and order.earnings_hold_until > datetime.now(UTC)
@@ -439,7 +442,7 @@ async def test_admin_tier_and_hold_changes_are_audited_and_do_not_rewrite_order_
     assert attempt
     payload, signature = finance.development_webhook_payload(attempt)
     assert await finance.process_development_webhook(db_session, payload, signature) is None
-    await marketplace.mark_order_shipped(db_session, order.id, creator_user, creator.id, None)
+    await marketplace.mark_order_shipped(db_session, order.id, creator_user, creator.id, None, None)
     await marketplace.confirm_order_delivery(db_session, order.id, buyer)
     assert order.seller_tier_snapshot.value == "trusted"
     assert order.hold_duration_seconds_snapshot == 123
@@ -588,6 +591,8 @@ async def test_verified_payment_consumes_once_and_failure_or_expiry_releases_sto
         db_session, buyer, paid_listing.id, 1, "AI", "reservation-paid"
     )
     assert paid_listing.quantity_available == 0
+    with pytest.raises(marketplace.MarketplaceError, match="processing"):
+        await marketplace.mark_order_processing(db_session, paid_order.id, creator_user, creator.id)
     paid_attempt = await db_session.get(PaymentAttempt, paid_order.payment_attempt_id)
     assert paid_attempt
     success_payload, success_signature = finance.development_webhook_payload(paid_attempt)
@@ -603,6 +608,24 @@ async def test_verified_payment_consumes_once_and_failure_or_expiry_releases_sto
         is None
     )
     assert paid_listing.quantity_available == 0
+    await marketplace.mark_order_processing(db_session, paid_order.id, creator_user, creator.id)
+    await marketplace.mark_order_shipped(
+        db_session, paid_order.id, creator_user, creator.id, "CTT", "TRACK-IMMUTABLE"
+    )
+    tracking = (
+        await db_session.scalars(
+            select(MarketplaceTrackingEvent).where(
+                MarketplaceTrackingEvent.order_id == paid_order.id
+            )
+        )
+    ).all()
+    assert [(event.carrier, event.tracking_reference) for event in tracking] == [
+        ("CTT", "TRACK-IMMUTABLE")
+    ]
+    with pytest.raises(marketplace.MarketplaceError, match="shipped"):
+        await marketplace.mark_order_shipped(
+            db_session, paid_order.id, creator_user, creator.id, "Other", "REWRITE"
+        )
 
     failed_listing = await listing(db_session, creator, creator_user, shipping=100)
     failed_listing.quantity_available = 1

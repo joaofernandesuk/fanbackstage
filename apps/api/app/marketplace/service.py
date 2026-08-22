@@ -42,6 +42,7 @@ from app.models.marketplace import (
     MarketplaceSellerTier,
     MarketplaceShippingAddress,
     MarketplaceShippingAllowance,
+    MarketplaceTrackingEvent,
     ShippingAllowanceScope,
 )
 
@@ -860,6 +861,7 @@ async def mark_order_shipped(
     order_id: UUID,
     actor: User,
     creator_id: UUID,
+    carrier: str | None,
     tracking_reference: str | None,
 ) -> MarketplaceOrder:
     order = await db.scalar(
@@ -874,14 +876,26 @@ async def mark_order_shipped(
         raise MarketplaceError("Order cannot be marked as shipped")
     order.status = MarketplaceOrderStatus.shipped
     order.shipped_at = datetime.now(UTC)
+    order.carrier = carrier.strip() if carrier else None
     order.tracking_reference = tracking_reference.strip() if tracking_reference else None
+    db.add(
+        MarketplaceTrackingEvent(
+            order_id=order.id,
+            event_type="shipment_created",
+            carrier=order.carrier,
+            tracking_reference=order.tracking_reference,
+        )
+    )
     await record_event(
         db,
         "marketplace.order_shipped",
         actor_user_id=actor.id,
         target_type="marketplace_order",
         target_id=str(order.id),
-        metadata={"has_tracking_reference": bool(order.tracking_reference)},
+        metadata={
+            "carrier": order.carrier,
+            "has_tracking_reference": bool(order.tracking_reference),
+        },
     )
     return order
 
@@ -905,6 +919,14 @@ async def confirm_order_delivery(db: AsyncSession, order_id: UUID, buyer: User) 
     order.earnings_hold_until = now + timedelta(seconds=policy.hold_duration_seconds)
     order.earnings_release_status = MarketplaceEarningsReleaseStatus.pending
     order.release_block_reason = None
+    db.add(
+        MarketplaceTrackingEvent(
+            order_id=order.id,
+            event_type="delivery_confirmed_by_buyer",
+            carrier=order.carrier,
+            tracking_reference=order.tracking_reference,
+        )
+    )
     await record_event(
         db,
         "marketplace.order_delivered",

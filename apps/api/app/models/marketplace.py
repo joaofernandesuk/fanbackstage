@@ -209,6 +209,18 @@ class MarketplaceShippingAddress(UUIDPrimaryKey, Timestamped, Base):
     country_code: Mapped[str] = mapped_column(String(2))
 
 
+class MarketplaceTrackingEvent(UUIDPrimaryKey, Timestamped, Base):
+    """Append-only carrier/tracking history; it never rewrites shipment facts."""
+
+    __tablename__ = "marketplace_tracking_events"
+    order_id: Mapped[UUID] = mapped_column(
+        ForeignKey("marketplace_orders.id", ondelete="RESTRICT"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64))
+    carrier: Mapped[str | None] = mapped_column(String(120))
+    tracking_reference: Mapped[str | None] = mapped_column(String(255))
+
+
 class MarketplaceOrder(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "marketplace_orders"
     __table_args__ = (
@@ -294,6 +306,7 @@ class MarketplaceOrder(UUIDPrimaryKey, Timestamped, Base):
     shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     tracking_reference: Mapped[str | None] = mapped_column(String(255))
+    carrier: Mapped[str | None] = mapped_column(String(120))
     seller_tier_snapshot: Mapped[MarketplaceSellerTier | None] = mapped_column(
         Enum(MarketplaceSellerTier, name="marketplace_seller_tier", create_type=False)
     )

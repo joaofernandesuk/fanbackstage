@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -116,3 +117,20 @@ class MarketplaceOrderResponse(BaseModel):
     group_amount_minor: int
     total_paid_minor: int
     payment_attempt_id: UUID
+    carrier: str | None = None
+    tracking_reference: str | None = None
+    shipped_at: datetime | None = None
+    delivered_at: datetime | None = None
+    earnings_hold_until: datetime | None = None
+
+
+class MarketplaceShipmentInput(BaseModel):
+    carrier: str | None = Field(default=None, max_length=120)
+    tracking_reference: str | None = Field(default=None, max_length=255)
+
+
+class MarketplaceTrackingEventResponse(BaseModel):
+    event_type: str
+    carrier: str | None
+    tracking_reference: str | None
+    created_at: datetime
