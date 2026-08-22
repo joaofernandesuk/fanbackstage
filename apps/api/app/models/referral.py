@@ -189,6 +189,19 @@ class ReferralCommissionAllocation(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "referral_commission_allocations"
     __table_args__ = (
         CheckConstraint("amount_minor >= 0", name="ck_referral_allocation_nonnegative_amount"),
+        CheckConstraint(
+            "amount_minor <= platform_fee_minor", name="ck_referral_allocation_within_platform_fee"
+        ),
+        CheckConstraint(
+            "(beneficiary_actor_type = 'creator' AND beneficiary_creator_id IS NOT NULL "
+            "AND beneficiary_user_id IS NULL AND beneficiary_affiliate_partner_id IS NULL) OR "
+            "(beneficiary_actor_type = 'user' AND beneficiary_user_id IS NOT NULL "
+            "AND beneficiary_creator_id IS NULL AND beneficiary_affiliate_partner_id IS NULL) OR "
+            "(beneficiary_actor_type = 'affiliate_partner' "
+            "AND beneficiary_affiliate_partner_id IS NOT NULL AND beneficiary_creator_id IS NULL "
+            "AND beneficiary_user_id IS NULL)",
+            name="ck_referral_allocation_beneficiary",
+        ),
         UniqueConstraint(
             "source_ledger_transaction_id", name="uq_referral_allocation_source_ledger"
         ),
