@@ -744,7 +744,8 @@ async def test_unshipped_refund_reverses_original_pending_split_and_restores_sto
     assert (
         await db_session.scalar(
             select(LedgerTransaction).where(
-                LedgerTransaction.transaction_type == LedgerTransactionType.refund
+                LedgerTransaction.transaction_type == LedgerTransactionType.refund,
+                LedgerTransaction.reversal_of_transaction_id == original.id,
             )
         )
     ).id == reversal.id

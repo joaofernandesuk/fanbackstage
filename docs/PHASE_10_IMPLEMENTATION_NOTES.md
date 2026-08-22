@@ -11,3 +11,7 @@ The current policy defaults are 30 days for attribution and 90 days for subscrip
 ## Dashboard reconciliation
 
 The authenticated referral dashboard resolves creator, user and affiliate ownership only on the server. It exposes only programmes, links, conversions and allocation rows belonging to that authenticated account. Pending, available and reversed totals are calculated from immutable `referral_commission_allocations` lifecycle snapshots, each attached to its source ledger transaction; current policy values are never used to recompute historical earnings. The permanent regression suite verifies those totals against the referral ledger account and confirms that a later policy edit leaves the dashboard unchanged.
+
+## Real-stack release coverage
+
+The Playwright referral scenario creates creator and affiliate programmes through the restricted super-admin surface, follows the opaque first-party link before registration, and validates marketplace allocation states across pending, available and reversed. It proves that marketplace rewards remain pending until the order is releasable, that release moves the exact allocation, that refund and chargeback reverse exact historical allocations, and that a second affiliate account cannot inspect the first affiliate's dashboard. The isolated E2E operator is explicitly granted `super_admin`; production authorization is unchanged.

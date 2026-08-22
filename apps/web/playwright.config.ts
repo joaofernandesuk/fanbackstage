@@ -19,6 +19,10 @@ const environment = {
     process.env.FANBACKSTAGE_DATABASE_URL ??
     "postgresql+asyncpg://fanbackstage:fanbackstage@127.0.0.1:5432/fanbackstage",
   FANBACKSTAGE_REDIS_URL: process.env.FANBACKSTAGE_REDIS_URL ?? "redis://127.0.0.1:6379/1",
+  // Browser scenarios exercise many legitimate account transitions in one
+  // isolated worker. Keep production throttling intact while avoiding a
+  // shared test-worker counter masking the financial assertions.
+  FANBACKSTAGE_AUTH_RATE_LIMIT_ATTEMPTS: "1000",
   FANBACKSTAGE_SMTP_PORT: mailpitSmtpPort,
   E2E_MAILPIT_URL: process.env.E2E_MAILPIT_URL ?? `http://127.0.0.1:${mailpitUiPort}`,
   FANBACKSTAGE_STORAGE_ENDPOINT_URL: storageEndpoint,

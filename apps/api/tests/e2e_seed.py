@@ -21,6 +21,11 @@ async def seed() -> None:
             user, _ = await accounts.register(db, EMAIL, PASSWORD, None)
         if "admin" not in {role.name for role in user.roles}:
             await accounts.assign_role(db, user, "admin", user.id, None)
+        # Referral programmes and financial policy changes intentionally require
+        # the restricted configure capability.  The isolated E2E operator must
+        # therefore be a super-admin rather than weakening those API checks.
+        if "super_admin" not in {role.name for role in user.roles}:
+            await accounts.assign_role(db, user, "super_admin", user.id, None)
         manager = await db.scalar(select(User).where(User.email == MANAGER_EMAIL))
         if not manager:
             manager, _ = await accounts.register(db, MANAGER_EMAIL, MANAGER_PASSWORD, None)
