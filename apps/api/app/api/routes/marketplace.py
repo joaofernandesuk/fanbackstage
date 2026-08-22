@@ -353,6 +353,21 @@ async def order_tracking(
     ]
 
 
+@router.get("/orders/{order_id}", response_model=MarketplaceOrderResponse)
+async def order_detail(
+    order_id: UUID, identity: CurrentIdentity, db: Db
+) -> MarketplaceOrderResponse:
+    order = await db.scalar(
+        select(MarketplaceOrder).where(
+            MarketplaceOrder.id == order_id,
+            MarketplaceOrder.buyer_user_id == identity[0].id,
+        )
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Marketplace order not found")
+    return order_response(order)
+
+
 @router.post("/listings/{public_id}/checkout", response_model=MarketplaceOrderResponse)
 async def checkout(
     public_id: str,

@@ -37,6 +37,7 @@ class CreatorEarningsResponse(BaseModel):
     ppv_gross_amount_minor: int = 0
     platform_fee_amount_minor: int = 0
     creator_net_amount_minor: int = 0
+    marketplace_net_amount_minor: int = 0
 
 
 class PurchaseHistoryResponse(BaseModel):

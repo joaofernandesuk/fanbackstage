@@ -180,6 +180,11 @@ async def test_checkout_snapshots_allowance_and_applies_group_only_to_shipping_e
     assert ledger.metadata_json["shipping_excess_minor"] == "2300"
     assert ledger.metadata_json["commissionable_base_minor"] == "2800"
     assert ledger.metadata_json["group_amount_minor"] == "1120"
+    dashboard = await groups.group_financial_dashboard(db_session, group.id, manager, "EUR")
+    assert dashboard["source_amounts_minor"]["marketplace"] == 1_120
+    summary = await finance.creator_financial_summary(db_session, creator.id, "EUR")
+    # The creator-side figure includes the immutable pass-through component.
+    assert summary["marketplace_net_amount_minor"] == 1_820
 
     # A later platform allowance edit cannot rewrite the paid order or ledger.
     configured = await db_session.get(MarketplaceShippingAllowance, configured_allowance.id)

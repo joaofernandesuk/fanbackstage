@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.audit.service import record_event
 from app.core.config import get_settings
@@ -620,11 +621,45 @@ async def creator_financial_summary(
         )
     )
     gross, fees, net = result.one()
+    original_transaction = aliased(LedgerTransaction)
+    marketplace_rows = await db.execute(
+        select(
+            LedgerTransaction.transaction_type,
+            original_transaction.transaction_type,
+            func.coalesce(
+                func.sum(
+                    case(
+                        (LedgerEntry.direction == LedgerDirection.credit, LedgerEntry.amount_minor),
+                        else_=-LedgerEntry.amount_minor,
+                    )
+                ),
+                0,
+            ),
+        )
+        .join(LedgerEntry, LedgerEntry.transaction_id == LedgerTransaction.id)
+        .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+        .outerjoin(
+            original_transaction,
+            original_transaction.id == LedgerTransaction.reversal_of_transaction_id,
+        )
+        .where(LedgerAccount.owner_creator_id == creator_id, LedgerAccount.currency == currency)
+        .group_by(LedgerTransaction.transaction_type, original_transaction.transaction_type)
+    )
+    marketplace_net = 0
+    for transaction_type, original_type, amount in marketplace_rows:
+        source_type = (
+            original_type
+            if transaction_type.value in {"refund", "chargeback"} and original_type is not None
+            else transaction_type
+        )
+        if source_type is LedgerTransactionType.marketplace_order:
+            marketplace_net += int(amount)
     return {
         **balances,
         "ppv_gross_amount_minor": int(gross),
         "platform_fee_amount_minor": int(fees),
         "creator_net_amount_minor": int(net),
+        "marketplace_net_amount_minor": marketplace_net,
     }
 
 

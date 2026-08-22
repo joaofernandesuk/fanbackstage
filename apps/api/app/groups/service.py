@@ -486,5 +486,6 @@ async def group_financial_dashboard(
             "subscriptions": source_values.get("subscription_charge", 0),
             "messaging": source_values.get("messaging_charge", 0),
             "private_live": source_values.get("private_live_session", 0),
+            "marketplace": source_values.get("marketplace_order", 0),
         },
     }

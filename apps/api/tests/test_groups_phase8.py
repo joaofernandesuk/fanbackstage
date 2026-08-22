@@ -145,6 +145,7 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
             "subscriptions": 0,
             "messaging": 0,
             "private_live": 0,
+            "marketplace": 0,
         },
     }
     membership.affiliation_public = True
