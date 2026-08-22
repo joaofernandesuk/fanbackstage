@@ -16,9 +16,9 @@ Phased implementation and engineering acceptance gates. Codex should implement o
 | 7 - Streaming | Public rooms, chat, tips, private 1:1, 2-to-1, session billing. |
 | 8 - Groups/Agencies | Invitations, delegated permissions, versioned contracts, immutable historical splits. |
 | 9 - Marketplace | Products, orders, fulfilment/privacy, digital and physical products. |
-| 10 - Discovery | Search, filters, ranking, recommendations foundation. |
-| 11 - Featuring | Surfaces, slot inventory, bookings, paid placements. |
-| 12 - Referral/Affiliate | Attribution, rewards, earnings and fraud controls. |
+| 10 - Referrals/Affiliates | Attribution, rewards, earnings and fraud controls. |
+| 11 - Discovery | Search, filters, ranking, recommendations foundation. |
+| 12 - Featuring | Surfaces, slot inventory, bookings, paid placements. |
 | 13 - Trust & Safety expansion | Reporting, moderation cases, appeals, consent/release workflows. |
 | 14 - Analytics/BI | Creator, group and platform dashboards and attribution. |
 | 15 - Notifications & Email | Central transactional and marketing notification orchestration, preference/consent controls, provider webhooks, delivery/suppression handling and auditability. |

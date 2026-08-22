@@ -14,6 +14,14 @@ Referral programmes and affiliate attribution must have durable campaign provena
 
 Creator referral rewards should preferably be funded from the platform commission rather than silently reducing the referred creator's agreed earnings unless terms explicitly say otherwise.
 
+## Phase 10 decisions
+
+- Referral and affiliate rewards are funded exclusively from platform commission. They can never reduce the creator-side distributable, group allocation, or marketplace shipping pass-through.
+- Effective account attribution is the last eligible first-party referral touch within the policy's 30-day default window. The first touch is retained for analytics; direct/internal navigation cannot replace an eligible referral touch.
+- Signup attribution is a signed, immutable snapshot. Existing accounts are not re-attributed through later referral links.
+- Subscription rewards use a policy-snapshotted, admin-configurable 90-day window measured from the first successful attributed subscription payment; it is timestamp-based, not period-count based.
+- Creator-to-creator referrals are represented as a deferred program type only. They are paused by default and create no financial reward until a separately approved milestone policy exists.
+
 
 ## 24.2 Referral tracking
 

@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.core.rate_limit import enforce_auth_rate_limit
 from app.integrations.email import email_provider
 from app.models.identity import TokenPurpose, User
+from app.referrals.service import ATTRIBUTION_COOKIE_NAME, snapshot_signup_attribution
 from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -49,6 +50,7 @@ async def register(payload: RegisterRequest, request: Request, db: Db) -> UserRe
         user, token = await service.register(
             db, str(payload.email), payload.password, request.state.correlation_id
         )
+        await snapshot_signup_attribution(db, user, request.cookies.get(ATTRIBUTION_COOKIE_NAME))
         await db.commit()
         await email_provider.send_security_link(user.email, "/verify-email", token)
         await db.refresh(user, ["roles"])

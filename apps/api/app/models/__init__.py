@@ -47,6 +47,14 @@ from app.models.messaging import (
     PendingMessageSend,
     UserBlock,
 )
+from app.models.referral import (
+    AffiliatePartner,
+    ReferralCommissionPolicy,
+    ReferralLink,
+    ReferralProgram,
+    ReferralTouch,
+    SignupAttribution,
+)
 from app.models.social import (
     CreatorFeedSettings,
     FeedPost,
@@ -83,6 +91,7 @@ from app.models.subscription import (
 )
 
 __all__ = [
+    "AffiliatePartner",
     "AuditEvent",
     "CommissionRule",
     "ContentEntitlement",
@@ -140,9 +149,14 @@ __all__ = [
     "PrivateSessionSettlement",
     "ProviderLiveEvent",
     "Purchase",
+    "ReferralCommissionPolicy",
+    "ReferralLink",
+    "ReferralProgram",
+    "ReferralTouch",
     "Role",
     "SecurityToken",
     "SessionParticipant",
+    "SignupAttribution",
     "SocialReport",
     "Subscription",
     "SubscriptionPeriod",
