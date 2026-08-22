@@ -21,6 +21,7 @@ from app.models.marketplace import (
 )
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
 from app.permissions.policies import Permission, authorize
+from app.referrals import service as referral_service
 from app.schemas.auth import MessageResponse
 from app.schemas.marketplace import (
     MarketplaceHoldPolicyInput,
@@ -31,8 +32,115 @@ from app.schemas.marketplace import (
     ShippingAllowanceInput,
     ShippingAllowanceResponse,
 )
+from app.schemas.referral import (
+    AffiliatePartnerInput,
+    AffiliatePartnerResponse,
+    ReferralLinkInput,
+    ReferralLinkResponse,
+    ReferralPolicyInput,
+    ReferralProgramInput,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.post("/affiliates", response_model=AffiliatePartnerResponse)
+async def create_affiliate(
+    payload: AffiliatePartnerInput, identity: CurrentIdentity, db: Db
+) -> AffiliatePartnerResponse:
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
+    try:
+        partner = await referral_service.create_affiliate_partner(
+            db, identity[0], name=payload.name, external_reference=payload.external_reference
+        )
+        await db.commit()
+        return AffiliatePartnerResponse(
+            id=partner.id,
+            public_id=partner.public_id,
+            name=partner.name,
+            status=partner.status.value,
+        )
+    except referral_service.ReferralError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/referrals/programs")
+async def create_referral_program(
+    payload: ReferralProgramInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
+    try:
+        program = await referral_service.create_program(
+            db,
+            actor_type=referral_service.ReferralActorType(payload.actor_type),
+            program_type=referral_service.ReferralProgramType(payload.program_type),
+            owner_user_id=payload.owner_user_id,
+            owner_creator_id=payload.owner_creator_id,
+            affiliate_partner_id=payload.affiliate_partner_id,
+            terms_reference=payload.terms_reference,
+        )
+        await db.commit()
+        return {"id": program.id, "public_id": program.public_id, "status": program.status.value}
+    except (ValueError, referral_service.ReferralError) as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/referrals/programs/{program_id}/policies")
+async def create_referral_policy(
+    program_id: UUID, payload: ReferralPolicyInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
+    program = await db.get(referral_service.ReferralProgram, program_id)
+    if not program:
+        raise HTTPException(status_code=404, detail="Referral program not found")
+    try:
+        policy = await referral_service.create_policy(
+            db,
+            program,
+            basis_points=payload.basis_points,
+            eligible_revenue_types=payload.eligible_revenue_types,
+            attribution_window_days=payload.attribution_window_days,
+            subscription_reward_window_days=payload.subscription_reward_window_days,
+        )
+        await db.commit()
+        return {"id": policy.id, "public_id": policy.public_id, "version": policy.version}
+    except referral_service.ReferralError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/referrals/programs/{program_id}/links", response_model=ReferralLinkResponse)
+async def create_referral_link(
+    program_id: UUID, payload: ReferralLinkInput, identity: CurrentIdentity, db: Db
+) -> ReferralLinkResponse:
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
+    program = await db.get(referral_service.ReferralProgram, program_id)
+    policy = await db.get(referral_service.ReferralCommissionPolicy, payload.policy_id)
+    if not program or not policy or policy.program_id != program.id:
+        raise HTTPException(status_code=404, detail="Referral program or policy not found")
+    try:
+        link = await referral_service.create_link(
+            db,
+            program,
+            policy,
+            code=payload.code,
+            destination_path=payload.destination_path,
+            source=payload.source,
+            expires_at=payload.expires_at,
+        )
+        await db.commit()
+        return ReferralLinkResponse(
+            public_id=link.public_id,
+            code=link.code,
+            destination_path=link.destination_path,
+            status=link.status.value,
+            policy_id=link.policy_id,
+        )
+    except referral_service.ReferralError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def shipping_allowance_response(
