@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
@@ -720,3 +720,106 @@ async def affiliate_dashboard_allocations(
             .order_by(ReferralCommissionAllocation.allocated_at.desc())
         )
     )
+
+
+async def dashboard(db: AsyncSession, authenticated_user_id: UUID) -> dict[str, object]:
+    """Build an ownership-scoped referral dashboard from immutable allocations.
+
+    The totals deliberately use allocation lifecycle snapshots, which are tied
+    to their source ledger transaction.  They never consult a current program
+    policy, so changing a policy cannot rewrite a previously-earned dashboard.
+    """
+    creator = await db.scalar(
+        select(CreatorProfile).where(CreatorProfile.user_id == authenticated_user_id)
+    )
+    affiliate_ids = list(
+        await db.scalars(
+            select(AffiliatePartner.id).where(AffiliatePartner.owner_user_id == authenticated_user_id)
+        )
+    )
+    allocation_conditions = [
+        ReferralCommissionAllocation.beneficiary_user_id == authenticated_user_id
+    ]
+    program_conditions = [ReferralProgram.owner_user_id == authenticated_user_id]
+    if creator:
+        allocation_conditions.append(
+            ReferralCommissionAllocation.beneficiary_creator_id == creator.id
+        )
+        program_conditions.append(ReferralProgram.owner_creator_id == creator.id)
+    if affiliate_ids:
+        allocation_conditions.append(
+            ReferralCommissionAllocation.beneficiary_affiliate_partner_id.in_(affiliate_ids)
+        )
+        program_conditions.append(ReferralProgram.affiliate_partner_id.in_(affiliate_ids))
+
+    allocations = list(
+        await db.scalars(
+            select(ReferralCommissionAllocation)
+            .where(or_(*allocation_conditions))
+            .order_by(ReferralCommissionAllocation.allocated_at.desc())
+        )
+    )
+    programs = list(
+        await db.scalars(
+            select(ReferralProgram).where(or_(*program_conditions)).order_by(ReferralProgram.created_at)
+        )
+    )
+    program_ids = [program.id for program in programs]
+    links = []
+    if program_ids:
+        links = list(
+            await db.scalars(
+                select(ReferralLink)
+                .where(ReferralLink.program_id.in_(program_ids))
+                .order_by(ReferralLink.created_at.desc())
+            )
+        )
+    conversions_by_link = {
+        link_id: count
+        for link_id, count in (
+            await db.execute(
+                select(SignupAttribution.effective_link_id, func.count(SignupAttribution.id))
+                .where(SignupAttribution.effective_link_id.in_([link.id for link in links]))
+                .group_by(SignupAttribution.effective_link_id)
+            )
+        ).all()
+    } if links else {}
+
+    totals: dict[str, dict[str, int]] = {}
+    for allocation in allocations:
+        bucket = totals.setdefault(
+            allocation.currency, {"pending_amount_minor": 0, "available_amount_minor": 0, "reversed_amount_minor": 0}
+        )
+        if allocation.reversed_at:
+            bucket["reversed_amount_minor"] += allocation.amount_minor
+        elif allocation.released_at:
+            bucket["available_amount_minor"] += allocation.amount_minor
+        else:
+            bucket["pending_amount_minor"] += allocation.amount_minor
+
+    return {
+        "totals_by_currency": totals,
+        "allocations": [
+            {
+                "id": str(row.id),
+                "revenue_type": row.revenue_type,
+                "currency": row.currency,
+                "amount_minor": row.amount_minor,
+                "platform_fee_minor": row.platform_fee_minor,
+                "allocated_at": row.allocated_at,
+                "released_at": row.released_at,
+                "reversed_at": row.reversed_at,
+            }
+            for row in allocations
+        ],
+        "links": [
+            {
+                "public_id": link.public_id,
+                "code": link.code,
+                "destination_path": link.destination_path,
+                "status": link.status.value,
+                "conversions": conversions_by_link.get(link.id, 0),
+            }
+            for link in links
+        ],
+    }

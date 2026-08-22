@@ -523,3 +523,101 @@ async def test_cross_affiliate_dashboard_isolation_and_suspension_history(db_ses
             occurred_at=datetime.now(UTC),
         )
     ) == ([], None)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_totals_reconcile_to_immutable_referral_ledger_not_current_policy(db_session):
+    referrer, _ = await accounts.register(
+        db_session, "phase10-dashboard-owner@example.com", "strong-password-123", None
+    )
+    program = await referrals.create_program(
+        db_session,
+        actor_type=ReferralActorType.user,
+        program_type=ReferralProgramType.user_user_referral,
+        owner_user_id=referrer.id,
+    )
+    policy = await referrals.create_policy(
+        db_session, program, basis_points=1_000, eligible_revenue_types=["ppv"]
+    )
+    link = await referrals.create_link(
+        db_session, program, policy, code="DASHBOARD-LEDGER", destination_path="/"
+    )
+    _, token = await referrals.resolve_click(db_session, link.code, "dashboard-ledger-session")
+    buyer, _ = await accounts.register(
+        db_session, "phase10-dashboard-buyer@example.com", "strong-password-123", None
+    )
+    assert await referrals.snapshot_signup_attribution(db_session, buyer, token)
+    referral_entries, allocation_metadata = await referrals.revenue_allocation(
+        db_session,
+        buyer_user_id=buyer.id,
+        revenue_type="ppv",
+        currency="EUR",
+        platform_fee_minor=100,
+        occurred_at=datetime.now(UTC),
+    )
+    assert allocation_metadata and allocation_metadata["amount_minor"] == 10
+    clearing = await finance._account(db_session, LedgerAccountKind.platform_clearing, "EUR")
+    source = await finance.post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.ppv_purchase,
+        currency="EUR",
+        idempotency_key="dashboard-ledger-source",
+        reference="dashboard-ledger-source",
+        entries=[(clearing, LedgerDirection.debit, 10), *referral_entries],
+    )
+    allocation = await referrals.record_revenue_allocation(
+        db_session,
+        source_ledger_transaction_id=source.id,
+        allocation=allocation_metadata,
+    )
+    assert allocation
+
+    pending_dashboard = await referrals.dashboard(db_session, referrer.id)
+    assert pending_dashboard["totals_by_currency"] == {
+        "EUR": {
+            "pending_amount_minor": 10,
+            "available_amount_minor": 0,
+            "reversed_amount_minor": 0,
+        }
+    }
+    assert pending_dashboard["links"] == [
+        {
+            "public_id": link.public_id,
+            "code": link.code,
+            "destination_path": "/",
+            "status": "active",
+            "conversions": 1,
+        }
+    ]
+
+    release_entries, released_allocation = await referrals.release_entries(db_session, source.id)
+    assert released_allocation == allocation
+    await finance.post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.earnings_release,
+        currency="EUR",
+        idempotency_key="dashboard-ledger-release",
+        reference="dashboard-ledger-release",
+        entries=release_entries,
+        reversal_of_transaction_id=source.id,
+    )
+    allocation.released_at = datetime.now(UTC)
+
+    # An attempted future policy edit cannot alter the snapshot-based dashboard.
+    policy.basis_points = 9_000
+    available_dashboard = await referrals.dashboard(db_session, referrer.id)
+    assert available_dashboard["totals_by_currency"]["EUR"] == {
+        "pending_amount_minor": 0,
+        "available_amount_minor": 10,
+        "reversed_amount_minor": 0,
+    }
+    available_balance = await db_session.scalar(
+        select(func.coalesce(func.sum(LedgerEntry.amount_minor), 0))
+        .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+        .where(
+            LedgerAccount.owner_user_id == referrer.id,
+            LedgerAccount.kind == LedgerAccountKind.referrer_available,
+            LedgerEntry.direction == LedgerDirection.credit,
+        )
+    )
+    assert available_balance == available_dashboard["totals_by_currency"]["EUR"]["available_amount_minor"]
