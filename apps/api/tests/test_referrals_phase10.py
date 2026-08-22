@@ -397,3 +397,41 @@ async def test_last_eligible_touch_wins_and_first_touch_is_retained(db_session):
     # Normal internal navigation creates no new touch, so the established
     # signup attribution cannot be reassigned by later referral traffic.
     assert await referrals.snapshot_signup_attribution(db_session, user, first_token) is None
+
+
+@pytest.mark.asyncio
+async def test_attribution_window_qualifies_at_day_29_and_expires_at_day_31(
+    db_session, monkeypatch
+):
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(referrals, "now", lambda: base)
+    owner, _ = await accounts.register(
+        db_session, "phase10-window-owner@example.com", "strong-password-123", None
+    )
+    program = await referrals.create_program(
+        db_session,
+        actor_type=ReferralActorType.user,
+        program_type=ReferralProgramType.user_user_referral,
+        owner_user_id=owner.id,
+    )
+    policy = await referrals.create_policy(
+        db_session,
+        program,
+        basis_points=100,
+        eligible_revenue_types=["ppv"],
+        attribution_window_days=30,
+    )
+    link = await referrals.create_link(
+        db_session, program, policy, code="WINDOW-EDGE", destination_path="/"
+    )
+    _, token = await referrals.resolve_click(db_session, link.code, "window-edge-session")
+    monkeypatch.setattr(referrals, "now", lambda: base + timedelta(days=29))
+    eligible, _ = await accounts.register(
+        db_session, "phase10-day29@example.com", "strong-password-123", None
+    )
+    assert await referrals.snapshot_signup_attribution(db_session, eligible, token)
+    monkeypatch.setattr(referrals, "now", lambda: base + timedelta(days=31))
+    expired, _ = await accounts.register(
+        db_session, "phase10-day31@example.com", "strong-password-123", None
+    )
+    assert await referrals.snapshot_signup_attribution(db_session, expired, token) is None
