@@ -4,13 +4,16 @@ const apiPort = process.env.E2E_API_PORT ?? "38180";
 const webPort = process.env.E2E_WEB_PORT ?? "38181";
 const apiUrl = process.env.E2E_API_URL ?? `http://127.0.0.1:${apiPort}`;
 const webUrl = process.env.E2E_WEB_URL ?? `http://127.0.0.1:${webPort}`;
+const mailpitUiPort = process.env.E2E_MAILPIT_UI_PORT ?? "8025";
+const mailpitSmtpPort = process.env.E2E_MAILPIT_SMTP_PORT ?? process.env.FANBACKSTAGE_SMTP_PORT ?? "1025";
 const environment = {
   ...process.env,
   FANBACKSTAGE_DATABASE_URL:
     process.env.FANBACKSTAGE_DATABASE_URL ??
     "postgresql+asyncpg://fanbackstage:fanbackstage@127.0.0.1:5432/fanbackstage",
   FANBACKSTAGE_REDIS_URL: process.env.FANBACKSTAGE_REDIS_URL ?? "redis://127.0.0.1:6379/1",
-  FANBACKSTAGE_SMTP_PORT: process.env.FANBACKSTAGE_SMTP_PORT ?? "1025",
+  FANBACKSTAGE_SMTP_PORT: mailpitSmtpPort,
+  E2E_MAILPIT_URL: process.env.E2E_MAILPIT_URL ?? `http://127.0.0.1:${mailpitUiPort}`,
   FANBACKSTAGE_STORAGE_ENDPOINT_URL:
     process.env.FANBACKSTAGE_STORAGE_ENDPOINT_URL ?? "http://127.0.0.1:9000",
   FANBACKSTAGE_WEB_ORIGIN: webUrl,
