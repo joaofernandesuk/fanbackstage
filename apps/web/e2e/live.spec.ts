@@ -20,10 +20,21 @@ async function register(page: import("@playwright/test").Page, email: string, pa
   await page.goto("/register"); await page.getByLabel("Email").fill(email); await page.getByLabel("Password").fill(password); await page.getByRole("button", { name: "Create account" }).click(); await page.goto(await securityLink(email, "/verify-email")); await page.getByRole("button", { name: "Verify email" }).click(); await login(page, email, password);
 }
 
+async function beginCreatorApplication(page: import("@playwright/test").Page, username: string, displayName: string) {
+  await page.getByRole("link", { name: "Become a creator" }).click();
+  await page.getByLabel("Username").fill(username); await page.getByLabel("Display name").fill(displayName);
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(async () => (await api(page, "/creators/me")).body.username, { timeout: 15_000 }).toBe(username);
+  await page.getByRole("button", { name: "Submit application" }).click();
+  await expect.poll(async () => (await api(page, "/creators/me")).body.status, { timeout: 15_000 }).toBe("pending_verification");
+  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await expect.poll(async () => (await api(page, "/creators/me")).body.status, { timeout: 15_000 }).toBe("pending_review");
+}
+
 test("Phase 7 public live uses scoped LiveKit permissions and durable chat", async ({ browser, page }) => {
   const stamp = Date.now(); const password = "phase7-live-password"; const creatorEmail = `phase7-live-${stamp}@example.com`; const username = `live${stamp}`; const liveTitle = `Real stack live ${stamp}`;
   await register(page, creatorEmail, password);
-  await page.getByRole("link", { name: "Become a creator" }).click(); await page.getByLabel("Username").fill(username); await page.getByLabel("Display name").fill("Live creator"); await page.getByRole("button", { name: "Save profile" }).click(); await page.getByRole("button", { name: "Submit application" }).click(); await page.getByRole("button", { name: "Complete development verification" }).click();
+  await beginCreatorApplication(page, username, "Live creator");
   await page.goto("/account"); await page.getByRole("button", { name: "Log out" }).click(); await login(page, admin.email, admin.password);
   const applications = await api(page, "/admin/creator-applications"); const application = applications.body.find((row: { username: string }) => row.username === username); expect(application).toBeTruthy(); expect((await api(page, `/admin/creator-applications/${application.id}/approve`, "POST")).status).toBe(200);
   await page.getByRole("button", { name: "Log out" }).click(); await login(page, creatorEmail, password); await page.goto("/creator-studio");
@@ -42,7 +53,7 @@ test("Phase 7 private 1:1 uses signed LiveKit presence and settles once", async 
   test.setTimeout(120_000);
   const stamp = Date.now(); const password = "phase7-private-password"; const creatorEmail = `phase7-private-${stamp}@example.com`; const viewerEmail = `phase7-private-viewer-${stamp}@example.com`; const username = `private${stamp}`;
   await register(page, creatorEmail, password);
-  await page.getByRole("link", { name: "Become a creator" }).click(); await page.getByLabel("Username").fill(username); await page.getByLabel("Display name").fill("Private creator"); await page.getByRole("button", { name: "Save profile" }).click(); await page.getByRole("button", { name: "Submit application" }).click(); await page.getByRole("button", { name: "Complete development verification" }).click();
+  await beginCreatorApplication(page, username, "Private creator");
   await page.goto("/account"); await page.getByRole("button", { name: "Log out" }).click(); await login(page, admin.email, admin.password);
   const applications = await api(page, "/admin/creator-applications"); const application = applications.body.find((row: { username: string }) => row.username === username); expect(application).toBeTruthy(); expect((await api(page, `/admin/creator-applications/${application.id}/approve`, "POST")).status).toBe(200);
   await page.getByRole("button", { name: "Log out" }).click(); await login(page, creatorEmail, password); await page.goto("/creator-onboarding"); await page.getByRole("button", { name: "Save profile" }).click(); await page.goto("/creator-studio");
