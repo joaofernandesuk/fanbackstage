@@ -1,5 +1,8 @@
 """Permanent Phase 9 anti-abuse coverage for physical-order shipping treatment."""
 
+import hashlib
+import hmac
+import json
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -9,6 +12,7 @@ from sqlalchemy import select
 
 from app.accounts import service as accounts
 from app.api.routes import admin as admin_routes
+from app.core.config import get_settings
 from app.creators import service as creators
 from app.finance import service as finance
 from app.groups import service as groups
@@ -22,6 +26,7 @@ from app.models.marketplace import (
     MarketplaceCondition,
     MarketplaceListing,
     MarketplaceListingStatus,
+    MarketplaceOrderStatus,
     MarketplaceShippingAllowance,
     MarketplaceShippingMode,
     ShippingAllowanceScope,
@@ -509,11 +514,17 @@ async def test_shipping_address_is_restricted_and_access_is_audited_without_addr
         },
     )
     buyer_address = await marketplace.shipping_address_for_order(db_session, order.id, buyer)
+    assert buyer_address.line1 == "1 Private Street"
+    with pytest.raises(PermissionError, match="until payment succeeds"):
+        await marketplace.shipping_address_for_order(db_session, order.id, creator_user)
+    attempt = await db_session.get(PaymentAttempt, order.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    assert await finance.process_development_webhook(db_session, payload, signature) is None
     seller_address = await marketplace.shipping_address_for_order(
         db_session, order.id, creator_user
     )
     assert buyer_address.id == seller_address.id
-    assert buyer_address.line1 == "1 Private Street"
     with pytest.raises(PermissionError, match="shipping address permission"):
         await marketplace.shipping_address_for_order(db_session, order.id, another_buyer)
     with pytest.raises(PermissionError, match="shipping address permission"):
@@ -561,3 +572,75 @@ async def test_shipping_address_is_restricted_and_access_is_audited_without_addr
     ).all()
     assert len(audit) == 4
     assert all("Private Street" not in str(event.metadata_json) for event in audit)
+
+
+@pytest.mark.asyncio
+async def test_verified_payment_consumes_once_and_failure_or_expiry_releases_stock(db_session):
+    creator_user, creator = await approved_creator(db_session, "reservation-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "reservation-buyer@example.com", "strong-password-123", None
+    )
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AI")
+    paid_listing = await listing(db_session, creator, creator_user, shipping=100)
+    paid_listing.quantity_available = 1
+    paid_order = await marketplace.initiate_order(
+        db_session, buyer, paid_listing.id, 1, "AI", "reservation-paid"
+    )
+    assert paid_listing.quantity_available == 0
+    paid_attempt = await db_session.get(PaymentAttempt, paid_order.payment_attempt_id)
+    assert paid_attempt
+    success_payload, success_signature = finance.development_webhook_payload(paid_attempt)
+    assert (
+        await finance.process_development_webhook(db_session, success_payload, success_signature)
+        is None
+    )
+    assert paid_order.status is MarketplaceOrderStatus.paid
+    assert paid_listing.quantity_available == 0
+    assert paid_order.ledger_transaction_id
+    assert (
+        await finance.process_development_webhook(db_session, success_payload, success_signature)
+        is None
+    )
+    assert paid_listing.quantity_available == 0
+
+    failed_listing = await listing(db_session, creator, creator_user, shipping=100)
+    failed_listing.quantity_available = 1
+    failed_order = await marketplace.initiate_order(
+        db_session, buyer, failed_listing.id, 1, "AI", "reservation-failed"
+    )
+    failed_attempt = await db_session.get(PaymentAttempt, failed_order.payment_attempt_id)
+    assert failed_attempt
+    failure_payload = json.dumps(
+        {
+            "id": f"failed-{failed_attempt.id}",
+            "type": "payment.failed",
+            "payment_reference": failed_attempt.provider_reference,
+        },
+        separators=(",", ":"),
+    ).encode()
+    failure_signature = hmac.new(
+        get_settings().payment_webhook_secret.encode(), failure_payload, hashlib.sha256
+    ).hexdigest()
+    assert (
+        await finance.process_development_webhook(db_session, failure_payload, failure_signature)
+        is None
+    )
+    assert failed_order.status is MarketplaceOrderStatus.cancelled
+    assert failed_listing.quantity_available == 1
+    assert (
+        await finance.process_development_webhook(db_session, failure_payload, failure_signature)
+        is None
+    )
+    assert failed_listing.quantity_available == 1
+
+    expired_listing = await listing(db_session, creator, creator_user, shipping=100)
+    expired_listing.quantity_available = 1
+    expired_order = await marketplace.initiate_order(
+        db_session, buyer, expired_listing.id, 1, "AI", "reservation-expired"
+    )
+    expired_order.reservation_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert await marketplace.expire_marketplace_reservations(db_session) == 1
+    assert expired_order.status is MarketplaceOrderStatus.cancelled
+    assert expired_listing.quantity_available == 1
+    assert await marketplace.expire_marketplace_reservations(db_session) == 0

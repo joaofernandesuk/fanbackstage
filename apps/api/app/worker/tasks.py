@@ -98,6 +98,21 @@ def release_marketplace_earnings() -> dict[str, int]:
 
 
 @celery_app.task
+def expire_marketplace_reservations() -> dict[str, int]:
+    """Release expired marketplace stock reservations without process-local timers."""
+    from app.db.session import SessionLocal
+    from app.marketplace.service import expire_marketplace_reservations as expire
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            released = await expire(session)
+            await session.commit()
+            return released
+
+    return {"released": run_async(run())}
+
+
+@celery_app.task
 def process_subscription_renewals() -> dict[str, int]:
     """Create one replay-safe renewal attempt per due subscription period."""
     from app.db.session import SessionLocal

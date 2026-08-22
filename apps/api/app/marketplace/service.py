@@ -693,6 +693,8 @@ async def shipping_address_for_order(
     is_admin = any(role.name in {"admin", "super_admin"} for role in actor.roles)
     if not (is_buyer or seller or delegated or is_admin):
         raise PermissionError("Marketplace shipping address permission denied")
+    if (seller or delegated) and order.status is MarketplaceOrderStatus.awaiting_payment:
+        raise PermissionError("Shipping address is unavailable until payment succeeds")
     address = await db.scalar(
         select(MarketplaceShippingAddress).where(MarketplaceShippingAddress.order_id == order.id)
     )
@@ -707,6 +709,63 @@ async def shipping_address_for_order(
         metadata={"access_kind": "buyer" if is_buyer else "seller_or_support"},
     )
     return address
+
+
+async def release_order_reservation(
+    db: AsyncSession, order_id: UUID, reason: str
+) -> MarketplaceOrder:
+    """Restore reserved stock once for an unconfirmed marketplace payment."""
+    order = await db.scalar(
+        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
+    )
+    if not order:
+        raise MarketplaceError("Marketplace order not found")
+    if order.status is not MarketplaceOrderStatus.awaiting_payment:
+        return order
+    listing = await db.scalar(
+        select(MarketplaceListing)
+        .where(MarketplaceListing.id == order.listing_id)
+        .with_for_update()
+    )
+    if not listing:
+        raise MarketplaceError("Marketplace listing is unavailable")
+    listing.quantity_available += order.quantity
+    order.status = MarketplaceOrderStatus.cancelled
+    attempt = await db.get(PaymentAttempt, order.payment_attempt_id)
+    if attempt and attempt.status is PaymentStatus.pending:
+        attempt.status = PaymentStatus.failed
+    await record_event(
+        db,
+        "marketplace.order_reservation_released",
+        actor_user_id=order.buyer_user_id,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"reason": reason},
+    )
+    return order
+
+
+async def expire_marketplace_reservations(db: AsyncSession, limit: int = 100) -> int:
+    """Durably cancel expired unconfirmed orders and restore stock under row locks."""
+    rows = (
+        await db.scalars(
+            select(MarketplaceOrder)
+            .where(
+                MarketplaceOrder.status == MarketplaceOrderStatus.awaiting_payment,
+                MarketplaceOrder.reservation_expires_at <= datetime.now(UTC),
+            )
+            .order_by(MarketplaceOrder.reservation_expires_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    released = 0
+    for order in rows:
+        if (
+            await release_order_reservation(db, order.id, "payment_reservation_expired")
+        ).status is (MarketplaceOrderStatus.cancelled):
+            released += 1
+    return released
 
 
 async def settle_order(db: AsyncSession, order: MarketplaceOrder) -> MarketplaceOrder:

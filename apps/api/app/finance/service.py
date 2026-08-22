@@ -346,6 +346,16 @@ async def process_development_webhook(
     webhook_event.payment_attempt_id = attempt.id
     if event["type"] != "payment.succeeded":
         attempt.status = PaymentStatus.failed
+        from app.marketplace.service import release_order_reservation
+        from app.models.marketplace import MarketplaceOrder
+
+        order = await db.scalar(
+            select(MarketplaceOrder)
+            .where(MarketplaceOrder.payment_attempt_id == attempt.id)
+            .with_for_update()
+        )
+        if order:
+            await release_order_reservation(db, order.id, "payment_failed")
         from app.subscriptions.service import fail_payment_attempt
 
         await fail_payment_attempt(db, attempt)
