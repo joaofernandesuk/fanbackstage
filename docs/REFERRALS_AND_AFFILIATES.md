@@ -22,6 +22,29 @@ Creator referral rewards should preferably be funded from the platform commissio
 - Subscription rewards use a policy-snapshotted, admin-configurable 90-day window measured from the first successful attributed subscription payment; it is timestamp-based, not period-count based.
 - Creator-to-creator referrals are represented as a deferred program type only. They are paused by default and create no financial reward until a separately approved milestone policy exists.
 
+## Central financial allocation boundary
+
+- Every eligible settlement resolves at most one referral allocation from the
+  buyer's immutable signup-attribution policy snapshot.
+- The reward is credited from the platform-fee side of the same balanced
+  ledger transaction. The creator and group entries are built independently
+  from the full creator-side distributable and are therefore identical with or
+  without attribution.
+- Referral reward is capped by the source event's platform fee. Invalid policy
+  snapshots fail closed; no event can create a negative platform net.
+- PPV, subscriptions, paid messaging, private live, and marketplace orders
+  use the central resolver. Marketplace pass-through shipping is excluded
+  because its platform fee is zero; only its commissionable base can fund a
+  referral reward.
+- Allocation rows retain the original source ledger transaction, policy
+  snapshot, beneficiary, currency, platform fee, and amount. Their commercial
+  fields are database-immutable; release and reversal timestamps are the only
+  lifecycle state that can change.
+- Marketplace referral rewards remain pending until the order's own
+  delivery-and-hold release. Refunds and chargebacks debit the exact original
+  pending or available beneficiary account rather than resolving a current
+  policy, contract, or group membership.
+
 
 ## 24.2 Referral tracking
 
