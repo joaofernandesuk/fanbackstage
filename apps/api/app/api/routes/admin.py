@@ -155,6 +155,17 @@ async def marketplace_audit(identity: CurrentIdentity, db: Db) -> list[dict]:
     ]
 
 
+@router.post("/marketplace/earnings/release", response_model=dict)
+async def release_eligible_marketplace_earnings(
+    identity: CurrentIdentity, db: Db
+) -> dict:
+    """Admin-operated replay-safe catch-up; scheduled workers use the same service."""
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    released = await marketplace_service.release_eligible_marketplace_earnings(db)
+    await db.commit()
+    return {"released": released}
+
+
 @router.get("/marketplace/reports")
 async def marketplace_reports(identity: CurrentIdentity, db: Db) -> list[dict]:
     authorize(identity[0], Permission.MODERATION_ACCESS)
