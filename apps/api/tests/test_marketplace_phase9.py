@@ -20,7 +20,12 @@ from app.marketplace import service as marketplace
 from app.models.audit import AuditEvent
 from app.models.content import ModerationStatus
 from app.models.creator import CreatorStatus
-from app.models.finance import CommissionRule, LedgerTransaction, PaymentAttempt
+from app.models.finance import (
+    CommissionRule,
+    LedgerTransaction,
+    LedgerTransactionType,
+    PaymentAttempt,
+)
 from app.models.groups import GroupManagerMembership, GroupPermission, GroupPermissionGrant
 from app.models.marketplace import (
     MarketplaceCondition,
@@ -667,3 +672,126 @@ async def test_verified_payment_consumes_once_and_failure_or_expiry_releases_sto
     assert expired_order.status is MarketplaceOrderStatus.cancelled
     assert expired_listing.quantity_available == 1
     assert await marketplace.expire_marketplace_reservations(db_session) == 0
+
+
+@pytest.mark.asyncio
+async def test_unshipped_refund_reverses_original_pending_split_and_restores_stock_once(db_session):
+    manager, _ = await accounts.register(
+        db_session, "refund-manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "refund-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "refund-buyer@example.com", "strong-password-123", None
+    )
+    group = await groups.create_group(db_session, manager, "Refund group", "refund-group", 5_000, None)
+    membership = await groups.invite_creator(db_session, group.id, manager, creator.id, 5_000, [])
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AJ")
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    row.quantity_available = 1
+    order = await marketplace.initiate_order(db_session, buyer, row.id, 1, "AJ", "refund-once")
+    attempt = await db_session.get(PaymentAttempt, order.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    original = await db_session.get(LedgerTransaction, order.ledger_transaction_id)
+    assert original and original.metadata_json["group_amount_minor"] != "0"
+    assert row.quantity_available == 0
+
+    refunded = await marketplace.cancel_order(db_session, order.id, creator_user, creator.id, "out of stock")
+    assert refunded.status is MarketplaceOrderStatus.refunded
+    assert row.quantity_available == 1
+    assert (await finance.creator_balances(db_session, creator.id, "EUR"))["pending_amount_minor"] == 0
+    reversal = await db_session.scalar(
+        select(LedgerTransaction).where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.refund,
+            LedgerTransaction.reversal_of_transaction_id == original.id,
+        )
+    )
+    assert reversal and reversal.metadata_json["original_group_contract_id"] == original.metadata_json[
+        "group_contract_id"
+    ]
+    assert await marketplace.refund_order(db_session, order.id, creator_user, "duplicate") is refunded
+    assert row.quantity_available == 1
+    assert (
+        await db_session.scalar(
+            select(LedgerTransaction).where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.refund
+            )
+        )
+    ).id == reversal.id
+
+
+@pytest.mark.asyncio
+async def test_dispute_and_chargeback_block_release_and_refund_after_release_compensates(db_session):
+    creator_user, creator = await approved_creator(db_session, "dispute-creator@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "dispute-buyer@example.com", "strong-password-123", None
+    )
+    admin, _ = await accounts.register(
+        db_session, "dispute-admin@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
+    await marketplace_commission(db_session)
+    await allowance(db_session, 100, "AK")
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    order = await marketplace.initiate_order(db_session, buyer, row.id, 1, "AK", "dispute-release")
+    attempt = await db_session.get(PaymentAttempt, order.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    await marketplace.mark_order_shipped(db_session, order.id, creator_user, creator.id, "CTT", "DISC-1")
+    await marketplace.confirm_order_delivery(db_session, order.id, buyer)
+    order.earnings_hold_until = datetime.now(UTC) - timedelta(seconds=1)
+    await marketplace.open_order_dispute(db_session, order.id, buyer, "delivery issue")
+    assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
+    await marketplace.resolve_order_dispute(db_session, order.id, admin, False, "resolved")
+    assert await marketplace.release_eligible_marketplace_earnings(db_session) == 1
+    assert (await finance.creator_balances(db_session, creator.id, "EUR"))["available_amount_minor"] == 500
+    original = await db_session.get(LedgerTransaction, order.ledger_transaction_id)
+    assert original
+    await marketplace.refund_order(db_session, order.id, admin, "post-delivery refund")
+    assert order.status is MarketplaceOrderStatus.refunded
+    assert (await finance.creator_balances(db_session, creator.id, "EUR"))["available_amount_minor"] == 0
+    refund = await db_session.scalar(
+        select(LedgerTransaction).where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.refund,
+            LedgerTransaction.reversal_of_transaction_id == original.id,
+        )
+    )
+    assert refund
+
+    chargeback_listing = await listing(db_session, creator, creator_user, shipping=100)
+    chargeback = await marketplace.initiate_order(
+        db_session, buyer, chargeback_listing.id, 1, "AK", "chargeback-block"
+    )
+    chargeback_attempt = await db_session.get(PaymentAttempt, chargeback.payment_attempt_id)
+    assert chargeback_attempt
+    chargeback_payload, chargeback_signature = finance.development_webhook_payload(chargeback_attempt)
+    await finance.process_development_webhook(db_session, chargeback_payload, chargeback_signature)
+    await marketplace.mark_order_shipped(
+        db_session, chargeback.id, creator_user, creator.id, "CTT", "CB-1"
+    )
+    await marketplace.confirm_order_delivery(db_session, chargeback.id, buyer)
+    chargeback.earnings_hold_until = datetime.now(UTC) - timedelta(seconds=1)
+    provider_chargeback = json.dumps(
+        {
+            "id": f"chargeback-{chargeback_attempt.id}",
+            "type": "payment.chargeback",
+            "payment_reference": chargeback_attempt.provider_reference,
+        },
+        separators=(",", ":"),
+    ).encode()
+    provider_chargeback_signature = hmac.new(
+        get_settings().payment_webhook_secret.encode(), provider_chargeback, hashlib.sha256
+    ).hexdigest()
+    await finance.process_development_webhook(
+        db_session, provider_chargeback, provider_chargeback_signature
+    )
+    # Replay of the same verified provider event must not make another reversal.
+    await finance.process_development_webhook(
+        db_session, provider_chargeback, provider_chargeback_signature
+    )
+    assert await marketplace.release_eligible_marketplace_earnings(db_session) == 0
+    assert chargeback.status is MarketplaceOrderStatus.chargeback

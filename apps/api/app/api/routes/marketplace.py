@@ -18,8 +18,10 @@ from app.models.marketplace import (
 from app.permissions.policies import Permission, authorize
 from app.schemas.marketplace import (
     MarketplaceCheckoutInput,
+    MarketplaceDisputeResolutionInput,
     MarketplaceListingCreate,
     MarketplaceListingResponse,
+    MarketplaceOrderReasonInput,
     MarketplaceOrderResponse,
     MarketplaceShipmentInput,
     MarketplaceShippingAddressResponse,
@@ -229,6 +231,92 @@ async def order_delivered(
 ) -> MarketplaceOrderResponse:
     try:
         order = await service.confirm_order_delivery(db, order_id, identity[0])
+        await db.commit()
+        return order_response(order)
+    except service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/orders/{order_id}/cancel", response_model=MarketplaceOrderResponse)
+async def cancel_order(
+    order_id: UUID,
+    payload: MarketplaceOrderReasonInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> MarketplaceOrderResponse:
+    creator = await approved_creator(db, identity[0])
+    try:
+        order = await service.cancel_order(db, order_id, identity[0], creator.id, payload.reason)
+        await db.commit()
+        return order_response(order)
+    except service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/orders/{order_id}/disputes", response_model=MarketplaceOrderResponse)
+async def dispute_order(
+    order_id: UUID,
+    payload: MarketplaceOrderReasonInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> MarketplaceOrderResponse:
+    try:
+        order = await service.open_order_dispute(db, order_id, identity[0], payload.reason)
+        await db.commit()
+        return order_response(order)
+    except service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/orders/{order_id}/refund", response_model=MarketplaceOrderResponse)
+async def admin_refund_order(
+    order_id: UUID,
+    payload: MarketplaceOrderReasonInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> MarketplaceOrderResponse:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    try:
+        order = await service.refund_order(db, order_id, identity[0], payload.reason)
+        await db.commit()
+        return order_response(order)
+    except service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/orders/{order_id}/chargeback", response_model=MarketplaceOrderResponse)
+async def admin_chargeback_order(
+    order_id: UUID,
+    payload: MarketplaceOrderReasonInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> MarketplaceOrderResponse:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    try:
+        order = await service.chargeback_order(db, order_id, identity[0], payload.reason)
+        await db.commit()
+        return order_response(order)
+    except service.MarketplaceError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/orders/{order_id}/dispute-resolution", response_model=MarketplaceOrderResponse)
+async def admin_resolve_order_dispute(
+    order_id: UUID,
+    payload: MarketplaceDisputeResolutionInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> MarketplaceOrderResponse:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    try:
+        order = await service.resolve_order_dispute(
+            db, order_id, identity[0], payload.refund, payload.reason
+        )
         await db.commit()
         return order_response(order)
     except service.MarketplaceError as exc:

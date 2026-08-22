@@ -129,6 +129,14 @@ class MarketplaceShipmentInput(BaseModel):
     tracking_reference: str | None = Field(default=None, max_length=255)
 
 
+class MarketplaceOrderReasonInput(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class MarketplaceDisputeResolutionInput(MarketplaceOrderReasonInput):
+    refund: bool
+
+
 class MarketplaceTrackingEventResponse(BaseModel):
     event_type: str
     carrier: str | None

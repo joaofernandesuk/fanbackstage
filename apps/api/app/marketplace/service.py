@@ -6,7 +6,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
@@ -24,6 +24,7 @@ from app.models.creator import CreatorProfile
 from app.models.finance import (
     LedgerAccountKind,
     LedgerDirection,
+    LedgerEntry,
     LedgerTransaction,
     LedgerTransactionType,
     PaymentAttempt,
@@ -1041,3 +1042,265 @@ async def release_eligible_marketplace_earnings(db: AsyncSession, limit: int = 1
         if await release_order_earnings(db, order):
             released += 1
     return released
+
+
+async def _account_balance(db: AsyncSession, account_id: UUID) -> int:
+    value = await db.scalar(
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (LedgerEntry.direction == LedgerDirection.credit, LedgerEntry.amount_minor),
+                        else_=-LedgerEntry.amount_minor,
+                    )
+                ),
+                0,
+            )
+        ).where(LedgerEntry.ledger_account_id == account_id)
+    )
+    return int(value or 0)
+
+
+async def _reverse_order_allocation(
+    db: AsyncSession,
+    order: MarketplaceOrder,
+    *,
+    transaction_type: LedgerTransactionType,
+    reason: str,
+) -> None:
+    if not order.ledger_transaction_id:
+        raise MarketplaceError("Only settled marketplace orders can be reversed")
+    original = await db.get(LedgerTransaction, order.ledger_transaction_id)
+    assert original
+    creator_amount = int(original.metadata_json["creator_amount_minor"]) + int(
+        original.metadata_json.get("shipping_pass_through_minor", 0)
+    )
+    group_amount = int(original.metadata_json.get("group_amount_minor", 0))
+    clearing = await _account(db, LedgerAccountKind.platform_clearing, order.currency)
+    revenue = await _account(db, LedgerAccountKind.platform_revenue, order.currency)
+    creator_pending = await _account(
+        db, LedgerAccountKind.creator_pending, order.currency, order.seller_creator_id
+    )
+    creator_available = await _account(
+        db, LedgerAccountKind.creator_available, order.currency, order.seller_creator_id
+    )
+    pending_reversal = min(max(await _account_balance(db, creator_pending.id), 0), creator_amount)
+    entries = [
+        (clearing, LedgerDirection.credit, order.total_paid_minor),
+        (revenue, LedgerDirection.debit, order.platform_fee_minor),
+    ]
+    if pending_reversal:
+        entries.append((creator_pending, LedgerDirection.debit, pending_reversal))
+    if creator_amount - pending_reversal:
+        entries.append(
+            (creator_available, LedgerDirection.debit, creator_amount - pending_reversal)
+        )
+    if group_amount:
+        group_id = original.metadata_json.get("group_id")
+        if not group_id:
+            raise MarketplaceError("Marketplace group allocation snapshot is incomplete")
+        group_pending = await _account(
+            db, LedgerAccountKind.group_pending, order.currency, owner_group_id=UUID(group_id)
+        )
+        group_available = await _account(
+            db, LedgerAccountKind.group_available, order.currency, owner_group_id=UUID(group_id)
+        )
+        group_pending_reversal = min(
+            max(await _account_balance(db, group_pending.id), 0), group_amount
+        )
+        if group_pending_reversal:
+            entries.append((group_pending, LedgerDirection.debit, group_pending_reversal))
+        if group_amount - group_pending_reversal:
+            entries.append(
+                (group_available, LedgerDirection.debit, group_amount - group_pending_reversal)
+            )
+    await post_entries(
+        db,
+        transaction_type=transaction_type,
+        currency=order.currency,
+        idempotency_key=f"marketplace-{transaction_type.value}:{order.id}",
+        reference=f"marketplace_{transaction_type.value}:{order.id}",
+        reversal_of_transaction_id=original.id,
+        entries=entries,
+        metadata={
+            "marketplace_order_id": str(order.id),
+            "reason": reason,
+            "original_ledger_transaction_id": str(original.id),
+            "original_group_contract_id": original.metadata_json.get("group_contract_id", ""),
+            "creator_amount_minor": str(creator_amount),
+            "group_amount_minor": str(group_amount),
+        },
+    )
+
+
+async def refund_order(
+    db: AsyncSession, order_id: UUID, actor: User | None, reason: str
+) -> MarketplaceOrder:
+    order = await db.scalar(
+        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
+    )
+    if not order:
+        raise MarketplaceError("Marketplace order not found")
+    if order.status is MarketplaceOrderStatus.refunded:
+        return order
+    if order.status in {MarketplaceOrderStatus.awaiting_payment, MarketplaceOrderStatus.cancelled}:
+        raise MarketplaceError("Unsettled marketplace order cannot be refunded")
+    if order.status is MarketplaceOrderStatus.chargeback:
+        raise MarketplaceError("Chargeback marketplace order cannot be refunded")
+    # A dispute intentionally obscures the operational status while it is open.
+    # Shipment is the durable boundary for physical stock: a refund of an order
+    # that has never shipped restores the original units exactly once.
+    restore_stock = order.shipped_at is None
+    await _reverse_order_allocation(
+        db, order, transaction_type=LedgerTransactionType.refund, reason=reason
+    )
+    if restore_stock:
+        listing = await db.scalar(
+            select(MarketplaceListing)
+            .where(MarketplaceListing.id == order.listing_id)
+            .with_for_update()
+        )
+        assert listing
+        listing.quantity_available += order.quantity
+    order.status = MarketplaceOrderStatus.refunded
+    order.earnings_release_status = MarketplaceEarningsReleaseStatus.blocked
+    order.release_block_reason = "refunded"
+    attempt = await db.get(PaymentAttempt, order.payment_attempt_id)
+    if attempt:
+        attempt.status = PaymentStatus.refunded
+    await record_event(
+        db,
+        "marketplace.order_refunded",
+        actor_user_id=actor.id if actor else None,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"reason": reason, "stock_restored": restore_stock},
+    )
+    return order
+
+
+async def cancel_order(
+    db: AsyncSession, order_id: UUID, actor: User, creator_id: UUID, reason: str
+) -> MarketplaceOrder:
+    """Seller cancellation is permitted only before the immutable shipment event."""
+    order = await db.scalar(
+        select(MarketplaceOrder)
+        .where(
+            MarketplaceOrder.id == order_id,
+            MarketplaceOrder.seller_creator_id == creator_id,
+        )
+        .with_for_update()
+    )
+    if not order or order.status not in {MarketplaceOrderStatus.paid, MarketplaceOrderStatus.processing}:
+        raise MarketplaceError("Only an unshipped paid order can be cancelled")
+    return await refund_order(db, order.id, actor, reason)
+
+
+async def open_order_dispute(
+    db: AsyncSession, order_id: UUID, buyer: User, reason: str
+) -> MarketplaceOrder:
+    order = await db.scalar(
+        select(MarketplaceOrder)
+        .where(MarketplaceOrder.id == order_id, MarketplaceOrder.buyer_user_id == buyer.id)
+        .with_for_update()
+    )
+    if not order or order.status not in {
+        MarketplaceOrderStatus.paid,
+        MarketplaceOrderStatus.processing,
+        MarketplaceOrderStatus.shipped,
+        MarketplaceOrderStatus.delivered,
+    }:
+        raise MarketplaceError("Marketplace order cannot be disputed")
+    return await block_order_for_dispute(db, order, buyer.id, reason)
+
+
+async def block_order_for_dispute(
+    db: AsyncSession,
+    order: MarketplaceOrder,
+    actor_user_id: UUID | None,
+    reason: str,
+) -> MarketplaceOrder:
+    """Persist a provider or buyer dispute as an earnings-release blocker."""
+    if order.status in {MarketplaceOrderStatus.refunded, MarketplaceOrderStatus.chargeback}:
+        return order
+    if order.status is MarketplaceOrderStatus.disputed:
+        return order
+    if order.status not in {
+        MarketplaceOrderStatus.paid,
+        MarketplaceOrderStatus.processing,
+        MarketplaceOrderStatus.shipped,
+        MarketplaceOrderStatus.delivered,
+    }:
+        raise MarketplaceError("Marketplace order cannot be disputed")
+    order.status = MarketplaceOrderStatus.disputed
+    order.earnings_release_status = MarketplaceEarningsReleaseStatus.blocked
+    order.release_block_reason = "unresolved_dispute"
+    await record_event(
+        db,
+        "marketplace.order_disputed",
+        actor_user_id=actor_user_id,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"reason": reason},
+    )
+    return order
+
+
+async def resolve_order_dispute(
+    db: AsyncSession, order_id: UUID, actor: User | None, refund: bool, reason: str
+) -> MarketplaceOrder:
+    order = await db.scalar(
+        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
+    )
+    if not order or order.status is not MarketplaceOrderStatus.disputed:
+        raise MarketplaceError("Marketplace dispute is not open")
+    if refund:
+        return await refund_order(db, order.id, actor, reason)
+    # The timestamps are append-only fulfilment facts, so they safely restore
+    # the eligible operational state without trusting a caller-supplied state.
+    order.status = (
+        MarketplaceOrderStatus.delivered if order.delivered_at else MarketplaceOrderStatus.shipped
+    )
+    order.earnings_release_status = MarketplaceEarningsReleaseStatus.pending
+    order.release_block_reason = None
+    await record_event(
+        db,
+        "marketplace.dispute_resolved",
+        actor_user_id=actor.id if actor else None,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"resolution": "seller_favour", "reason": reason},
+    )
+    return order
+
+
+async def chargeback_order(
+    db: AsyncSession, order_id: UUID, actor: User | None, reason: str
+) -> MarketplaceOrder:
+    order = await db.scalar(
+        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
+    )
+    if not order:
+        raise MarketplaceError("Marketplace order not found")
+    if order.status is MarketplaceOrderStatus.chargeback:
+        return order
+    if order.status is MarketplaceOrderStatus.refunded:
+        raise MarketplaceError("Refunded marketplace order cannot be charged back")
+    await _reverse_order_allocation(
+        db, order, transaction_type=LedgerTransactionType.chargeback, reason=reason
+    )
+    order.status = MarketplaceOrderStatus.chargeback
+    order.earnings_release_status = MarketplaceEarningsReleaseStatus.blocked
+    order.release_block_reason = "chargeback"
+    attempt = await db.get(PaymentAttempt, order.payment_attempt_id)
+    if attempt:
+        attempt.status = PaymentStatus.chargeback
+    await record_event(
+        db,
+        "marketplace.order_chargeback",
+        actor_user_id=actor.id if actor else None,
+        target_type="marketplace_order",
+        target_id=str(order.id),
+        metadata={"reason": reason},
+    )
+    return order
