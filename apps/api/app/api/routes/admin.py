@@ -61,7 +61,11 @@ async def create_affiliate(
     authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
     try:
         partner = await referral_service.create_affiliate_partner(
-            db, identity[0], name=payload.name, external_reference=payload.external_reference
+            db,
+            identity[0],
+            name=payload.name,
+            external_reference=payload.external_reference,
+            owner_user_id=payload.owner_user_id,
         )
         await db.commit()
         return affiliate_response(partner)

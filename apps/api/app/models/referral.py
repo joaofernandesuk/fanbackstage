@@ -68,6 +68,9 @@ class AffiliatePartner(UUIDPrimaryKey, Timestamped, Base):
     )
     owner_contact_reference: Mapped[str | None] = mapped_column(String(255))
     external_reference: Mapped[str | None] = mapped_column(String(255), unique=True)
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
     suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

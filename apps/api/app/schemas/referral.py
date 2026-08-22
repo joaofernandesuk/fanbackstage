@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class AffiliatePartnerInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     external_reference: str | None = Field(default=None, max_length=255)
+    owner_user_id: UUID | None = None
 
 
 class AffiliatePartnerResponse(BaseModel):

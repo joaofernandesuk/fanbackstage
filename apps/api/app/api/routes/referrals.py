@@ -7,7 +7,7 @@ from sqlalchemy import or_, select
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.models.creator import CreatorProfile
-from app.models.referral import ReferralCommissionAllocation
+from app.models.referral import AffiliatePartner, ReferralCommissionAllocation
 from app.referrals import service
 
 router = APIRouter(prefix="/r", tags=["referrals"])
@@ -19,9 +19,18 @@ async def referral_dashboard(identity: CurrentIdentity, db: Db) -> dict:
     creator = await db.scalar(
         select(CreatorProfile).where(CreatorProfile.user_id == identity[0].id)
     )
+    affiliate_ids = list(
+        await db.scalars(
+            select(AffiliatePartner.id).where(AffiliatePartner.owner_user_id == identity[0].id)
+        )
+    )
     conditions = [ReferralCommissionAllocation.beneficiary_user_id == identity[0].id]
     if creator:
         conditions.append(ReferralCommissionAllocation.beneficiary_creator_id == creator.id)
+    if affiliate_ids:
+        conditions.append(
+            ReferralCommissionAllocation.beneficiary_affiliate_partner_id.in_(affiliate_ids)
+        )
     rows = (
         await db.scalars(
             select(ReferralCommissionAllocation)

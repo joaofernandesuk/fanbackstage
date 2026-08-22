@@ -219,13 +219,19 @@ async def create_link(
 
 
 async def create_affiliate_partner(
-    db: AsyncSession, actor: User, *, name: str, external_reference: str | None = None
+    db: AsyncSession,
+    actor: User,
+    *,
+    name: str,
+    external_reference: str | None = None,
+    owner_user_id: UUID | None = None,
 ) -> AffiliatePartner:
     partner = AffiliatePartner(
         public_id=opaque_id("ap"),
         name=name.strip(),
         status=AffiliatePartnerStatus.active,
         external_reference=external_reference,
+        owner_user_id=owner_user_id,
     )
     if not partner.name:
         raise ReferralError("Affiliate partner name is required")
