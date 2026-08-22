@@ -25,6 +25,10 @@ class LedgerAccountKind(str, enum.Enum):
     creator_available = "creator_available"
     group_pending = "group_pending"
     group_available = "group_available"
+    referrer_pending = "referrer_pending"
+    referrer_available = "referrer_available"
+    affiliate_pending = "affiliate_pending"
+    affiliate_available = "affiliate_available"
     refund_clearing = "refund_clearing"
 
 
@@ -73,7 +77,10 @@ class LedgerAccount(UUIDPrimaryKey, Timestamped, Base):
             "kind",
             "currency",
             unique=True,
-            postgresql_where="owner_creator_id IS NULL",
+            postgresql_where=(
+                "owner_creator_id IS NULL AND owner_group_id IS NULL "
+                "AND owner_user_id IS NULL AND owner_affiliate_partner_id IS NULL"
+            ),
         ),
     )
     owner_creator_id: Mapped[UUID | None] = mapped_column(
@@ -81,6 +88,12 @@ class LedgerAccount(UUIDPrimaryKey, Timestamped, Base):
     )
     owner_group_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("groups.id", ondelete="RESTRICT"), index=True
+    )
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    owner_affiliate_partner_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("affiliate_partners.id", ondelete="RESTRICT"), index=True
     )
     kind: Mapped[LedgerAccountKind] = mapped_column(
         Enum(LedgerAccountKind, name="ledger_account_kind"), index=True

@@ -1,17 +1,43 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.accounts import service as accounts
+from app.content.access import can_access_content
+from app.creators import service as creators
+from app.finance import service as finance
+from app.models.content import (
+    AccessPolicy,
+    ContentItem,
+    ContentStatus,
+    ContentType,
+    ModerationStatus,
+)
+from app.models.creator import CreatorStatus
+from app.models.finance import LedgerAccount, LedgerAccountKind, LedgerDirection, LedgerEntry
 from app.models.referral import (
     ReferralActorType,
+    ReferralCommissionAllocation,
     ReferralLinkStatus,
     ReferralProgramStatus,
     ReferralProgramType,
+    ReferralSubscriptionRewardWindow,
     SignupAttribution,
 )
 from app.referrals import service as referrals
+
+
+async def approved_creator(db, email: str):
+    user, _ = await accounts.register(db, email, "strong-password-123", None)
+    profile = await creators.get_or_create_profile(db, user)
+    await creators.update_profile(
+        db, profile, {"username": email.split("@")[0], "display_name": "Creator"}, user.id
+    )
+    await creators.submit(db, profile, user.id)
+    await creators.development_verify(db, profile, True, user.id)
+    await creators.set_status(db, profile, CreatorStatus.approved, user.id)
+    return user, profile
 
 
 @pytest.mark.asyncio
@@ -93,3 +119,193 @@ async def test_referral_safety_expiry_and_deferred_creator_creator_program(db_se
     )
     assert deferred.status is ReferralProgramStatus.paused
     link.status = ReferralLinkStatus.disabled
+
+
+@pytest.mark.asyncio
+async def test_ppv_referral_uses_only_platform_fee_and_refund_reverses_snapshot(db_session):
+    referrer, _ = await accounts.register(
+        db_session, "phase10-referrer@example.com", "strong-password-123", None
+    )
+    program = await referrals.create_program(
+        db_session,
+        actor_type=ReferralActorType.user,
+        program_type=ReferralProgramType.user_user_referral,
+        owner_user_id=referrer.id,
+    )
+    policy = await referrals.create_policy(
+        db_session, program, basis_points=2_500, eligible_revenue_types=["ppv"]
+    )
+    await referrals.create_link(
+        db_session, program, policy, code="PPV-PLATFORM-FEE", destination_path="/"
+    )
+    _, token = await referrals.resolve_click(db_session, "PPV-PLATFORM-FEE", "ppv-session")
+    referred_buyer, _ = await accounts.register(
+        db_session, "phase10-referred@example.com", "strong-password-123", None
+    )
+    assert await referrals.snapshot_signup_attribution(db_session, referred_buyer, token)
+    ordinary_buyer, _ = await accounts.register(
+        db_session, "phase10-ordinary@example.com", "strong-password-123", None
+    )
+    seller, creator = await approved_creator(db_session, "phase10-seller@example.com")
+    content = ContentItem(
+        owner_creator_id=creator.id,
+        created_by_user_id=seller.id,
+        content_type=ContentType.gallery,
+        title="Referral PPV",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=1_000,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+
+    async def settle(buyer, key: str):
+        purchase = await finance.initiate_purchase(db_session, buyer, content.id, key)
+        attempt = await db_session.get(finance.PaymentAttempt, purchase.payment_attempt_id)
+        assert attempt
+        payload, signature = finance.development_webhook_payload(attempt)
+        settled = await finance.process_development_webhook(db_session, payload, signature)
+        assert settled
+        return settled
+
+    referred = await settle(referred_buyer, "referred-ppv")
+    ordinary = await settle(ordinary_buyer, "ordinary-ppv")
+    assert await can_access_content(db_session, content, referred_buyer)
+
+    async def credits(transaction_id):
+        rows = await db_session.execute(
+            select(LedgerAccount.kind, LedgerEntry.amount_minor)
+            .join(LedgerEntry, LedgerEntry.ledger_account_id == LedgerAccount.id)
+            .where(
+                LedgerEntry.transaction_id == transaction_id,
+                LedgerEntry.direction == LedgerDirection.credit,
+            )
+        )
+        return {kind: amount for kind, amount in rows}
+
+    referred_credits = await credits(referred.ledger_transaction_id)
+    ordinary_credits = await credits(ordinary.ledger_transaction_id)
+    assert (
+        referred_credits[LedgerAccountKind.creator_pending]
+        == ordinary_credits[LedgerAccountKind.creator_pending]
+    )
+    assert referred_credits[LedgerAccountKind.referrer_pending] == 50
+    assert referred_credits[LedgerAccountKind.platform_revenue] == 150
+    assert ordinary_credits[LedgerAccountKind.platform_revenue] == 200
+    allocation = await db_session.scalar(
+        select(ReferralCommissionAllocation).where(
+            ReferralCommissionAllocation.source_ledger_transaction_id
+            == referred.ledger_transaction_id
+        )
+    )
+    assert allocation
+    assert allocation.amount_minor == 50
+    assert allocation.amount_minor <= allocation.platform_fee_minor
+    assert allocation.policy_snapshot["basis_points"] == 2_500
+
+    # A later policy version cannot alter the historical allocation snapshot.
+    replacement = await referrals.create_policy(
+        db_session, program, basis_points=9_000, eligible_revenue_types=["ppv"]
+    )
+    assert replacement.version == 2
+    assert allocation.policy_snapshot["basis_points"] == 2_500
+    await finance.refund_purchase(db_session, referred, seller, "buyer request")
+    assert allocation.reversed_at
+    balance = await db_session.scalar(
+        select(func.coalesce(func.sum(LedgerEntry.amount_minor), 0))
+        .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+        .where(
+            LedgerAccount.kind == LedgerAccountKind.referrer_pending,
+            LedgerAccount.owner_user_id == referrer.id,
+            LedgerEntry.direction == LedgerDirection.credit,
+        )
+    )
+    debits = await db_session.scalar(
+        select(func.coalesce(func.sum(LedgerEntry.amount_minor), 0))
+        .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+        .where(
+            LedgerAccount.kind == LedgerAccountKind.referrer_pending,
+            LedgerAccount.owner_user_id == referrer.id,
+            LedgerEntry.direction == LedgerDirection.debit,
+        )
+    )
+    assert balance == debits == 50
+
+
+@pytest.mark.asyncio
+async def test_subscription_window_is_timestamp_based_and_invalid_fee_policy_fails_closed(
+    db_session,
+):
+    referrer, _ = await accounts.register(
+        db_session, "phase10-window-referrer@example.com", "strong-password-123", None
+    )
+    program = await referrals.create_program(
+        db_session,
+        actor_type=ReferralActorType.user,
+        program_type=ReferralProgramType.user_user_referral,
+        owner_user_id=referrer.id,
+    )
+    policy = await referrals.create_policy(
+        db_session,
+        basis_points=2_500,
+        eligible_revenue_types=["subscription"],
+        program=program,
+        subscription_reward_window_days=90,
+    )
+    await referrals.create_link(
+        db_session, program, policy, code="SUB-WINDOW", destination_path="/"
+    )
+    _, token = await referrals.resolve_click(db_session, "SUB-WINDOW", "subscription-window")
+    buyer, _ = await accounts.register(
+        db_session, "phase10-window-buyer@example.com", "strong-password-123", None
+    )
+    attribution = await referrals.snapshot_signup_attribution(db_session, buyer, token)
+    assert attribution
+    start = datetime(2026, 8, 22, tzinfo=UTC)
+    entries, allocation = await referrals.revenue_allocation(
+        db_session,
+        buyer_user_id=buyer.id,
+        revenue_type="subscription",
+        currency="EUR",
+        platform_fee_minor=100,
+        occurred_at=start,
+    )
+    assert entries and allocation and allocation["amount_minor"] == 25
+    window = await db_session.scalar(
+        select(ReferralSubscriptionRewardWindow).where(
+            ReferralSubscriptionRewardWindow.signup_attribution_id == attribution.id
+        )
+    )
+    assert window and window.reward_window_ends_at == start + timedelta(days=90)
+    assert (
+        await referrals.revenue_allocation(
+            db_session,
+            buyer_user_id=buyer.id,
+            revenue_type="subscription",
+            currency="EUR",
+            platform_fee_minor=100,
+            occurred_at=start + timedelta(days=89, hours=23),
+        )
+    )[1]
+    assert (
+        await referrals.revenue_allocation(
+            db_session,
+            buyer_user_id=buyer.id,
+            revenue_type="subscription",
+            currency="EUR",
+            platform_fee_minor=100,
+            occurred_at=start + timedelta(days=90),
+        )
+    ) == ([], None)
+    attribution.policy_snapshot = {**attribution.policy_snapshot, "basis_points": 10_001}
+    with pytest.raises(referrals.ReferralError, match="snapshot is invalid"):
+        await referrals.revenue_allocation(
+            db_session,
+            buyer_user_id=buyer.id,
+            revenue_type="subscription",
+            currency="EUR",
+            platform_fee_minor=100,
+            occurred_at=start + timedelta(days=1),
+        )

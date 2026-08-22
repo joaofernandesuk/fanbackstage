@@ -92,6 +92,8 @@ async def _account(
     currency: str,
     owner_creator_id: UUID | None = None,
     owner_group_id: UUID | None = None,
+    owner_user_id: UUID | None = None,
+    owner_affiliate_partner_id: UUID | None = None,
 ) -> LedgerAccount:
     query = select(LedgerAccount).where(
         LedgerAccount.kind == kind, LedgerAccount.currency == currency
@@ -104,6 +106,14 @@ async def _account(
         query = query.where(LedgerAccount.owner_group_id.is_(None))
     else:
         query = query.where(LedgerAccount.owner_group_id == owner_group_id)
+    if owner_user_id is None:
+        query = query.where(LedgerAccount.owner_user_id.is_(None))
+    else:
+        query = query.where(LedgerAccount.owner_user_id == owner_user_id)
+    if owner_affiliate_partner_id is None:
+        query = query.where(LedgerAccount.owner_affiliate_partner_id.is_(None))
+    else:
+        query = query.where(LedgerAccount.owner_affiliate_partner_id == owner_affiliate_partner_id)
     account = await db.scalar(query.with_for_update())
     if account:
         return account
@@ -112,6 +122,8 @@ async def _account(
         currency=currency,
         owner_creator_id=owner_creator_id,
         owner_group_id=owner_group_id,
+        owner_user_id=owner_user_id,
+        owner_affiliate_partner_id=owner_affiliate_partner_id,
     )
     db.add(account)
     await db.flush()
@@ -452,6 +464,18 @@ async def settle_purchase(db: AsyncSession, purchase: Purchase) -> Purchase:
         purchase.creator_amount_minor,
         attempt.completed_at if attempt and attempt.completed_at else purchase.created_at,
     )
+    from app.referrals.service import record_revenue_allocation, revenue_allocation
+
+    event_at = attempt.completed_at if attempt and attempt.completed_at else purchase.created_at
+    referral_entries, referral_allocation = await revenue_allocation(
+        db,
+        buyer_user_id=purchase.buyer_user_id,
+        revenue_type="ppv",
+        currency=purchase.currency,
+        platform_fee_minor=purchase.platform_fee_minor,
+        occurred_at=event_at,
+    )
+    referral_amount = int(referral_allocation["amount_minor"]) if referral_allocation else 0
     ledger = await post_entries(
         db,
         transaction_type=LedgerTransactionType.ppv_purchase,
@@ -460,14 +484,22 @@ async def settle_purchase(db: AsyncSession, purchase: Purchase) -> Purchase:
         reference=f"ppv_purchase:{purchase.id}",
         entries=[
             (clearing, LedgerDirection.debit, purchase.gross_amount_minor),
-            (revenue, LedgerDirection.credit, purchase.platform_fee_minor),
+            (revenue, LedgerDirection.credit, purchase.platform_fee_minor - referral_amount),
+            *referral_entries,
             *allocation_entries,
         ],
         metadata={
             "purchase_id": str(purchase.id),
             "content_id": str(purchase.content_id),
+            "platform_fee_minor": str(purchase.platform_fee_minor),
+            "referral_amount_minor": str(referral_amount),
             **allocation_metadata,
         },
+    )
+    await record_revenue_allocation(
+        db,
+        source_ledger_transaction_id=ledger.id,
+        allocation=referral_allocation,
     )
     entitlement = await db.scalar(
         select(ContentEntitlement).where(
@@ -776,6 +808,10 @@ async def refund_purchase(
     revenue = await _account(db, LedgerAccountKind.platform_revenue, purchase.currency)
     original_ledger = await db.get(LedgerTransaction, purchase.ledger_transaction_id)
     assert original_ledger
+    from app.referrals.service import reversal_entries
+
+    referral_reversal_entries, referral_allocation = await reversal_entries(db, original_ledger.id)
+    referral_amount = referral_allocation.amount_minor if referral_allocation else 0
     group_amount = int(original_ledger.metadata_json.get("group_amount_minor", 0))
     creator_allocation = int(
         original_ledger.metadata_json.get(
@@ -805,7 +841,8 @@ async def refund_purchase(
     available_reversal = creator_allocation - pending_reversal
     entries = [
         (clearing, LedgerDirection.credit, purchase.gross_amount_minor),
-        (revenue, LedgerDirection.debit, purchase.platform_fee_minor),
+        (revenue, LedgerDirection.debit, purchase.platform_fee_minor - referral_amount),
+        *referral_reversal_entries,
     ]
     if pending_reversal:
         entries.append((pending, LedgerDirection.debit, pending_reversal))
@@ -836,6 +873,8 @@ async def refund_purchase(
             "group_amount_minor": str(group_amount),
         },
     )
+    if referral_allocation and not referral_allocation.reversed_at:
+        referral_allocation.reversed_at = datetime.now(UTC)
     purchase.status = PurchaseStatus.refunded
     entitlement.status = EntitlementStatus.revoked
     attempt = await db.get(PaymentAttempt, purchase.payment_attempt_id)

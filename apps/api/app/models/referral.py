@@ -183,3 +183,63 @@ class SignupAttribution(UUIDPrimaryKey, Timestamped, Base):
     )
     policy_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     attributed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ReferralCommissionAllocation(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "referral_commission_allocations"
+    __table_args__ = (
+        CheckConstraint("amount_minor >= 0", name="ck_referral_allocation_nonnegative_amount"),
+        UniqueConstraint(
+            "source_ledger_transaction_id", name="uq_referral_allocation_source_ledger"
+        ),
+    )
+
+    source_ledger_transaction_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ledger_transactions.id", ondelete="RESTRICT"), index=True
+    )
+    signup_attribution_id: Mapped[UUID] = mapped_column(
+        ForeignKey("signup_attributions.id", ondelete="RESTRICT"), index=True
+    )
+    policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("referral_commission_policies.id", ondelete="RESTRICT")
+    )
+    beneficiary_actor_type: Mapped[ReferralActorType] = mapped_column(
+        Enum(ReferralActorType, name="referral_actor_type"), index=True
+    )
+    beneficiary_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    beneficiary_creator_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="RESTRICT"), index=True
+    )
+    beneficiary_affiliate_partner_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("affiliate_partners.id", ondelete="RESTRICT"), index=True
+    )
+    revenue_type: Mapped[str] = mapped_column(String(64), index=True)
+    currency: Mapped[str] = mapped_column(String(3))
+    platform_fee_minor: Mapped[int] = mapped_column(Integer)
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    policy_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    allocated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReferralSubscriptionRewardWindow(UUIDPrimaryKey, Timestamped, Base):
+    """The immutable timestamp-based reward window for one attributed subscriber."""
+
+    __tablename__ = "referral_subscription_reward_windows"
+    __table_args__ = (
+        UniqueConstraint(
+            "signup_attribution_id", name="uq_referral_subscription_reward_window_attribution"
+        ),
+    )
+
+    signup_attribution_id: Mapped[UUID] = mapped_column(
+        ForeignKey("signup_attributions.id", ondelete="RESTRICT"), index=True
+    )
+    policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("referral_commission_policies.id", ondelete="RESTRICT")
+    )
+    first_successful_payment_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reward_window_ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

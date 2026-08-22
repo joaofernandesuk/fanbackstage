@@ -807,6 +807,17 @@ async def settle_order(db: AsyncSession, order: MarketplaceOrder) -> Marketplace
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
         db, order.seller_creator_id, order.currency, creator_pool, event_at
     )
+    from app.referrals.service import record_revenue_allocation, revenue_allocation
+
+    referral_entries, referral_allocation = await revenue_allocation(
+        db,
+        buyer_user_id=order.buyer_user_id,
+        revenue_type="marketplace",
+        currency=order.currency,
+        platform_fee_minor=fee,
+        occurred_at=event_at,
+    )
+    referral_amount = int(referral_allocation["amount_minor"]) if referral_allocation else 0
     order.platform_fee_minor = fee
     order.creator_amount_minor = int(allocation_metadata["creator_amount_minor"])
     order.group_amount_minor = int(allocation_metadata["group_amount_minor"])
@@ -814,7 +825,8 @@ async def settle_order(db: AsyncSession, order: MarketplaceOrder) -> Marketplace
     revenue = await _account(db, LedgerAccountKind.platform_revenue, order.currency)
     entries = [
         (clearing, LedgerDirection.debit, order.total_paid_minor),
-        (revenue, LedgerDirection.credit, order.platform_fee_minor),
+        (revenue, LedgerDirection.credit, order.platform_fee_minor - referral_amount),
+        *referral_entries,
         *allocation_entries,
     ]
     if order.shipping_pass_through_minor:
@@ -841,9 +853,15 @@ async def settle_order(db: AsyncSession, order: MarketplaceOrder) -> Marketplace
             "shipping_excess_minor": str(order.shipping_excess_minor),
             "commissionable_base_minor": str(order.commissionable_base_minor),
             "platform_fee_minor": str(order.platform_fee_minor),
+            "referral_amount_minor": str(referral_amount),
             "total_paid_minor": str(order.total_paid_minor),
             **allocation_metadata,
         },
+    )
+    await record_revenue_allocation(
+        db,
+        source_ledger_transaction_id=ledger.id,
+        allocation=referral_allocation,
     )
     order.status = MarketplaceOrderStatus.paid
     order.paid_at = event_at
@@ -1014,6 +1032,10 @@ async def release_order_earnings(db: AsyncSession, order: MarketplaceOrder) -> b
                 (group_available, LedgerDirection.credit, group_amount),
             ]
         )
+    from app.referrals.service import release_entries
+
+    referral_release_entries, referral_allocation = await release_entries(db, original.id)
+    entries.extend(referral_release_entries)
     transaction = await post_entries(
         db,
         transaction_type=LedgerTransactionType.earnings_release,
@@ -1030,8 +1052,13 @@ async def release_order_earnings(db: AsyncSession, order: MarketplaceOrder) -> b
             "hold_duration_seconds_snapshot": str(order.hold_duration_seconds_snapshot or 0),
             "creator_amount_minor": str(creator_amount),
             "group_amount_minor": str(group_amount),
+            "referral_amount_minor": str(referral_allocation.amount_minor)
+            if referral_allocation
+            else "0",
         },
     )
+    if referral_allocation and not referral_allocation.released_at:
+        referral_allocation.released_at = now
     order.earnings_release_status = MarketplaceEarningsReleaseStatus.released
     order.earnings_released_at = now
     await record_event(
@@ -1095,6 +1122,10 @@ async def _reverse_order_allocation(
         raise MarketplaceError("Only settled marketplace orders can be reversed")
     original = await db.get(LedgerTransaction, order.ledger_transaction_id)
     assert original
+    from app.referrals.service import reversal_entries
+
+    referral_reversal_entries, referral_allocation = await reversal_entries(db, original.id)
+    referral_amount = referral_allocation.amount_minor if referral_allocation else 0
     creator_amount = int(original.metadata_json["creator_amount_minor"]) + int(
         original.metadata_json.get("shipping_pass_through_minor", 0)
     )
@@ -1110,7 +1141,8 @@ async def _reverse_order_allocation(
     pending_reversal = min(max(await _account_balance(db, creator_pending.id), 0), creator_amount)
     entries = [
         (clearing, LedgerDirection.credit, order.total_paid_minor),
-        (revenue, LedgerDirection.debit, order.platform_fee_minor),
+        (revenue, LedgerDirection.debit, order.platform_fee_minor - referral_amount),
+        *referral_reversal_entries,
     ]
     if pending_reversal:
         entries.append((creator_pending, LedgerDirection.debit, pending_reversal))
@@ -1152,8 +1184,11 @@ async def _reverse_order_allocation(
             "original_group_contract_id": original.metadata_json.get("group_contract_id", ""),
             "creator_amount_minor": str(creator_amount),
             "group_amount_minor": str(group_amount),
+            "referral_amount_minor": str(referral_amount),
         },
     )
+    if referral_allocation and not referral_allocation.reversed_at:
+        referral_allocation.reversed_at = datetime.now(UTC)
 
 
 async def refund_order(

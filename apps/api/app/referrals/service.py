@@ -17,6 +17,7 @@ from app.models.referral import (
     AffiliatePartner,
     AffiliatePartnerStatus,
     ReferralActorType,
+    ReferralCommissionAllocation,
     ReferralCommissionPolicy,
     ReferralLink,
     ReferralLinkStatus,
@@ -24,6 +25,7 @@ from app.models.referral import (
     ReferralProgram,
     ReferralProgramStatus,
     ReferralProgramType,
+    ReferralSubscriptionRewardWindow,
     ReferralTouch,
     SignupAttribution,
 )
@@ -345,3 +347,274 @@ async def snapshot_signup_attribution(
         metadata={"referral_link_id": str(link.id), "policy_version": policy.version},
     )
     return attribution
+
+
+async def revenue_allocation(
+    db: AsyncSession,
+    *,
+    buyer_user_id: UUID,
+    revenue_type: str,
+    currency: str,
+    platform_fee_minor: int,
+    occurred_at: datetime,
+) -> tuple[list[tuple[object, object, int]], dict[str, object] | None]:
+    """Build a platform-funded referral allocation for one settled event.
+
+    The returned entry is intentionally additive to the financial event: it
+    debits none of the creator-side distributable and reduces only the
+    platform-revenue credit by the referral amount.  The immutable signup
+    policy snapshot, rather than a mutable current program configuration,
+    controls the allocation.
+    """
+    if platform_fee_minor < 0:
+        raise ReferralError("Platform fee cannot be negative")
+    attribution = await db.scalar(
+        select(SignupAttribution)
+        .where(SignupAttribution.user_id == buyer_user_id)
+        .with_for_update()
+    )
+    if not attribution:
+        return [], None
+    snapshot = attribution.policy_snapshot
+    eligible_types = snapshot.get("eligible_revenue_types", [])
+    if not isinstance(eligible_types, list) or revenue_type not in eligible_types:
+        return [], None
+    basis_points = snapshot.get("basis_points")
+    if not isinstance(basis_points, int) or not 0 <= basis_points <= 10_000:
+        raise ReferralError("Referral policy snapshot is invalid")
+    if revenue_type == "subscription":
+        window = await db.scalar(
+            select(ReferralSubscriptionRewardWindow)
+            .where(ReferralSubscriptionRewardWindow.signup_attribution_id == attribution.id)
+            .with_for_update()
+        )
+        if not window:
+            window_days = snapshot.get("subscription_reward_window_days")
+            if not isinstance(window_days, int) or window_days <= 0:
+                raise ReferralError("Referral subscription reward window is invalid")
+            window = ReferralSubscriptionRewardWindow(
+                signup_attribution_id=attribution.id,
+                policy_id=attribution.policy_id,
+                first_successful_payment_at=occurred_at,
+                reward_window_ends_at=occurred_at + timedelta(days=window_days),
+            )
+            db.add(window)
+            await db.flush()
+        if occurred_at >= window.reward_window_ends_at:
+            return [], None
+    amount_minor = platform_fee_minor * basis_points // 10_000
+    if amount_minor > platform_fee_minor:
+        raise ReferralError("Referral reward exceeds available platform fee")
+    if not amount_minor:
+        return [], None
+    link = await db.get(ReferralLink, attribution.effective_link_id)
+    if not link:
+        raise ReferralError("Referral attribution link is unavailable")
+    program = await db.get(ReferralProgram, link.program_id)
+    if not program or program.program_type is ReferralProgramType.creator_creator_referral:
+        return [], None
+
+    # Import lazily: finance is the ledger owner and calls this resolver while
+    # settling a payment, so an import at module load would form a cycle.
+    from app.finance.service import _account
+    from app.models.finance import LedgerAccountKind, LedgerDirection
+
+    account_kind: LedgerAccountKind
+    account_kwargs: dict[str, UUID]
+    if program.actor_type is ReferralActorType.creator and program.owner_creator_id:
+        account_kind = LedgerAccountKind.referrer_pending
+        account_kwargs = {"owner_creator_id": program.owner_creator_id}
+    elif program.actor_type is ReferralActorType.user and program.owner_user_id:
+        account_kind = LedgerAccountKind.referrer_pending
+        account_kwargs = {"owner_user_id": program.owner_user_id}
+    elif program.actor_type is ReferralActorType.affiliate_partner and program.affiliate_partner_id:
+        account_kind = LedgerAccountKind.affiliate_pending
+        account_kwargs = {"owner_affiliate_partner_id": program.affiliate_partner_id}
+    else:
+        # Platform campaigns have no external beneficiary.  Malformed programs
+        # fail closed instead of silently moving platform funds to an unknown
+        # account.
+        if program.actor_type is ReferralActorType.platform_campaign:
+            return [], None
+        raise ReferralError("Referral program has no valid beneficiary")
+    account = await _account(db, account_kind, currency, **account_kwargs)
+    return [
+        (account, LedgerDirection.credit, amount_minor),
+    ], {
+        "signup_attribution_id": attribution.id,
+        "policy_id": attribution.policy_id,
+        "beneficiary_actor_type": program.actor_type,
+        "beneficiary_user_id": program.owner_user_id,
+        "beneficiary_creator_id": program.owner_creator_id,
+        "beneficiary_affiliate_partner_id": program.affiliate_partner_id,
+        "revenue_type": revenue_type,
+        "currency": currency,
+        "platform_fee_minor": platform_fee_minor,
+        "amount_minor": amount_minor,
+        "policy_snapshot": dict(snapshot),
+        "allocated_at": occurred_at,
+    }
+
+
+async def record_revenue_allocation(
+    db: AsyncSession,
+    *,
+    source_ledger_transaction_id: UUID,
+    allocation: dict[str, object] | None,
+) -> ReferralCommissionAllocation | None:
+    """Persist the immutable allocation snapshot once its source ledger exists."""
+    if not allocation:
+        return None
+    existing = await db.scalar(
+        select(ReferralCommissionAllocation).where(
+            ReferralCommissionAllocation.source_ledger_transaction_id
+            == source_ledger_transaction_id
+        )
+    )
+    if existing:
+        return existing
+    row = ReferralCommissionAllocation(
+        source_ledger_transaction_id=source_ledger_transaction_id,
+        signup_attribution_id=allocation["signup_attribution_id"],
+        policy_id=allocation["policy_id"],
+        beneficiary_actor_type=allocation["beneficiary_actor_type"],
+        beneficiary_user_id=allocation["beneficiary_user_id"],
+        beneficiary_creator_id=allocation["beneficiary_creator_id"],
+        beneficiary_affiliate_partner_id=allocation["beneficiary_affiliate_partner_id"],
+        revenue_type=allocation["revenue_type"],
+        currency=allocation["currency"],
+        platform_fee_minor=allocation["platform_fee_minor"],
+        amount_minor=allocation["amount_minor"],
+        policy_snapshot=allocation["policy_snapshot"],
+        allocated_at=allocation["allocated_at"],
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def reversal_entries(
+    db: AsyncSession, source_ledger_transaction_id: UUID
+) -> tuple[list[tuple[object, object, int]], ReferralCommissionAllocation | None]:
+    """Return the exact historical referral entry to reverse, if any.
+
+    Reversal never resolves today's policy, attribution, affiliation, or
+    beneficiary ownership.  It follows the immutable allocation row attached
+    to the original financial event.
+    """
+    allocation = await db.scalar(
+        select(ReferralCommissionAllocation)
+        .where(
+            ReferralCommissionAllocation.source_ledger_transaction_id
+            == source_ledger_transaction_id
+        )
+        .with_for_update()
+    )
+    if not allocation or allocation.reversed_at:
+        return [], allocation
+    from app.finance.service import _account
+    from app.models.finance import LedgerAccountKind, LedgerDirection
+
+    if allocation.beneficiary_actor_type is ReferralActorType.affiliate_partner:
+        kind = (
+            LedgerAccountKind.affiliate_available
+            if allocation.released_at
+            else LedgerAccountKind.affiliate_pending
+        )
+        if not allocation.beneficiary_affiliate_partner_id:
+            raise ReferralError("Historical affiliate allocation is incomplete")
+        account = await _account(
+            db,
+            kind,
+            allocation.currency,
+            owner_affiliate_partner_id=allocation.beneficiary_affiliate_partner_id,
+        )
+    else:
+        kind = (
+            LedgerAccountKind.referrer_available
+            if allocation.released_at
+            else LedgerAccountKind.referrer_pending
+        )
+        if allocation.beneficiary_creator_id:
+            account = await _account(
+                db,
+                kind,
+                allocation.currency,
+                owner_creator_id=allocation.beneficiary_creator_id,
+            )
+        elif allocation.beneficiary_user_id:
+            account = await _account(
+                db,
+                kind,
+                allocation.currency,
+                owner_user_id=allocation.beneficiary_user_id,
+            )
+        else:
+            raise ReferralError("Historical referral allocation is incomplete")
+    return [(account, LedgerDirection.debit, allocation.amount_minor)], allocation
+
+
+async def release_entries(
+    db: AsyncSession, source_ledger_transaction_id: UUID
+) -> tuple[list[tuple[object, object, int]], ReferralCommissionAllocation | None]:
+    """Move a marketplace referral's original pending allocation once only."""
+    allocation = await db.scalar(
+        select(ReferralCommissionAllocation)
+        .where(
+            ReferralCommissionAllocation.source_ledger_transaction_id
+            == source_ledger_transaction_id
+        )
+        .with_for_update()
+    )
+    if not allocation or allocation.released_at or allocation.reversed_at:
+        return [], allocation
+    from app.finance.service import _account
+    from app.models.finance import LedgerAccountKind, LedgerDirection
+
+    if allocation.beneficiary_actor_type is ReferralActorType.affiliate_partner:
+        if not allocation.beneficiary_affiliate_partner_id:
+            raise ReferralError("Historical affiliate allocation is incomplete")
+        pending = await _account(
+            db,
+            LedgerAccountKind.affiliate_pending,
+            allocation.currency,
+            owner_affiliate_partner_id=allocation.beneficiary_affiliate_partner_id,
+        )
+        available = await _account(
+            db,
+            LedgerAccountKind.affiliate_available,
+            allocation.currency,
+            owner_affiliate_partner_id=allocation.beneficiary_affiliate_partner_id,
+        )
+    elif allocation.beneficiary_creator_id:
+        pending = await _account(
+            db,
+            LedgerAccountKind.referrer_pending,
+            allocation.currency,
+            owner_creator_id=allocation.beneficiary_creator_id,
+        )
+        available = await _account(
+            db,
+            LedgerAccountKind.referrer_available,
+            allocation.currency,
+            owner_creator_id=allocation.beneficiary_creator_id,
+        )
+    elif allocation.beneficiary_user_id:
+        pending = await _account(
+            db,
+            LedgerAccountKind.referrer_pending,
+            allocation.currency,
+            owner_user_id=allocation.beneficiary_user_id,
+        )
+        available = await _account(
+            db,
+            LedgerAccountKind.referrer_available,
+            allocation.currency,
+            owner_user_id=allocation.beneficiary_user_id,
+        )
+    else:
+        raise ReferralError("Historical referral allocation is incomplete")
+    return [
+        (pending, LedgerDirection.debit, allocation.amount_minor),
+        (available, LedgerDirection.credit, allocation.amount_minor),
+    ], allocation

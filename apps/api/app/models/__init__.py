@@ -49,9 +49,11 @@ from app.models.messaging import (
 )
 from app.models.referral import (
     AffiliatePartner,
+    ReferralCommissionAllocation,
     ReferralCommissionPolicy,
     ReferralLink,
     ReferralProgram,
+    ReferralSubscriptionRewardWindow,
     ReferralTouch,
     SignupAttribution,
 )
@@ -149,9 +151,11 @@ __all__ = [
     "PrivateSessionSettlement",
     "ProviderLiveEvent",
     "Purchase",
+    "ReferralCommissionAllocation",
     "ReferralCommissionPolicy",
     "ReferralLink",
     "ReferralProgram",
+    "ReferralSubscriptionRewardWindow",
     "ReferralTouch",
     "Role",
     "SecurityToken",

@@ -850,8 +850,8 @@ async def reconcile_private_provider_presence(db: AsyncSession, limit: int = 100
             # particular, do not move an authorized READY session into the
             # reconnecting state merely because its room is still empty.
             elif participant.joined_at is not None and participant.left_at is None:
-                    await private_participant_disconnected(db, actor, session.id)
-                    repaired += 1
+                await private_participant_disconnected(db, actor, session.id)
+                repaired += 1
     return repaired
 
 
@@ -984,13 +984,25 @@ async def settle_private_session(db: AsyncSession, session: PrivateSession) -> P
     fee, creator_amount = finance.commission_amount(gross, session.commission_basis_points)
     clearing = await finance._account(db, LedgerAccountKind.platform_clearing, session.currency)
     revenue = await finance._account(db, LedgerAccountKind.platform_revenue, session.currency)
+    event_at = session.ended_at or session.active_started_at or session.created_at
     allocation_entries, allocation_metadata = await finance.creator_revenue_allocation(
         db,
         session.creator_id,
         session.currency,
         creator_amount,
-        session.ended_at or session.active_started_at or session.created_at,
+        event_at,
     )
+    from app.referrals.service import record_revenue_allocation, revenue_allocation
+
+    referral_entries, referral_allocation = await revenue_allocation(
+        db,
+        buyer_user_id=session.payer_user_id,
+        revenue_type="private_live",
+        currency=session.currency,
+        platform_fee_minor=fee,
+        occurred_at=event_at,
+    )
+    referral_amount = int(referral_allocation["amount_minor"]) if referral_allocation else 0
     ledger = await finance.post_entries(
         db,
         transaction_type=LedgerTransactionType.private_live_session,
@@ -999,14 +1011,22 @@ async def settle_private_session(db: AsyncSession, session: PrivateSession) -> P
         reference=f"private_session:{session.id}",
         entries=[
             (clearing, LedgerDirection.debit, gross),
-            (revenue, LedgerDirection.credit, fee),
+            (revenue, LedgerDirection.credit, fee - referral_amount),
+            *referral_entries,
             *allocation_entries,
         ],
         metadata={
             "private_session_id": str(session.id),
             "billable_seconds": str(session.billable_seconds),
+            "platform_fee_minor": str(fee),
+            "referral_amount_minor": str(referral_amount),
             **allocation_metadata,
         },
+    )
+    await record_revenue_allocation(
+        db,
+        source_ledger_transaction_id=ledger.id,
+        allocation=referral_allocation,
     )
     from app.models.streaming import PrivateSessionSettlement
 

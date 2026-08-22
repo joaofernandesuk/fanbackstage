@@ -291,14 +291,25 @@ async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> S
     clearing = await _account(db, LedgerAccountKind.platform_clearing, period.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, period.currency)
     from app.finance.service import creator_revenue_allocation
+    from app.referrals.service import record_revenue_allocation, revenue_allocation
 
+    event_at = attempt.completed_at or period.created_at
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
         db,
         subscription.creator_id,
         period.currency,
         period.creator_amount_minor,
-        attempt.completed_at or period.created_at,
+        event_at,
     )
+    referral_entries, referral_allocation = await revenue_allocation(
+        db,
+        buyer_user_id=subscription.subscriber_user_id,
+        revenue_type="subscription",
+        currency=period.currency,
+        platform_fee_minor=period.platform_fee_minor,
+        occurred_at=event_at,
+    )
+    referral_amount = int(referral_allocation["amount_minor"]) if referral_allocation else 0
     ledger = await post_entries(
         db,
         transaction_type=LedgerTransactionType.subscription_charge,
@@ -307,14 +318,22 @@ async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> S
         reference=f"subscription_period:{period.id}",
         entries=[
             (clearing, LedgerDirection.debit, period.charged_amount_minor),
-            (revenue, LedgerDirection.credit, period.platform_fee_minor),
+            (revenue, LedgerDirection.credit, period.platform_fee_minor - referral_amount),
+            *referral_entries,
             *allocation_entries,
         ],
         metadata={
             "subscription_id": str(subscription.id),
             "period_id": str(period.id),
+            "platform_fee_minor": str(period.platform_fee_minor),
+            "referral_amount_minor": str(referral_amount),
             **allocation_metadata,
         },
+    )
+    await record_revenue_allocation(
+        db,
+        source_ledger_transaction_id=ledger.id,
+        allocation=referral_allocation,
     )
     entitlement = (
         await db.get(ContentEntitlement, period.entitlement_id) if period.entitlement_id else None

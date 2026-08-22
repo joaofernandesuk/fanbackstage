@@ -455,15 +455,26 @@ async def settle_message_unlock(
     clearing = await _account(db, LedgerAccountKind.platform_clearing, purchase.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, purchase.currency)
     from app.finance.service import creator_revenue_allocation
+    from app.referrals.service import record_revenue_allocation, revenue_allocation
 
     attempt = await db.get(PaymentAttempt, purchase.payment_attempt_id)
+    event_at = attempt.completed_at if attempt and attempt.completed_at else purchase.created_at
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
         db,
         purchase.seller_creator_id,
         purchase.currency,
         purchase.creator_amount_minor,
-        attempt.completed_at if attempt and attempt.completed_at else purchase.created_at,
+        event_at,
     )
+    referral_entries, referral_allocation = await revenue_allocation(
+        db,
+        buyer_user_id=purchase.buyer_user_id,
+        revenue_type="messaging",
+        currency=purchase.currency,
+        platform_fee_minor=purchase.platform_fee_minor,
+        occurred_at=event_at,
+    )
+    referral_amount = int(referral_allocation["amount_minor"]) if referral_allocation else 0
     ledger = await post_entries(
         db,
         transaction_type=LedgerTransactionType.messaging_charge,
@@ -472,14 +483,22 @@ async def settle_message_unlock(
         reference=f"message_unlock:{purchase.id}",
         entries=[
             (clearing, LedgerDirection.debit, purchase.gross_amount_minor),
-            (revenue, LedgerDirection.credit, purchase.platform_fee_minor),
+            (revenue, LedgerDirection.credit, purchase.platform_fee_minor - referral_amount),
+            *referral_entries,
             *allocation_entries,
         ],
         metadata={
             "message_unlock_purchase_id": str(purchase.id),
             "message_attachment_id": str(purchase.message_attachment_id),
+            "platform_fee_minor": str(purchase.platform_fee_minor),
+            "referral_amount_minor": str(referral_amount),
             **allocation_metadata,
         },
+    )
+    await record_revenue_allocation(
+        db,
+        source_ledger_transaction_id=ledger.id,
+        allocation=referral_allocation,
     )
     purchase.status, purchase.purchased_at, purchase.ledger_transaction_id = (
         "paid",
@@ -555,15 +574,26 @@ async def settle_paid_send(db: AsyncSession, pending: PendingMessageSend) -> Pen
     clearing = await _account(db, LedgerAccountKind.platform_clearing, pending.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, pending.currency)
     from app.finance.service import creator_revenue_allocation
+    from app.referrals.service import record_revenue_allocation, revenue_allocation
 
     attempt = await db.get(PaymentAttempt, pending.payment_attempt_id)
+    event_at = attempt.completed_at if attempt and attempt.completed_at else pending.created_at
     allocation_entries, allocation_metadata = await creator_revenue_allocation(
         db,
         pending.creator_id,
         pending.currency,
         pending.creator_amount_minor,
-        attempt.completed_at if attempt and attempt.completed_at else pending.created_at,
+        event_at,
     )
+    referral_entries, referral_allocation = await revenue_allocation(
+        db,
+        buyer_user_id=pending.buyer_user_id,
+        revenue_type="messaging",
+        currency=pending.currency,
+        platform_fee_minor=pending.platform_fee_minor,
+        occurred_at=event_at,
+    )
+    referral_amount = int(referral_allocation["amount_minor"]) if referral_allocation else 0
     ledger = await post_entries(
         db,
         transaction_type=LedgerTransactionType.messaging_charge,
@@ -572,10 +602,21 @@ async def settle_paid_send(db: AsyncSession, pending: PendingMessageSend) -> Pen
         reference=f"paid_message_send:{pending.id}",
         entries=[
             (clearing, LedgerDirection.debit, pending.gross_amount_minor),
-            (revenue, LedgerDirection.credit, pending.platform_fee_minor),
+            (revenue, LedgerDirection.credit, pending.platform_fee_minor - referral_amount),
+            *referral_entries,
             *allocation_entries,
         ],
-        metadata={"pending_message_send_id": str(pending.id), **allocation_metadata},
+        metadata={
+            "pending_message_send_id": str(pending.id),
+            "platform_fee_minor": str(pending.platform_fee_minor),
+            "referral_amount_minor": str(referral_amount),
+            **allocation_metadata,
+        },
+    )
+    await record_revenue_allocation(
+        db,
+        source_ledger_transaction_id=ledger.id,
+        allocation=referral_allocation,
     )
     message = Message(
         conversation_id=conversation.id,
