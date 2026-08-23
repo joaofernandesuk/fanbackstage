@@ -6,6 +6,7 @@ from app.api.routes import (
     auth,
     content,
     creators,
+    discovery,
     finance,
     groups,
     health,
@@ -22,6 +23,7 @@ from app.api.routes import (
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
 api_router.include_router(referrals.router)
+api_router.include_router(discovery.router)
 api_router.include_router(account.router)
 api_router.include_router(admin.router)
 api_router.include_router(creators.router)

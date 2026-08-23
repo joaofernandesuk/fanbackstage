@@ -1,5 +1,7 @@
 # FanBackstage — Get closer. Go backstage.
 
+Phase 11 adds server-authoritative discovery at `/discover` and `/search`. See [Discovery](docs/DISCOVERY.md) for the safe-public projections, ranking, and limits.
+
 FanBackstage.com is a modular creator entertainment platform. This repository implements the identity, creator-profile, content/media foundation, and **Phase 3 financial core**.
 
 ## Start locally

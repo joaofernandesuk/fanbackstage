@@ -87,3 +87,7 @@ requested -> review/queued -> processing -> paid
 # Phase 3 financial core
 
 The Phase 3 financial tables are `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `commission_rules`, `payment_attempts`, `purchases`, and `payment_webhook_events`. Purchases snapshot their allocation and point to their payment attempt, entitlement, and original ledger transaction. Ledger entries are currency-specific, positive minor-unit postings and must balance by transaction.
+
+# Phase 11 discovery
+
+`discovery_configs` is an append-oriented versioned ranking configuration. `discovery_hides` is an auditable operational exclusion overlay for otherwise public entities. `discovery_events` stores deduplicated, privacy-minimised discovery analytics. They are derived controls and never replace creator, content, marketplace, live, entitlement, moderation, referral, or ledger truth.

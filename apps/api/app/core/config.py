@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     streaming_reconnect_grace_seconds: int = 30
     streaming_rate_limit_attempts: int = 30
     streaming_rate_limit_window_seconds: int = 60
+    discovery_rate_limit_attempts: int = 60
+    discovery_rate_limit_window_seconds: int = 60
 
     def validate_production(self) -> None:
         if (

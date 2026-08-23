@@ -123,3 +123,7 @@ Phase 5 feed commands are server-authorized: only an approved creator owns its p
 # Phase 3 financial permissions
 
 Financial inspection requires `financial.access`; changing the platform commission requires `financial.configure` and remains limited to `super_admin`. Buyer history is limited to the authenticated buyer, and creator balances are limited to the approved creator who owns them.
+
+# Phase 11 discovery permissions
+
+Safe public discovery is anonymous. Server-side eligibility excludes non-public/pending/suspended creators, moderated content/listings, ended or suspended rooms, manual hides, and both directions of a signed-in user's block relationship. Discovery cannot grant access: locked cards remain subject to existing content and media resolvers. Discovery configuration and manual hide actions require `admin.access` and emit audit events.

@@ -81,3 +81,7 @@ Use a consistent event taxonomy from the beginning so product/financial analytic
 - referral_attributed
 
 Events must not become the authoritative financial record; ledger remains authoritative for money.
+
+## Phase 11 discovery events
+
+Discovery emits bounded, deduplicated `search`, `click`, and `recommendation_impression` rows. They record a request key, safe entity reference where applicable, and the ranking configuration version. Raw search terms are not persisted. These events are neither referral attribution nor a financial source of truth.

@@ -8,6 +8,7 @@ from app.models.content import (
     VideoContent,
 )
 from app.models.creator import CreatorProfile, CreatorVerification
+from app.models.discovery import DiscoveryConfig, DiscoveryEvent, DiscoveryHide
 from app.models.finance import (
     CommissionRule,
     LedgerAccount,
@@ -104,6 +105,9 @@ __all__ = [
     "CreatorLiveSettings",
     "CreatorProfile",
     "CreatorVerification",
+    "DiscoveryConfig",
+    "DiscoveryEvent",
+    "DiscoveryHide",
     "FeedPost",
     "FeedPostMedia",
     "Follow",

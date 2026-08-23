@@ -103,3 +103,19 @@ async def enforce_streaming_rate_limit(request: Request, subject: str, action: s
             )
     finally:
         await redis.aclose()
+
+
+async def enforce_discovery_rate_limit(request: Request, subject: str = "anonymous") -> None:
+    """Bound broad search enumeration without changing authorization semantics."""
+    settings = get_settings()
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"fanbackstage:rate-limit:discovery:{_key(f'{client_ip}:{subject}')}"
+    redis = Redis.from_url(settings.redis_url)
+    try:
+        attempts = await redis.incr(key)
+        if attempts == 1:
+            await redis.expire(key, settings.discovery_rate_limit_window_seconds)
+        if attempts > settings.discovery_rate_limit_attempts:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many discovery requests. Please try again later.")
+    finally:
+        await redis.aclose()

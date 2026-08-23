@@ -94,3 +94,7 @@ Audit logs should be append-oriented, timestamped, actor-aware and resistant to 
 - Admin least privilege.
 - Sensitive actions may require re-authentication.
 - Backup and restore testing.
+
+## Phase 11 discovery safety
+
+Discovery serves only approved public creators and currently eligible public objects. It excludes suspended/removed/moderated source state before ranking and relies on the existing safe preview resolver for locked media. Responses never contain original-media URLs, storage keys, private-message attachments, KYC/location fields, or entitlement internals. Public search is rate-limited to reduce enumeration and all dynamic filters are validated server-side.

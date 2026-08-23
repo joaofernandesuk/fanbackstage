@@ -17,7 +17,7 @@ async def clean_database() -> None:
     async with SessionLocal() as session:
         await session.execute(
             text(
-                "TRUNCATE audit_events, creator_social_links, creator_profile_languages, creator_profile_categories, creator_username_history, creator_status_history, creator_verifications, creator_profiles, creator_languages, creator_categories, security_tokens, user_sessions, user_roles, users, roles CASCADE"
+                "TRUNCATE discovery_events, discovery_hides, discovery_configs, audit_events, creator_social_links, creator_profile_languages, creator_profile_categories, creator_username_history, creator_status_history, creator_verifications, creator_profiles, creator_languages, creator_categories, security_tokens, user_sessions, user_roles, users, roles CASCADE"
             )
         )
         await session.commit()

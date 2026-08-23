@@ -169,3 +169,7 @@ Business rules must live in backend domain/application services, not duplicated 
 # Phase 3 financial boundary
 
 The finance domain owns payment-attempt orchestration, verified webhook processing, allocation, ledger posting, reconciliation, and refund reversals. Content access continues to resolve only through the existing entitlement/access service. Provider-specific signing remains at the integration boundary and does not leak into content or ledger domain logic.
+
+# Phase 11 discovery boundary
+
+The `discovery` module reads canonical domain state through a candidate/filter/rank/paginate pipeline. It has no authority to mutate access, moderation, seller availability, live lifecycle, referral attribution, or financial state. PostgreSQL text indexes are the initial search substrate; a future external index remains derived and must retain serving-time policy filtering.
