@@ -85,3 +85,12 @@ Events must not become the authoritative financial record; ledger remains author
 ## Phase 11 discovery events
 
 Discovery emits bounded, deduplicated `search`, `click`, and `recommendation_impression` rows. They record a request key, safe entity reference where applicable, and the ranking configuration version. Raw search terms are not persisted. These events are neither referral attribution nor a financial source of truth.
+
+## Phase 12 sponsored discovery events
+
+Featuring writes `sponsored_impression`, `sponsored_click`, and
+`sponsored_conversion` as distinct, request-deduplicated discovery events. Each
+event carries its booking and surface identifiers, so sponsored performance is
+never mixed with organic discovery analytics. These events are observational:
+they do not alter organic ranking, ledger state, or Phase 10 signup/referral
+attribution.

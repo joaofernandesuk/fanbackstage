@@ -96,12 +96,14 @@ async def inventory(db: Db) -> list[dict]:
 
 @router.get("/bookings/mine")
 async def my_bookings(identity: CurrentIdentity, db: Db) -> list[dict]:
+    owned_creator_ids = select(CreatorProfile.id).where(CreatorProfile.user_id == identity[0].id)
     rows = (
         await db.scalars(
             select(FeatureBooking)
             .where(
                 (FeatureBooking.purchaser_user_id == identity[0].id)
                 | (FeatureBooking.actor_user_id == identity[0].id)
+                | FeatureBooking.owner_creator_id.in_(owned_creator_ids)
             )
             .order_by(FeatureBooking.created_at.desc())
         )
@@ -179,6 +181,20 @@ async def start_payment(booking_id: UUID, identity: CurrentIdentity, db: Db) -> 
         attempt = await service.initiate_payment(db, row, identity[0])
         await db.commit()
         return {"payment_attempt_id": str(attempt.id), "status": attempt.status.value}
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/bookings/{booking_id}/cancel")
+async def cancel_booking(booking_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
+    row = await db.get(FeatureBooking, booking_id)
+    if not row:
+        raise HTTPException(404, "Booking not found")
+    try:
+        row = await service.cancel_before_start(db, row, identity[0])
+        await db.commit()
+        return booking_response(row)
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc

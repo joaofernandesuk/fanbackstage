@@ -33,8 +33,12 @@ class DiscoveryConfig(UUIDPrimaryKey, Timestamped, Base):
 
 class DiscoveryHide(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "discovery_hides"
-    __table_args__ = (UniqueConstraint("entity_type", "entity_id", name="uq_discovery_hide_entity"),)
-    entity_type: Mapped[DiscoveryEntityType] = mapped_column(Enum(DiscoveryEntityType, name="discovery_entity_type"), index=True)
+    __table_args__ = (
+        UniqueConstraint("entity_type", "entity_id", name="uq_discovery_hide_entity"),
+    )
+    entity_type: Mapped[DiscoveryEntityType] = mapped_column(
+        Enum(DiscoveryEntityType, name="discovery_entity_type"), index=True
+    )
     entity_id: Mapped[UUID] = mapped_column(index=True)
     reason: Mapped[str] = mapped_column(String(500))
     actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
@@ -42,11 +46,23 @@ class DiscoveryHide(UUIDPrimaryKey, Timestamped, Base):
 
 class DiscoveryEvent(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "discovery_events"
-    __table_args__ = (UniqueConstraint("event_type", "request_key", "entity_type", "entity_id", name="uq_discovery_event_dedupe"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "event_type",
+            "request_key",
+            "entity_type",
+            "entity_id",
+            name="uq_discovery_event_dedupe",
+        ),
+    )
     event_type: Mapped[str] = mapped_column(String(32), index=True)
     request_key: Mapped[str] = mapped_column(String(128), index=True)
-    actor_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    entity_type: Mapped[DiscoveryEntityType | None] = mapped_column(Enum(DiscoveryEntityType, name="discovery_entity_type", create_type=False))
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    entity_type: Mapped[DiscoveryEntityType | None] = mapped_column(
+        Enum(DiscoveryEntityType, name="discovery_entity_type", create_type=False)
+    )
     entity_id: Mapped[UUID | None] = mapped_column(index=True)
     ranking_version: Mapped[int] = mapped_column(Integer, nullable=False)
     metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)

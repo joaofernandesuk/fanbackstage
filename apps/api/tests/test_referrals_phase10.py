@@ -526,7 +526,9 @@ async def test_cross_affiliate_dashboard_isolation_and_suspension_history(db_ses
 
 
 @pytest.mark.asyncio
-async def test_dashboard_totals_reconcile_to_immutable_referral_ledger_not_current_policy(db_session):
+async def test_dashboard_totals_reconcile_to_immutable_referral_ledger_not_current_policy(
+    db_session,
+):
     referrer, _ = await accounts.register(
         db_session, "phase10-dashboard-owner@example.com", "strong-password-123", None
     )
@@ -620,4 +622,7 @@ async def test_dashboard_totals_reconcile_to_immutable_referral_ledger_not_curre
             LedgerEntry.direction == LedgerDirection.credit,
         )
     )
-    assert available_balance == available_dashboard["totals_by_currency"]["EUR"]["available_amount_minor"]
+    assert (
+        available_balance
+        == available_dashboard["totals_by_currency"]["EUR"]["available_amount_minor"]
+    )

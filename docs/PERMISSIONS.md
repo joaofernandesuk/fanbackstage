@@ -127,3 +127,14 @@ Financial inspection requires `financial.access`; changing the platform commissi
 # Phase 11 discovery permissions
 
 Safe public discovery is anonymous. Server-side eligibility excludes non-public/pending/suspended creators, moderated content/listings, ended or suspended rooms, manual hides, and both directions of a signed-in user's block relationship. Discovery cannot grant access: locked cards remain subject to existing content and media resolvers. Discovery configuration and manual hide actions require `admin.access` and emit audit events.
+
+# Phase 12 featuring permissions
+
+Target eligibility, owner identity, availability and payment initiation are
+server-resolved. A creator may book only an eligible target they own. A manager
+needs an active creator-scoped `manage_featuring` delegation and may choose only
+the manager or target creator as an explicit payer; a manager can never silently
+charge a creator. Booking history is visible only to its payer, actor, target
+owner, or authorised platform administrator. Surface, slot, price and lifecycle
+reconciliation operations require server-side admin authorisation and emit audit
+events; UI visibility is not authorisation.

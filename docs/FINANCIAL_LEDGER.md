@@ -141,6 +141,17 @@ The development payment adapter is available only outside production. It signs d
 
 Payment recovery is replay-safe: the financial worker reconciles `succeeded` payment attempts whose purchase is still awaiting settlement. It uses the same idempotent settlement service as webhooks, so reconciliation cannot create a second ledger transaction or entitlement. Creator release is blocked while the configured settlement window contains newer paid purchases.
 
+# Phase 12 featuring ledger notes
+
+Successful featuring payment posts one immutable balanced `featuring_charge`
+transaction from platform clearing to platform revenue using the booking's
+snapshotted amount and currency. It is not creator or group income and does not
+participate in payout calculations. Duplicate payment provider events settle the
+same booking and ledger transaction at most once. Refunds and chargebacks are
+compensating immutable transactions: a chargeback reverses the exact original
+featuring charge once and deactivates the placement; repeated webhooks and
+reconciliation remain harmless.
+
 `ledger_transactions` and `ledger_entries` are append-only at the database layer. Refunds create reversal entries and revoke the purchase entitlement; they never edit or delete the original purchase entries. Migration `20260820_0004` has a destructive downgrade for local development only. A deployed rollback must use a forward corrective migration.
 
 # Phase 4 implementation notes
