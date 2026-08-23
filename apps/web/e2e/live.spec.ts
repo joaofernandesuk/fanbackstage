@@ -44,7 +44,10 @@ test("Phase 7 public live uses scoped LiveKit permissions and durable chat", asy
   const viewerContext = await browser.newContext({ permissions: ["camera", "microphone"] }); const viewer = await viewerContext.newPage(); await register(viewer, `phase7-viewer-${stamp}@example.com`, password); await viewer.goto("/live"); await viewer.locator("article", { hasText: liveTitle }).getByRole("button", { name: "Watch live" }).click(); await expect(viewer.getByRole("heading", { name: `Watching: ${liveTitle}` })).toBeVisible(); await expect(viewer.getByLabel("Live video").locator("video")).toBeVisible();
   const viewerToken = await api(viewer, `/live/rooms/${room.id}/token`, "POST"); const viewerClaims = JSON.parse(Buffer.from(viewerToken.body.token.split(".")[1], "base64url").toString()); expect(viewerClaims.video.canPublish).toBe(false); expect(viewerClaims.video.canSubscribe).toBe(true);
   await viewer.getByLabel("Live chat").fill("real live chat"); await viewer.getByRole("button", { name: "Send" }).click(); await expect.poll(async () => (await api(viewer, `/live/rooms/${room.id}/chat`)).body.map((message: { body: string }) => message.body)).toContain("real live chat"); await viewer.getByRole("button", { name: "Leave live" }).click(); await viewer.locator("article", { hasText: liveTitle }).getByRole("button", { name: "Watch live" }).click(); await expect(viewer.getByText("real live chat")).toBeVisible();
-  expect((await api(page, `/live/rooms/${room.id}/reports`, "POST", { reason: "e2e report" })).status).toBe(200);
+  // Report as the viewer who is currently in the public room. This exercises
+  // the public-report permission without relying on the creator's studio UI
+  // session after the browser has switched live-room state.
+  expect((await api(viewer, `/live/rooms/${room.id}/reports`, "POST", { reason: "e2e report" })).status).toBe(200);
   await page.getByRole("button", { name: "End public live" }).click(); await expect.poll(async () => (await api(viewer, `/live/rooms/${room.id}/join`, "POST")).status).toBe(403);
   await viewerContext.close();
 });

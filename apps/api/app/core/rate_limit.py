@@ -116,6 +116,9 @@ async def enforce_discovery_rate_limit(request: Request, subject: str = "anonymo
         if attempts == 1:
             await redis.expire(key, settings.discovery_rate_limit_window_seconds)
         if attempts > settings.discovery_rate_limit_attempts:
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many discovery requests. Please try again later.")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many discovery requests. Please try again later.",
+            )
     finally:
         await redis.aclose()

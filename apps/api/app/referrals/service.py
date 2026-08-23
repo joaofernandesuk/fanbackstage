@@ -734,7 +734,9 @@ async def dashboard(db: AsyncSession, authenticated_user_id: UUID) -> dict[str, 
     )
     affiliate_ids = list(
         await db.scalars(
-            select(AffiliatePartner.id).where(AffiliatePartner.owner_user_id == authenticated_user_id)
+            select(AffiliatePartner.id).where(
+                AffiliatePartner.owner_user_id == authenticated_user_id
+            )
         )
     )
     allocation_conditions = [
@@ -761,7 +763,9 @@ async def dashboard(db: AsyncSession, authenticated_user_id: UUID) -> dict[str, 
     )
     programs = list(
         await db.scalars(
-            select(ReferralProgram).where(or_(*program_conditions)).order_by(ReferralProgram.created_at)
+            select(ReferralProgram)
+            .where(or_(*program_conditions))
+            .order_by(ReferralProgram.created_at)
         )
     )
     program_ids = [program.id for program in programs]
@@ -774,21 +778,26 @@ async def dashboard(db: AsyncSession, authenticated_user_id: UUID) -> dict[str, 
                 .order_by(ReferralLink.created_at.desc())
             )
         )
-    conversions_by_link = {
-        link_id: count
-        for link_id, count in (
-            await db.execute(
-                select(SignupAttribution.effective_link_id, func.count(SignupAttribution.id))
-                .where(SignupAttribution.effective_link_id.in_([link.id for link in links]))
-                .group_by(SignupAttribution.effective_link_id)
-            )
-        ).all()
-    } if links else {}
+    conversions_by_link = (
+        {
+            link_id: count
+            for link_id, count in (
+                await db.execute(
+                    select(SignupAttribution.effective_link_id, func.count(SignupAttribution.id))
+                    .where(SignupAttribution.effective_link_id.in_([link.id for link in links]))
+                    .group_by(SignupAttribution.effective_link_id)
+                )
+            ).all()
+        }
+        if links
+        else {}
+    )
 
     totals: dict[str, dict[str, int]] = {}
     for allocation in allocations:
         bucket = totals.setdefault(
-            allocation.currency, {"pending_amount_minor": 0, "available_amount_minor": 0, "reversed_amount_minor": 0}
+            allocation.currency,
+            {"pending_amount_minor": 0, "available_amount_minor": 0, "reversed_amount_minor": 0},
         )
         if allocation.reversed_at:
             bucket["reversed_amount_minor"] += allocation.amount_minor
