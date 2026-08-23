@@ -19,6 +19,7 @@ from app.api.routes import (
     social,
     streaming,
     subscriptions,
+    trust_safety,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -39,4 +40,5 @@ api_router.include_router(social.router)
 api_router.include_router(messaging.router)
 api_router.include_router(messaging_moderation.router)
 api_router.include_router(streaming.router)
+api_router.include_router(trust_safety.router)
 health_router = health.router

@@ -99,11 +99,23 @@ from app.models.subscription import (
     SubscriptionPromotion,
     SubscriptionPromotionRule,
 )
+from app.models.trust_safety import (
+    ConsentRelease,
+    ConsentReleaseContent,
+    ModerationAction,
+    ModerationAppeal,
+    ModerationCase,
+    ModerationCaseNote,
+    ModerationEvidence,
+    TrustSafetyReport,
+)
 
 __all__ = [
     "AffiliatePartner",
     "AuditEvent",
     "CommissionRule",
+    "ConsentRelease",
+    "ConsentReleaseContent",
     "ContentEntitlement",
     "ContentItem",
     "Conversation",
@@ -155,6 +167,11 @@ __all__ = [
     "MessageAttachment",
     "MessageUnlockPurchase",
     "MessagingSettings",
+    "ModerationAction",
+    "ModerationAppeal",
+    "ModerationCase",
+    "ModerationCaseNote",
+    "ModerationEvidence",
     "PaymentAttempt",
     "PaymentWebhookEvent",
     "PendingMessageSend",
@@ -184,6 +201,7 @@ __all__ = [
     "SubscriptionPlanPrice",
     "SubscriptionPromotion",
     "SubscriptionPromotionRule",
+    "TrustSafetyReport",
     "User",
     "UserBlock",
     "UserRole",
