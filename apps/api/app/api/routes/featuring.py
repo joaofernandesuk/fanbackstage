@@ -4,6 +4,7 @@ from fastapi import APIRouter, Header, HTTPException
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
+from app.audit.service import record_event
 from app.featuring import service
 from app.groups.service import has_delegated_permission
 from app.models.creator import CreatorProfile
@@ -222,7 +223,7 @@ async def admin_slot(payload: SlotInput, identity: CurrentIdentity, db: Db) -> d
 
 @router.post("/admin/prices")
 async def admin_price(payload: PriceInput, identity: CurrentIdentity, db: Db) -> dict:
-    authorize(identity[0], Permission.ADMIN_ACCESS)
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
     row = await service.create_price(
         db,
         identity[0],
@@ -248,9 +249,17 @@ async def admin_bookings(identity: CurrentIdentity, db: Db) -> list[dict]:
 @router.post("/admin/reconcile")
 async def reconcile(identity: CurrentIdentity, db: Db) -> dict:
     """Operational replay-safe lifecycle reconciliation; normal execution is Celery-driven."""
-    authorize(identity[0], Permission.ADMIN_ACCESS)
+    authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
     expired = await service.expire_reservations(db)
     activated = await service.activate_due_bookings(db)
     deactivated = await service.deactivate_due_bookings(db)
+    await record_event(
+        db,
+        "featuring.lifecycle_reconciled",
+        actor_user_id=identity[0].id,
+        target_type="featuring_lifecycle",
+        target_id="scheduled_bookings",
+        metadata={"expired": expired, "activated": activated, "deactivated": deactivated},
+    )
     await db.commit()
     return {"expired": expired, "activated": activated, "deactivated": deactivated}
