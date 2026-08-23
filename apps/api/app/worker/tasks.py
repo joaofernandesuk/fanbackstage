@@ -113,6 +113,27 @@ def expire_marketplace_reservations() -> dict[str, int]:
 
 
 @celery_app.task
+def reconcile_featuring_lifecycle() -> dict[str, int]:
+    """Release expired holds and replay-safe activate/deactivate paid feature bookings."""
+    from app.db.session import SessionLocal
+    from app.featuring.service import (
+        activate_due_bookings,
+        deactivate_due_bookings,
+        expire_reservations,
+    )
+
+    async def run() -> dict[str, int]:
+        async with SessionLocal() as session:
+            expired = await expire_reservations(session)
+            activated = await activate_due_bookings(session)
+            deactivated = await deactivate_due_bookings(session)
+            await session.commit()
+            return {"expired": expired, "activated": activated, "deactivated": deactivated}
+
+    return run_async(run())
+
+
+@celery_app.task
 def process_subscription_renewals() -> dict[str, int]:
     """Create one replay-safe renewal attempt per due subscription period."""
     from app.db.session import SessionLocal

@@ -9,7 +9,13 @@ from app.models.content import (
 )
 from app.models.creator import CreatorProfile, CreatorVerification
 from app.models.discovery import DiscoveryConfig, DiscoveryEvent, DiscoveryHide
-from app.models.featuring import FeatureBooking, FeaturePrice, FeatureSlot, FeatureSurface
+from app.models.featuring import (
+    FeatureBooking,
+    FeaturePrice,
+    FeatureRefund,
+    FeatureSlot,
+    FeatureSurface,
+)
 from app.models.finance import (
     CommissionRule,
     LedgerAccount,
@@ -111,6 +117,7 @@ __all__ = [
     "DiscoveryHide",
     "FeatureBooking",
     "FeaturePrice",
+    "FeatureRefund",
     "FeatureSlot",
     "FeatureSurface",
     "FeedPost",

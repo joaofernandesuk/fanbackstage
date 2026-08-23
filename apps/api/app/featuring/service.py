@@ -18,15 +18,20 @@ from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.featuring import (
     FeatureBooking,
     FeatureBookingStatus,
+    FeatureIneligibilityReason,
     FeaturePrice,
+    FeatureRefund,
     FeatureSlot,
     FeatureSurface,
+    FeatureSurfaceKind,
     FeatureSurfaceStatus,
     FeatureTargetType,
 )
 from app.models.finance import (
+    LedgerAccount,
     LedgerAccountKind,
     LedgerDirection,
+    LedgerEntry,
     LedgerTransactionType,
     PaymentAttempt,
     PaymentStatus,
@@ -332,6 +337,293 @@ async def create_booking(
         metadata={"payer_user_id": str(purchaser.id), "slot_id": str(slot.id)},
     )
     return booking
+
+
+async def expire_reservations(db: AsyncSession, now: datetime | None = None) -> int:
+    """Release only expired unpaid reservations; replaying this command is harmless."""
+    now = now or datetime.now(UTC)
+    rows = (
+        await db.scalars(
+            select(FeatureBooking)
+            .where(
+                FeatureBooking.status == FeatureBookingStatus.awaiting_payment,
+                FeatureBooking.reservation_expires_at <= now,
+            )
+            .with_for_update()
+        )
+    ).all()
+    for booking in rows:
+        booking.status = FeatureBookingStatus.failed
+        booking.reservation_expires_at = None
+    return len(rows)
+
+
+def _add_delivery(booking: FeatureBooking, now: datetime) -> int:
+    if not booking.activated_at:
+        return booking.delivered_seconds
+    endpoint = min(now, booking.ends_at)
+    seconds = max(0, int((endpoint - booking.activated_at).total_seconds()))
+    booking.delivered_seconds = min(booking.duration_seconds, booking.delivered_seconds + seconds)
+    booking.activated_at = None
+    return booking.delivered_seconds
+
+
+async def activate_due_bookings(db: AsyncSession, now: datetime | None = None) -> int:
+    """Activate due, paid bookings only after rechecking their current target state."""
+    now = now or datetime.now(UTC)
+    rows = (
+        await db.scalars(
+            select(FeatureBooking)
+            .where(
+                FeatureBooking.status == FeatureBookingStatus.scheduled,
+                FeatureBooking.starts_at <= now,
+                FeatureBooking.ends_at > now,
+            )
+            .with_for_update()
+        )
+    ).all()
+    count = 0
+    for booking in rows:
+        try:
+            await assert_target_eligibility(db, booking.target_type, booking.target_id)
+        except FeaturingError:
+            await terminate_ineligible(
+                db, booking, FeatureIneligibilityReason.moderation_ineligible, now=now
+            )
+            continue
+        booking.status = FeatureBookingStatus.active
+        booking.activated_at = now
+        count += 1
+        await record_event(
+            db,
+            "featuring.placement_activated",
+            actor_user_id=booking.actor_user_id,
+            target_type="feature_booking",
+            target_id=str(booking.id),
+        )
+    return count
+
+
+async def deactivate_due_bookings(db: AsyncSession, now: datetime | None = None) -> int:
+    now = now or datetime.now(UTC)
+    rows = (
+        await db.scalars(
+            select(FeatureBooking)
+            .where(
+                FeatureBooking.status == FeatureBookingStatus.active, FeatureBooking.ends_at <= now
+            )
+            .with_for_update()
+        )
+    ).all()
+    for booking in rows:
+        _add_delivery(booking, now)
+        booking.status = FeatureBookingStatus.completed
+        booking.ended_at = now
+        await record_event(
+            db,
+            "featuring.placement_deactivated",
+            actor_user_id=booking.actor_user_id,
+            target_type="feature_booking",
+            target_id=str(booking.id),
+            metadata={"reason": "expired"},
+        )
+    return len(rows)
+
+
+async def _refund(
+    db: AsyncSession,
+    booking: FeatureBooking,
+    reason: FeatureIneligibilityReason,
+    amount_minor: int,
+) -> FeatureRefund | None:
+    if amount_minor <= 0:
+        return None
+    existing = await db.scalar(
+        select(FeatureRefund).where(
+            FeatureRefund.booking_id == booking.id, FeatureRefund.reason == reason
+        )
+    )
+    if existing:
+        return existing
+    if not booking.ledger_transaction_id:
+        raise FeaturingError("Cannot refund an unpaid booking")
+    original_entries = (
+        await db.scalars(
+            select(LedgerEntry).where(LedgerEntry.transaction_id == booking.ledger_transaction_id)
+        )
+    ).all()
+    if len(original_entries) != 2:
+        raise FeaturingError("Unexpected featuring ledger allocation")
+    original_amount = sum(
+        row.amount_minor for row in original_entries if row.direction is LedgerDirection.debit
+    )
+    if original_amount != booking.price_minor:
+        raise FeaturingError("Featuring ledger snapshot is inconsistent")
+    entries = []
+    for entry in original_entries:
+        account = await db.get(LedgerAccount, entry.ledger_account_id)
+        assert account
+        entries.append(
+            (
+                account,
+                LedgerDirection.credit
+                if entry.direction is LedgerDirection.debit
+                else LedgerDirection.debit,
+                amount_minor,
+            )
+        )
+    transaction = await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.refund,
+        currency=booking.currency,
+        idempotency_key=f"feature-refund:{booking.id}:{reason.value}",
+        reference=f"feature_refund:{booking.id}:{reason.value}",
+        reversal_of_transaction_id=booking.ledger_transaction_id,
+        entries=entries,
+        metadata={
+            "booking_id": str(booking.id),
+            "reason": reason.value,
+            "amount_minor": str(amount_minor),
+        },
+    )
+    refund = FeatureRefund(
+        booking_id=booking.id,
+        reason=reason,
+        amount_minor=amount_minor,
+        ledger_transaction_id=transaction.id,
+    )
+    db.add(refund)
+    await db.flush()
+    return refund
+
+
+async def terminate_ineligible(
+    db: AsyncSession,
+    booking: FeatureBooking,
+    reason: FeatureIneligibilityReason,
+    *,
+    now: datetime | None = None,
+) -> FeatureBooking:
+    """Stop serving; platform/moderation reasons refund unused time, creator end does not."""
+    now = now or datetime.now(UTC)
+    if booking.status in {
+        FeatureBookingStatus.refunded,
+        FeatureBookingStatus.completed,
+        FeatureBookingStatus.cancelled,
+    }:
+        return booking
+    _add_delivery(booking, now)
+    booking.ended_at = now
+    booking.ineligibility_reason = reason
+    booking.status = FeatureBookingStatus.suspended
+    if reason is not FeatureIneligibilityReason.creator_ended:
+        unused = max(booking.duration_seconds - booking.delivered_seconds, 0)
+        # Floor in minor units is deterministic and never refunds more than the snapshot price.
+        amount = booking.price_minor * unused // booking.duration_seconds
+        refund = await _refund(db, booking, reason, amount)
+        if refund and amount == booking.price_minor:
+            booking.status = FeatureBookingStatus.refunded
+    await record_event(
+        db,
+        "featuring.eligibility_failure",
+        actor_user_id=booking.actor_user_id,
+        target_type="feature_booking",
+        target_id=str(booking.id),
+        metadata={"reason": reason.value, "delivered_seconds": booking.delivered_seconds},
+    )
+    return booking
+
+
+async def cancel_before_start(
+    db: AsyncSession, booking: FeatureBooking, actor: User, now: datetime | None = None
+) -> FeatureBooking:
+    now = now or datetime.now(UTC)
+    if actor.id not in {booking.purchaser_user_id, booking.actor_user_id}:
+        raise FeaturingError("You are not authorized to cancel this booking")
+    if (
+        booking.status
+        not in {FeatureBookingStatus.awaiting_payment, FeatureBookingStatus.scheduled}
+        or now >= booking.starts_at
+    ):
+        raise FeaturingError("Booking can no longer be cancelled before start")
+    booking.cancelled_at = now
+    booking.reservation_expires_at = None
+    booking.status = FeatureBookingStatus.cancelled
+    if booking.ledger_transaction_id and now <= booking.starts_at - timedelta(
+        seconds=booking.cancellation_cutoff_seconds
+    ):
+        await _refund(db, booking, FeatureIneligibilityReason.admin_disabled, booking.price_minor)
+        booking.status = FeatureBookingStatus.refunded
+    await record_event(
+        db,
+        "featuring.booking_cancelled",
+        actor_user_id=actor.id,
+        target_type="feature_booking",
+        target_id=str(booking.id),
+    )
+    return booking
+
+
+async def sponsored_insertion(
+    db: AsyncSession,
+    *,
+    surface_kind: str,
+    organic_results: list,
+) -> list[tuple[int, object]]:
+    """Return labelled placements only from an already eligible organic candidate set.
+
+    This is intentionally a post-ranking insertion boundary. It never receives,
+    writes, or changes organic scores; it only selects an active paid booking
+    whose target is already eligible for the exact query/filter request.
+    """
+    try:
+        kind = FeatureSurfaceKind(surface_kind)
+    except ValueError as exc:
+        raise FeaturingError("Unknown featuring surface") from exc
+    candidates = {(item.entity_type, item.id): item for item in organic_results}
+    if not candidates:
+        return []
+    rows = (
+        await db.execute(
+            select(FeatureBooking, FeatureSlot)
+            .join(FeatureSlot, FeatureSlot.id == FeatureBooking.slot_id)
+            .join(FeatureSurface, FeatureSurface.id == FeatureBooking.surface_id)
+            .where(
+                FeatureSurface.kind == kind,
+                FeatureSurface.status == FeatureSurfaceStatus.active,
+                FeatureSlot.active.is_(True),
+                FeatureBooking.status == FeatureBookingStatus.active,
+            )
+            .order_by(FeatureSlot.position, FeatureBooking.created_at, FeatureBooking.id)
+        )
+    ).all()
+    output: list[tuple[int, object]] = []
+    seen: set[tuple[str, UUID]] = set()
+    for booking, slot in rows:
+        key = (booking.target_type.value, booking.target_id)
+        item = candidates.get(key)
+        if not item or key in seen:
+            continue
+        try:
+            await assert_target_eligibility(db, booking.target_type, booking.target_id)
+        except FeaturingError:
+            # Serving revalidation is fail-closed. The lifecycle worker later
+            # records suspension/refund under its authoritative transaction.
+            continue
+        seen.add(key)
+        output.append(
+            (
+                slot.position,
+                item.model_copy(
+                    update={
+                        "placement_type": "sponsored",
+                        "sponsored": True,
+                        "sponsored_surface": kind.value,
+                    }
+                ),
+            )
+        )
+    return output
 
 
 async def initiate_payment(

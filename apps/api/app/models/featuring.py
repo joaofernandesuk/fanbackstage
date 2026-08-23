@@ -170,4 +170,23 @@ class FeatureBooking(UUIDPrimaryKey, Timestamped, Base):
     ineligibility_reason: Mapped[FeatureIneligibilityReason | None] = mapped_column(
         Enum(FeatureIneligibilityReason, name="feature_ineligibility_reason")
     )
+    delivered_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128))
+
+
+class FeatureRefund(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "feature_refunds"
+    __table_args__ = (
+        UniqueConstraint("booking_id", "reason", name="uq_feature_refund_booking_reason"),
+        CheckConstraint("amount_minor > 0", name="ck_feature_refund_positive"),
+    )
+    booking_id: Mapped[UUID] = mapped_column(
+        ForeignKey("feature_bookings.id", ondelete="RESTRICT"), index=True
+    )
+    reason: Mapped[FeatureIneligibilityReason] = mapped_column(
+        Enum(FeatureIneligibilityReason, name="feature_ineligibility_reason", create_type=False)
+    )
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    ledger_transaction_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ledger_transactions.id", ondelete="RESTRICT"), unique=True
+    )

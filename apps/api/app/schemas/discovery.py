@@ -22,6 +22,9 @@ class DiscoveryResult(BaseModel):
     started_at: datetime | None = None
     created_at: datetime
     reason: str | None = None
+    placement_type: str = "organic"
+    sponsored: bool = False
+    sponsored_surface: str | None = None
 
 
 class DiscoveryPage(BaseModel):
