@@ -1,15 +1,23 @@
+import asyncio
+import hashlib
+import hmac
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from app.accounts import service as accounts
+from app.core.config import get_settings
 from app.creators import service as creators
+from app.db.session import SessionLocal
 from app.discovery import service as discovery
 from app.featuring import service
+from app.finance import service as finance
 from app.models.creator import CreatorStatus
 from app.models.featuring import FeatureBookingStatus, FeatureIneligibilityReason, FeatureRefund
 from app.models.finance import LedgerEntry, PaymentStatus
+from app.models.identity import User
 from app.models.messaging import UserBlock
 
 
@@ -306,3 +314,89 @@ async def test_sponsored_insertion_is_labelled_deduplicated_and_never_changes_or
         feature_surface="discover_home_hero",
     )
     assert blocked == []
+
+
+@pytest.mark.asyncio
+async def test_payment_webhook_replay_and_chargeback_reverse_platform_revenue_once(db_session):
+    admin, _ = await accounts.register(
+        db_session, "feature-admin-6@example.com", "strong-password-123", None
+    )
+    owner, profile = await creator(db_session, "payment-replay-feature@example.com")
+    surface = await service.create_surface(db_session, admin, "discover_creators")
+    slot = await service.create_slot(db_session, admin, surface.id, "replay-1", 0)
+    await service.create_price(db_session, admin, slot.id, "creator", 3600, 900, "EUR")
+    booking = await service.create_booking(
+        db_session,
+        actor=owner,
+        purchaser=owner,
+        slot_id=slot.id,
+        target_type="creator",
+        target_id=profile.id,
+        starts_at=datetime.now(UTC) + timedelta(hours=2),
+        duration_seconds=3600,
+        idempotency_key="payment-replay",
+    )
+    attempt = await service.initiate_payment(db_session, booking, owner)
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    await finance.process_development_webhook(db_session, payload, signature)
+    assert booking.status is FeatureBookingStatus.scheduled
+    assert len((await db_session.scalars(select(LedgerEntry))).all()) == 2
+
+    chargeback_payload = json.dumps(
+        {
+            "id": f"chargeback-{attempt.id}",
+            "type": "payment.chargeback",
+            "payment_reference": attempt.provider_reference,
+        },
+        separators=(",", ":"),
+    ).encode()
+    chargeback_signature = hmac.new(
+        get_settings().payment_webhook_secret.encode(), chargeback_payload, hashlib.sha256
+    ).hexdigest()
+    await finance.process_development_webhook(db_session, chargeback_payload, chargeback_signature)
+    await finance.process_development_webhook(db_session, chargeback_payload, chargeback_signature)
+    assert booking.status is FeatureBookingStatus.chargeback
+    assert len((await db_session.scalars(select(LedgerEntry))).all()) == 4
+
+
+@pytest.mark.asyncio
+async def test_final_slot_concurrent_reservation_has_exactly_one_winner(db_session):
+    admin, _ = await accounts.register(
+        db_session, "feature-admin-7@example.com", "strong-password-123", None
+    )
+    first_user, first_profile = await creator(db_session, "race-first@example.com")
+    second_user, second_profile = await creator(db_session, "race-second@example.com")
+    surface = await service.create_surface(db_session, admin, "discover_content")
+    slot = await service.create_slot(db_session, admin, surface.id, "race-1", 0, capacity=1)
+    await service.create_price(db_session, admin, slot.id, "creator", 3600, 900, "EUR")
+    await db_session.commit()
+    starts_at = datetime.now(UTC) + timedelta(hours=3)
+
+    async def reserve(user_id, profile_id, key):
+        async with SessionLocal() as session:
+            actor = await session.get(User, user_id)
+            assert actor
+            try:
+                await service.create_booking(
+                    session,
+                    actor=actor,
+                    purchaser=actor,
+                    slot_id=slot.id,
+                    target_type="creator",
+                    target_id=profile_id,
+                    starts_at=starts_at,
+                    duration_seconds=3600,
+                    idempotency_key=key,
+                )
+                await session.commit()
+                return "won"
+            except service.FeaturingError:
+                await session.rollback()
+                return "lost"
+
+    outcomes = await asyncio.gather(
+        reserve(first_user.id, first_profile.id, "race-one"),
+        reserve(second_user.id, second_profile.id, "race-two"),
+    )
+    assert sorted(outcomes) == ["lost", "won"]

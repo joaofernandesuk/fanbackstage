@@ -564,6 +564,55 @@ async def cancel_before_start(
     return booking
 
 
+async def handle_chargeback(db: AsyncSession, booking: FeatureBooking) -> FeatureBooking:
+    """Reverse the exact paid platform revenue once and remove the placement."""
+    if booking.status is FeatureBookingStatus.chargeback:
+        return booking
+    if not booking.ledger_transaction_id:
+        raise FeaturingError("Cannot charge back an unpaid booking")
+    original_entries = (
+        await db.scalars(
+            select(LedgerEntry).where(LedgerEntry.transaction_id == booking.ledger_transaction_id)
+        )
+    ).all()
+    if len(original_entries) != 2:
+        raise FeaturingError("Unexpected featuring ledger allocation")
+    entries = []
+    for entry in original_entries:
+        account = await db.get(LedgerAccount, entry.ledger_account_id)
+        assert account
+        entries.append(
+            (
+                account,
+                LedgerDirection.credit
+                if entry.direction is LedgerDirection.debit
+                else LedgerDirection.debit,
+                entry.amount_minor,
+            )
+        )
+    await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.chargeback,
+        currency=booking.currency,
+        idempotency_key=f"feature-chargeback:{booking.id}",
+        reference=f"feature_chargeback:{booking.id}",
+        reversal_of_transaction_id=booking.ledger_transaction_id,
+        entries=entries,
+        metadata={"booking_id": str(booking.id), "reason": "provider_chargeback"},
+    )
+    _add_delivery(booking, datetime.now(UTC))
+    booking.status = FeatureBookingStatus.chargeback
+    booking.ended_at = datetime.now(UTC)
+    await record_event(
+        db,
+        "featuring.chargeback",
+        actor_user_id=booking.purchaser_user_id,
+        target_type="feature_booking",
+        target_id=str(booking.id),
+    )
+    return booking
+
+
 async def sponsored_insertion(
     db: AsyncSession,
     *,

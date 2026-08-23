@@ -358,6 +358,19 @@ async def process_development_webhook(
         return None
     webhook_event.payment_attempt_id = attempt.id
     if event["type"] in {"payment.refunded", "payment.disputed", "payment.chargeback"}:
+        from app.models.featuring import FeatureBooking
+
+        booking = await db.scalar(
+            select(FeatureBooking)
+            .where(FeatureBooking.payment_attempt_id == attempt.id)
+            .with_for_update()
+        )
+        if booking and event["type"] == "payment.chargeback":
+            from app.featuring.service import handle_chargeback
+
+            await handle_chargeback(db, booking)
+            webhook_event.processed_at = datetime.now(UTC)
+            return None
         from app.marketplace import service as marketplace_service
         from app.models.marketplace import MarketplaceOrder
 
