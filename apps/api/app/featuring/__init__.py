@@ -1,0 +1,1 @@
+"""Paid featuring domain."""

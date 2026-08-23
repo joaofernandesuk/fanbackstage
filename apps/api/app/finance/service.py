@@ -403,50 +403,62 @@ async def process_development_webhook(
     if purchase and purchase.status is PurchaseStatus.awaiting_payment:
         await settle_purchase(db, purchase)
     elif not purchase:
-        from app.messaging.service import settle_message_unlock, settle_paid_send
-        from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
+        from app.models.featuring import FeatureBooking
 
-        unlock = await db.scalar(
-            select(MessageUnlockPurchase)
-            .where(MessageUnlockPurchase.payment_attempt_id == attempt.id)
+        booking = await db.scalar(
+            select(FeatureBooking)
+            .where(FeatureBooking.payment_attempt_id == attempt.id)
             .with_for_update()
         )
-        if unlock:
-            await settle_message_unlock(db, unlock)
+        if booking:
+            from app.featuring.service import settle_payment
+
+            await settle_payment(db, booking)
         else:
-            pending_send = await db.scalar(
-                select(PendingMessageSend)
-                .where(PendingMessageSend.payment_attempt_id == attempt.id)
+            from app.messaging.service import settle_message_unlock, settle_paid_send
+            from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
+
+            unlock = await db.scalar(
+                select(MessageUnlockPurchase)
+                .where(MessageUnlockPurchase.payment_attempt_id == attempt.id)
                 .with_for_update()
             )
-            if pending_send:
-                await settle_paid_send(db, pending_send)
+            if unlock:
+                await settle_message_unlock(db, unlock)
             else:
-                from app.models.streaming import PrivateSession
-                from app.streaming.service import authorize_private_session
-
-                session = await db.scalar(
-                    select(PrivateSession)
-                    .where(PrivateSession.payment_attempt_id == attempt.id)
+                pending_send = await db.scalar(
+                    select(PendingMessageSend)
+                    .where(PendingMessageSend.payment_attempt_id == attempt.id)
                     .with_for_update()
                 )
-                if session:
-                    await authorize_private_session(db, session)
+                if pending_send:
+                    await settle_paid_send(db, pending_send)
                 else:
-                    from app.marketplace.service import settle_order
-                    from app.models.marketplace import MarketplaceOrder, MarketplaceOrderStatus
+                    from app.models.streaming import PrivateSession
+                    from app.streaming.service import authorize_private_session
 
-                    order = await db.scalar(
-                        select(MarketplaceOrder)
-                        .where(MarketplaceOrder.payment_attempt_id == attempt.id)
+                    session = await db.scalar(
+                        select(PrivateSession)
+                        .where(PrivateSession.payment_attempt_id == attempt.id)
                         .with_for_update()
                     )
-                    if order and order.status is MarketplaceOrderStatus.awaiting_payment:
-                        await settle_order(db, order)
+                    if session:
+                        await authorize_private_session(db, session)
                     else:
-                        from app.subscriptions.service import settle_payment_attempt
+                        from app.marketplace.service import settle_order
+                        from app.models.marketplace import MarketplaceOrder, MarketplaceOrderStatus
 
-                        await settle_payment_attempt(db, attempt)
+                        order = await db.scalar(
+                            select(MarketplaceOrder)
+                            .where(MarketplaceOrder.payment_attempt_id == attempt.id)
+                            .with_for_update()
+                        )
+                        if order and order.status is MarketplaceOrderStatus.awaiting_payment:
+                            await settle_order(db, order)
+                        else:
+                            from app.subscriptions.service import settle_payment_attempt
+
+                            await settle_payment_attempt(db, attempt)
     webhook_event.processed_at = datetime.now(UTC)
     return purchase
 

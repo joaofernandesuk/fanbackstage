@@ -65,6 +65,7 @@ class GroupPermission(str, enum.Enum):
     view_earnings = "view_earnings"
     manage_marketplace = "manage_marketplace"
     manage_marketplace_orders = "manage_marketplace_orders"
+    manage_featuring = "manage_featuring"
 
 
 class Group(UUIDPrimaryKey, Timestamped, Base):
