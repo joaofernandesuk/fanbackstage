@@ -227,3 +227,14 @@ async def admin_bookings(identity: CurrentIdentity, db: Db) -> list[dict]:
         await db.scalars(select(FeatureBooking).order_by(FeatureBooking.created_at.desc()))
     ).all()
     return [booking_response(row) for row in rows]
+
+
+@router.post("/admin/reconcile")
+async def reconcile(identity: CurrentIdentity, db: Db) -> dict:
+    """Operational replay-safe lifecycle reconciliation; normal execution is Celery-driven."""
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    expired = await service.expire_reservations(db)
+    activated = await service.activate_due_bookings(db)
+    deactivated = await service.deactivate_due_bookings(db)
+    await db.commit()
+    return {"expired": expired, "activated": activated, "deactivated": deactivated}
