@@ -18,6 +18,7 @@ from app.models.social import FeedPost, PostComment
 from app.models.streaming import LiveChatMessage, LiveRoom
 from app.models.trust_safety import (
     ModerationCase,
+    ModerationCaseNote,
     ModerationCaseStatus,
     ModerationEvidence,
     ModerationQueue,
@@ -179,3 +180,40 @@ async def open_or_attach_report(
         metadata={"case_id": str(case.id), "reason": reason.value, "duplicate": bool(existing)},
     )
     return report, case, bool(existing)
+
+
+async def assign_case(
+    db: AsyncSession, case: ModerationCase, actor: User, moderator_id: UUID | None
+) -> ModerationCase:
+    if moderator_id is not None and not await db.get(User, moderator_id):
+        raise TrustSafetyError("Moderator not found")
+    case.assigned_moderator_id = moderator_id
+    if case.status is ModerationCaseStatus.open:
+        case.status = ModerationCaseStatus.triage
+    await record_event(
+        db,
+        "trust_safety.case_assigned",
+        actor_user_id=actor.id,
+        target_type="moderation_case",
+        target_id=str(case.id),
+        metadata={"assigned": str(moderator_id) if moderator_id else None},
+    )
+    return case
+
+
+async def add_case_note(
+    db: AsyncSession, case: ModerationCase, actor: User, body: str
+) -> ModerationCaseNote:
+    if not body.strip() or len(body.strip()) > 4000:
+        raise TrustSafetyError("Invalid moderator note")
+    note = ModerationCaseNote(case_id=case.id, author_user_id=actor.id, body=body.strip())
+    db.add(note)
+    await db.flush()
+    await record_event(
+        db,
+        "trust_safety.case_note_added",
+        actor_user_id=actor.id,
+        target_type="moderation_case",
+        target_id=str(case.id),
+    )
+    return note

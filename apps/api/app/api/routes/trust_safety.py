@@ -1,7 +1,12 @@
+from uuid import UUID
+
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
-from app.schemas.trust_safety import TrustSafetyReportInput
+from app.models.trust_safety import ModerationCase, ModerationCaseStatus, ModerationEvidence
+from app.permissions.policies import Permission, authorize
+from app.schemas.trust_safety import CaseAssignmentInput, CaseNoteInput, TrustSafetyReportInput
 from app.trust_safety import service
 
 router = APIRouter(prefix="/trust-safety", tags=["trust-safety"])
@@ -23,3 +28,99 @@ async def create_report(payload: TrustSafetyReportInput, identity: CurrentIdenti
     except (ValueError, service.TrustSafetyError) as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/cases")
+async def list_cases(
+    identity: CurrentIdentity, db: Db, status: ModerationCaseStatus | None = None
+) -> list[dict]:
+    authorize(identity[0], Permission.MODERATION_CASE_VIEW)
+    query = select(ModerationCase)
+    if status:
+        query = query.where(ModerationCase.status == status)
+    rows = (
+        await db.scalars(query.order_by(ModerationCase.priority.desc(), ModerationCase.created_at))
+    ).all()
+    return [
+        {
+            "id": str(row.id),
+            "public_id": row.public_id,
+            "status": row.status.value,
+            "severity": row.severity.value,
+            "queue": row.queue.value,
+            "assigned_moderator_id": str(row.assigned_moderator_id)
+            if row.assigned_moderator_id
+            else None,
+        }
+        for row in rows
+    ]
+
+
+@router.post("/cases/{case_id}/assign")
+async def assign_case(
+    case_id: UUID, payload: CaseAssignmentInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.MODERATION_CASE_TRIAGE)
+    case = await db.get(ModerationCase, case_id)
+    if not case:
+        raise HTTPException(404, "Moderation case not found")
+    try:
+        case = await service.assign_case(db, case, identity[0], payload.moderator_id)
+        await db.commit()
+        return {"id": str(case.id), "status": case.status.value}
+    except service.TrustSafetyError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/cases/{case_id}/notes")
+async def add_note(
+    case_id: UUID, payload: CaseNoteInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.MODERATION_CASE_TRIAGE)
+    case = await db.get(ModerationCase, case_id)
+    if not case:
+        raise HTTPException(404, "Moderation case not found")
+    try:
+        note = await service.add_case_note(db, case, identity[0], payload.body)
+        await db.commit()
+        return {"id": str(note.id), "created_at": note.created_at}
+    except service.TrustSafetyError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/cases/{case_id}/evidence/{evidence_id}")
+async def evidence_access(
+    case_id: UUID, evidence_id: UUID, identity: CurrentIdentity, db: Db
+) -> dict:
+    evidence = await db.scalar(
+        select(ModerationEvidence).where(
+            ModerationEvidence.id == evidence_id, ModerationEvidence.case_id == case_id
+        )
+    )
+    if not evidence:
+        raise HTTPException(404, "Evidence not found")
+    authorize(
+        identity[0],
+        Permission.MODERATION_SENSITIVE_EVIDENCE
+        if evidence.sensitive
+        else Permission.MODERATION_CASE_VIEW,
+    )
+    from app.audit.service import record_event
+
+    await record_event(
+        db,
+        "trust_safety.evidence_accessed",
+        actor_user_id=identity[0].id,
+        target_type="moderation_evidence",
+        target_id=str(evidence.id),
+    )
+    await db.commit()
+    return {
+        "id": str(evidence.id),
+        "source_type": evidence.source_type,
+        "source_id": str(evidence.source_id) if evidence.source_id else None,
+        "snapshot": evidence.snapshot,
+        "safe_reference": evidence.safe_reference,
+    }

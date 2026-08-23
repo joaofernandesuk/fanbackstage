@@ -8,3 +8,11 @@ class TrustSafetyReportInput(BaseModel):
     target_id: UUID
     reason: str
     details: str | None = Field(default=None, max_length=2000)
+
+
+class CaseAssignmentInput(BaseModel):
+    moderator_id: UUID | None = None
+
+
+class CaseNoteInput(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
