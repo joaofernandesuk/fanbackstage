@@ -5,8 +5,10 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
 from app.featuring import service
+from app.groups.service import has_delegated_permission
 from app.models.creator import CreatorProfile
 from app.models.featuring import FeatureBooking, FeaturePrice, FeatureSlot, FeatureSurface
+from app.models.groups import GroupPermission
 from app.models.identity import User
 from app.permissions.policies import Permission, authorize
 from app.schemas.featuring import BookingInput, PriceInput, SlotInput, SurfaceInput
@@ -109,18 +111,21 @@ async def my_bookings(identity: CurrentIdentity, db: Db) -> list[dict]:
 
 @router.get("/eligible-targets")
 async def eligible_targets(identity: CurrentIdentity, db: Db) -> list[dict]:
-    profile = await db.scalar(
-        select(CreatorProfile).where(CreatorProfile.user_id == identity[0].id)
-    )
-    if not profile:
-        return []
-    return [
-        {
-            "target_type": "creator",
-            "target_id": str(profile.id),
-            "title": profile.display_name or profile.username or "Creator",
-        }
-    ]
+    profiles = (await db.scalars(select(CreatorProfile))).all()
+    result = []
+    for profile in profiles:
+        if profile.user_id == identity[0].id or await has_delegated_permission(
+            db, identity[0].id, profile.id, GroupPermission.manage_featuring
+        ):
+            result.append(
+                {
+                    "target_type": "creator",
+                    "target_id": str(profile.id),
+                    "title": profile.display_name or profile.username or "Creator",
+                    "owner_user_id": str(profile.user_id),
+                }
+            )
+    return result
 
 
 @router.post("/bookings")
