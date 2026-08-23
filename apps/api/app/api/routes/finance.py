@@ -9,6 +9,7 @@ from app.finance import service
 from app.media.service import approved_creator
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
+from app.models.featuring import FeatureBooking
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
 from app.models.marketplace import MarketplaceOrder
 from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
@@ -108,6 +109,14 @@ async def complete_development_payment(
     purchase = await db.scalar(select(Purchase).where(Purchase.payment_attempt_id == attempt.id))
     if purchase is not None:
         return purchase_response(purchase)
+
+    booking = await db.scalar(
+        select(FeatureBooking).where(FeatureBooking.payment_attempt_id == attempt.id)
+    )
+    if booking is not None:
+        return DevelopmentPaymentCompletionResponse(
+            id=booking.id, status=booking.status.value, payment_attempt_id=attempt.id
+        )
 
     unlock = await db.scalar(
         select(MessageUnlockPurchase).where(MessageUnlockPurchase.payment_attempt_id == attempt.id)
