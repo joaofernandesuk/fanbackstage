@@ -675,6 +675,40 @@ async def sponsored_insertion(
     return output
 
 
+async def record_sponsored_event(
+    db: AsyncSession,
+    *,
+    event_type: str,
+    request_key: str,
+    user: User | None,
+    booking_id: UUID,
+) -> bool:
+    """Store featured analytics independently from organic discovery events."""
+    if event_type not in {"sponsored_impression", "sponsored_click", "sponsored_conversion"}:
+        raise FeaturingError("Invalid sponsored analytics event")
+    booking = await db.get(FeatureBooking, booking_id)
+    if not booking or booking.status is not FeatureBookingStatus.active:
+        raise FeaturingError("Sponsored placement is not active")
+    try:
+        await assert_target_eligibility(db, booking.target_type, booking.target_id)
+    except FeaturingError as exc:
+        raise FeaturingError("Sponsored placement is not eligible") from exc
+    from app.discovery.service import current_config, record_event
+
+    config = await current_config(db)
+    await record_event(
+        db,
+        event_type=event_type,
+        request_key=request_key,
+        user=user,
+        ranking_version=config.version,
+        entity_type=booking.target_type.value,
+        entity_id=booking.target_id,
+        metadata={"booking_id": str(booking.id), "surface_id": str(booking.surface_id)},
+    )
+    return True
+
+
 async def initiate_payment(
     db: AsyncSession, booking: FeatureBooking, payer: User
 ) -> PaymentAttempt:

@@ -504,6 +504,7 @@ async def record_event(
     ranking_version: int,
     entity_type: str | None = None,
     entity_id: UUID | None = None,
+    metadata: dict | None = None,
 ) -> None:
     kind = DiscoveryEntityType(entity_type) if entity_type else None
     existing = await db.scalar(
@@ -523,6 +524,7 @@ async def record_event(
                 entity_type=kind,
                 entity_id=entity_id,
                 ranking_version=ranking_version,
+                metadata_json=metadata or {},
             )
         )
 

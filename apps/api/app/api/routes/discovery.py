@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.core.rate_limit import enforce_discovery_rate_limit
 from app.discovery import service
+from app.featuring import service as featuring_service
 from app.models.discovery import DiscoveryHide
 from app.permissions.policies import Permission, authorize
 from app.schemas.discovery import DiscoveryConfigInput, DiscoveryHideInput, DiscoveryPage
@@ -107,6 +108,25 @@ async def click(
             ranking_version=config.version,
             entity_type=entity_type,
             entity_id=entity_id,
+        )
+        await db.commit()
+        return {"recorded": True}
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/events/sponsored/{booking_id}/{event_type}")
+async def sponsored_event(
+    booking_id: UUID, event_type: str, request: Request, identity: OptionalIdentity, db: Db
+) -> dict:
+    try:
+        await featuring_service.record_sponsored_event(
+            db,
+            event_type=event_type,
+            request_key=request.state.correlation_id,
+            user=identity[0] if identity else None,
+            booking_id=booking_id,
         )
         await db.commit()
         return {"recorded": True}

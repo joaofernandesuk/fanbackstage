@@ -14,11 +14,20 @@ from app.db.session import SessionLocal
 from app.discovery import service as discovery
 from app.featuring import service
 from app.finance import service as finance
+from app.models.content import ModerationStatus
 from app.models.creator import CreatorStatus
+from app.models.discovery import DiscoveryEvent
 from app.models.featuring import FeatureBookingStatus, FeatureIneligibilityReason, FeatureRefund
 from app.models.finance import LedgerEntry, PaymentStatus
 from app.models.identity import User
+from app.models.marketplace import (
+    MarketplaceCondition,
+    MarketplaceListing,
+    MarketplaceListingStatus,
+    MarketplaceShippingMode,
+)
 from app.models.messaging import UserBlock
+from app.models.streaming import LiveAccessMode, LiveRoom, LiveRoomStatus
 
 
 async def creator(db, email: str):
@@ -314,6 +323,166 @@ async def test_sponsored_insertion_is_labelled_deduplicated_and_never_changes_or
         feature_surface="discover_home_hero",
     )
     assert blocked == []
+
+
+@pytest.mark.asyncio
+async def test_sponsored_analytics_are_separate_and_render_deduplicated(db_session):
+    admin, _ = await accounts.register(
+        db_session, "feature-admin-analytics@example.com", "strong-password-123", None
+    )
+    owner, profile = await creator(db_session, "feature-analytics@example.com")
+    viewer, _ = await accounts.register(
+        db_session, "feature-analytics-viewer@example.com", "strong-password-123", None
+    )
+    surface = await service.create_surface(db_session, admin, "discover_creators")
+    slot = await service.create_slot(db_session, admin, surface.id, "analytics-1", 0)
+    await service.create_price(db_session, admin, slot.id, "creator", 3600, 900, "EUR")
+    booking = await service.create_booking(
+        db_session,
+        actor=owner,
+        purchaser=owner,
+        slot_id=slot.id,
+        target_type="creator",
+        target_id=profile.id,
+        starts_at=datetime.now(UTC) + timedelta(hours=2),
+        duration_seconds=3600,
+        idempotency_key="analytics-booking",
+    )
+    booking.status = FeatureBookingStatus.active
+    config = await discovery.current_config(db_session)
+    await discovery.record_event(
+        db_session,
+        event_type="recommendation_impression",
+        request_key="organic-render",
+        user=viewer,
+        ranking_version=config.version,
+        entity_type="creator",
+        entity_id=profile.id,
+    )
+    await service.record_sponsored_event(
+        db_session,
+        event_type="sponsored_impression",
+        request_key="sponsored-render",
+        user=viewer,
+        booking_id=booking.id,
+    )
+    await service.record_sponsored_event(
+        db_session,
+        event_type="sponsored_impression",
+        request_key="sponsored-render",
+        user=viewer,
+        booking_id=booking.id,
+    )
+    await service.record_sponsored_event(
+        db_session,
+        event_type="sponsored_click",
+        request_key="sponsored-click",
+        user=viewer,
+        booking_id=booking.id,
+    )
+    await service.record_sponsored_event(
+        db_session,
+        event_type="sponsored_conversion",
+        request_key="sponsored-conversion",
+        user=viewer,
+        booking_id=booking.id,
+    )
+    rows = (
+        await db_session.scalars(select(DiscoveryEvent).order_by(DiscoveryEvent.event_type))
+    ).all()
+    assert [row.event_type for row in rows] == [
+        "recommendation_impression",
+        "sponsored_click",
+        "sponsored_conversion",
+        "sponsored_impression",
+    ]
+    sponsored = next(row for row in rows if row.event_type == "sponsored_impression")
+    assert sponsored.metadata_json["booking_id"] == str(booking.id)
+
+
+@pytest.mark.asyncio
+async def test_sold_out_marketplace_and_ended_live_fail_closed_with_policy_correct_refunds(
+    db_session,
+):
+    admin, _ = await accounts.register(
+        db_session, "feature-admin-targets@example.com", "strong-password-123", None
+    )
+    owner, profile = await creator(db_session, "feature-targets@example.com")
+    listing = MarketplaceListing(
+        public_id="listing-featuring-targets",
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        title="Available featured listing",
+        description="safe",
+        category="prints",
+        condition=MarketplaceCondition.new,
+        status=MarketplaceListingStatus.published,
+        moderation_status=ModerationStatus.approved,
+        quantity_available=1,
+        price_amount_minor=1000,
+        currency="EUR",
+        shipping_mode=MarketplaceShippingMode.worldwide,
+        origin_country_code="PT",
+        published_at=datetime.now(UTC),
+    )
+    room = LiveRoom(
+        creator_id=profile.id,
+        public_id="live-featuring-targets",
+        provider_room_name="live-featuring-targets-room",
+        status=LiveRoomStatus.live,
+        access_mode=LiveAccessMode.public,
+        title="Live target",
+        description="safe",
+        started_at=datetime.now(UTC),
+    )
+    db_session.add_all([listing, room])
+    await db_session.flush()
+    assert (
+        await service.assert_target_eligibility(
+            db_session, service.FeatureTargetType.marketplace_listing, listing.id
+        )
+        == profile.id
+    )
+    assert (
+        await service.assert_target_eligibility(
+            db_session, service.FeatureTargetType.live_room, room.id
+        )
+        == profile.id
+    )
+    listing.quantity_available = 0
+    with pytest.raises(service.FeaturingError, match="not eligible"):
+        await service.assert_target_eligibility(
+            db_session, service.FeatureTargetType.marketplace_listing, listing.id
+        )
+
+    surface = await service.create_surface(db_session, admin, "live_now")
+    slot = await service.create_slot(db_session, admin, surface.id, "live-target-1", 0)
+    await service.create_price(db_session, admin, slot.id, "live_room", 3600, 900, "EUR")
+    booking = await service.create_booking(
+        db_session,
+        actor=owner,
+        purchaser=owner,
+        slot_id=slot.id,
+        target_type="live_room",
+        target_id=room.id,
+        starts_at=datetime.now(UTC) + timedelta(hours=2),
+        duration_seconds=3600,
+        idempotency_key="creator-live-end",
+    )
+    attempt = await service.initiate_payment(db_session, booking, owner)
+    attempt.status = PaymentStatus.succeeded
+    await service.settle_payment(db_session, booking)
+    booking.status = FeatureBookingStatus.active
+    booking.activated_at = datetime.now(UTC) - timedelta(seconds=60)
+    room.status = LiveRoomStatus.ended
+    await service.terminate_ineligible(
+        db_session, booking, FeatureIneligibilityReason.creator_ended
+    )
+    assert booking.status is FeatureBookingStatus.suspended
+    assert (
+        await db_session.scalar(select(FeatureRefund).where(FeatureRefund.booking_id == booking.id))
+        is None
+    )
 
 
 @pytest.mark.asyncio
