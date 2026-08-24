@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -585,3 +586,37 @@ async def test_creator_suspension_uses_creator_lifecycle_and_preserves_action_hi
     )
     assert creator.status is CreatorStatus.approved and creator.is_public is True
     assert action.reversal_action_id == restoration.id and action.reversed_at
+
+
+@pytest.mark.asyncio
+async def test_feature_eligibility_restoration_never_resurrects_terminal_booking(db_session):
+    moderator, _ = await accounts.register(
+        db_session, "ts-feature-restore@example.com", "strong-password-123", None
+    )
+    booking_id = uuid4()
+    case = ModerationCase(
+        public_id="TS-FEATURE-RESTORE",
+        primary_target_type=ReportTargetType.featured_placement,
+        primary_target_id=booking_id,
+        severity=ModerationSeverity.high,
+        queue=ModerationQueue.content,
+        opened_at=datetime.now(UTC),
+    )
+    db_session.add(case)
+    await db_session.flush()
+    disabled = service.ModerationAction(
+        case_id=case.id,
+        action_type=service.ModerationActionType.featured_placement_disable,
+        target_type=ReportTargetType.featured_placement,
+        target_id=booking_id,
+        actor_user_id=moderator.id,
+        reason="moderation",
+    )
+    db_session.add(disabled)
+    await db_session.flush()
+    restored = await service.restore_feature_eligibility(db_session, disabled, moderator, "appeal")
+    assert restored.target_id == booking_id
+    assert disabled.reversal_action_id == restored.id
+    assert (
+        await service.restore_feature_eligibility(db_session, disabled, moderator, "replay")
+    ).id == restored.id
