@@ -513,6 +513,7 @@ async def test_sensitive_evidence_is_privileged_audited_and_never_returned_raw(d
         db_session, "ts-sensitive-admin@example.com", "strong-password-123", None
     )
     await accounts.assign_role(db_session, manager, "manager", manager.id, None)
+    await accounts.assign_role(db_session, manager, "moderator", manager.id, None)
     await accounts.assign_role(db_session, administrator, "super_admin", administrator.id, None)
     profile = await creators.get_or_create_profile(db_session, owner)
     content = ContentItem(
@@ -542,6 +543,9 @@ async def test_sensitive_evidence_is_privileged_audited_and_never_returned_raw(d
     )
     db_session.add(evidence)
     await db_session.flush()
+    detail = await trust_safety_routes.case_detail(case.id, (manager, None), db_session)
+    assert "reporter_user_id" not in detail
+    assert detail["safe_evidence"] == []
     with pytest.raises(HTTPException, match="Permission denied"):
         await trust_safety_routes.evidence_access(case.id, evidence.id, (manager, None), db_session)
     response = await trust_safety_routes.evidence_access(
