@@ -580,3 +580,8 @@ async def test_creator_suspension_uses_creator_lifecycle_and_preserves_action_hi
     assert (
         await service.enforce_creator_suspension(db_session, case, moderator, creator.id, "replay")
     ).id == action.id
+    restoration = await service.reverse_creator_suspension(
+        db_session, action, moderator, "supported review"
+    )
+    assert creator.status is CreatorStatus.approved and creator.is_public is True
+    assert action.reversal_action_id == restoration.id and action.reversed_at

@@ -308,6 +308,39 @@ async def enforce_creator_suspension(
     return action
 
 
+async def reverse_creator_suspension(
+    db: AsyncSession, action: ModerationAction, actor: User, reason: str
+) -> ModerationAction:
+    """Restore only a suspended creator through its lifecycle transition."""
+    if action.action_type is not ModerationActionType.creator_suspend:
+        raise TrustSafetyError("Only creator suspension can be restored")
+    if action.reversal_action_id:
+        restored = await db.get(ModerationAction, action.reversal_action_id)
+        assert restored
+        return restored
+    from app.creators import service as creator_service
+    from app.models.creator import CreatorStatus
+
+    creator = await db.get(CreatorProfile, action.target_id)
+    if not creator:
+        raise TrustSafetyError("Creator not found")
+    if creator.status is CreatorStatus.suspended:
+        await creator_service.set_status(db, creator, CreatorStatus.approved, actor.id, reason)
+        creator.is_public = True
+    restoration = ModerationAction(
+        case_id=action.case_id,
+        action_type=ModerationActionType.creator_unsuspend,
+        target_type=ReportTargetType.creator,
+        target_id=creator.id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(restoration)
+    await db.flush()
+    action.reversal_action_id, action.reversed_at = restoration.id, datetime.now(UTC)
+    return restoration
+
+
 async def reverse_content_containment(
     db: AsyncSession, action: ModerationAction, actor: User, reason: str
 ) -> ModerationAction:
