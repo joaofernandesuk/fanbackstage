@@ -430,6 +430,30 @@ async def enforce_feature_disablement(
     return action
 
 
+async def restore_feature_eligibility(
+    db: AsyncSession, action: ModerationAction, actor: User, reason: str
+) -> ModerationAction:
+    """Record overturned eligibility only; a disabled booking is permanently terminal."""
+    if action.action_type is not ModerationActionType.featured_placement_disable:
+        raise TrustSafetyError("Only feature disablement can restore eligibility")
+    if action.reversal_action_id:
+        restored = await db.get(ModerationAction, action.reversal_action_id)
+        assert restored
+        return restored
+    restored = ModerationAction(
+        case_id=action.case_id,
+        action_type=ModerationActionType.featured_placement_eligibility_restored,
+        target_type=ReportTargetType.featured_placement,
+        target_id=action.target_id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(restored)
+    await db.flush()
+    action.reversal_action_id, action.reversed_at = restored.id, datetime.now(UTC)
+    return restored
+
+
 async def reverse_content_containment(
     db: AsyncSession, action: ModerationAction, actor: User, reason: str
 ) -> ModerationAction:

@@ -92,6 +92,7 @@ class ModerationActionType(str, enum.Enum):
     marketplace_selling_suspend = "marketplace_selling_suspend"
     live_terminate = "live_terminate"
     featured_placement_disable = "featured_placement_disable"
+    featured_placement_eligibility_restored = "featured_placement_eligibility_restored"
     referral_affiliate_suspend = "referral_affiliate_suspend"
     temporary_containment = "temporary_containment"
     warning = "warning"
