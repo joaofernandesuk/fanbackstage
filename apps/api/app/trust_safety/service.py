@@ -341,6 +341,62 @@ async def reverse_creator_suspension(
     return restoration
 
 
+async def enforce_marketplace_suspension(
+    db: AsyncSession, case: ModerationCase, actor: User, creator_id: UUID, reason: str
+) -> ModerationAction:
+    existing = await db.scalar(
+        select(ModerationAction).where(
+            ModerationAction.case_id == case.id,
+            ModerationAction.action_type == ModerationActionType.marketplace_selling_suspend,
+            ModerationAction.target_id == creator_id,
+        )
+    )
+    if existing:
+        return existing
+    from app.marketplace import service as marketplace_service
+
+    await marketplace_service.set_marketplace_suspension(db, actor, creator_id, True, reason)
+    action = ModerationAction(
+        case_id=case.id,
+        action_type=ModerationActionType.marketplace_selling_suspend,
+        target_type=ReportTargetType.creator,
+        target_id=creator_id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(action)
+    await db.flush()
+    return action
+
+
+async def enforce_live_termination(
+    db: AsyncSession, case: ModerationCase, actor: User, room_id: UUID, reason: str
+) -> ModerationAction:
+    existing = await db.scalar(
+        select(ModerationAction).where(
+            ModerationAction.case_id == case.id,
+            ModerationAction.action_type == ModerationActionType.live_terminate,
+            ModerationAction.target_id == room_id,
+        )
+    )
+    if existing:
+        return existing
+    from app.streaming import service as streaming_service
+
+    await streaming_service.terminate_live_for_moderation(db, actor, room_id, reason)
+    action = ModerationAction(
+        case_id=case.id,
+        action_type=ModerationActionType.live_terminate,
+        target_type=ReportTargetType.live_room,
+        target_id=room_id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(action)
+    await db.flush()
+    return action
+
+
 async def reverse_content_containment(
     db: AsyncSession, action: ModerationAction, actor: User, reason: str
 ) -> ModerationAction:

@@ -149,6 +149,29 @@ async def end_live(db: AsyncSession, actor: User, room_id: UUID) -> LiveRoom:
     return room
 
 
+async def terminate_live_for_moderation(
+    db: AsyncSession, actor: User, room_id: UUID, reason: str
+) -> LiveRoom:
+    """Trust & Safety entry point; preserves room history while ending active public delivery."""
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    if not room:
+        raise PermissionError("Live room not found")
+    if room.status is LiveRoomStatus.ended:
+        return room
+    if room.status is not LiveRoomStatus.live:
+        raise StreamingError("Live room cannot be terminated from its current state")
+    room.status, room.ended_at = LiveRoomStatus.ended, datetime.now(UTC)
+    await record_event(
+        db,
+        "live.moderation_terminated",
+        actor_user_id=actor.id,
+        target_type="live_room",
+        target_id=str(room.id),
+        metadata={"reason": reason},
+    )
+    return room
+
+
 async def can_join_live(db: AsyncSession, viewer: User, room: LiveRoom) -> bool:
     if room.status is not LiveRoomStatus.live:
         return False
