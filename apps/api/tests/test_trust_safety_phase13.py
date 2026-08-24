@@ -624,3 +624,29 @@ async def test_feature_eligibility_restoration_never_resurrects_terminal_booking
     assert (
         await service.restore_feature_eligibility(db_session, disabled, moderator, "replay")
     ).id == restored.id
+
+
+@pytest.mark.asyncio
+async def test_case_assignment_and_notes_require_server_side_triage_permission(db_session):
+    user, _ = await accounts.register(
+        db_session, "ts-case-user@example.com", "strong-password-123", None
+    )
+    target = uuid4()
+    case = ModerationCase(
+        public_id="TS-CONTROLS",
+        primary_target_type=ReportTargetType.media,
+        primary_target_id=target,
+        severity=ModerationSeverity.medium,
+        queue=ModerationQueue.content,
+        opened_at=datetime.now(UTC),
+    )
+    db_session.add(case)
+    await db_session.flush()
+    with pytest.raises(HTTPException, match="Permission denied"):
+        await trust_safety_routes.assign_case(
+            case.id, trust_safety_routes.CaseAssignmentInput(), (user, None), db_session
+        )
+    with pytest.raises(HTTPException, match="Permission denied"):
+        await trust_safety_routes.add_note(
+            case.id, trust_safety_routes.CaseNoteInput(body="nope"), (user, None), db_session
+        )
