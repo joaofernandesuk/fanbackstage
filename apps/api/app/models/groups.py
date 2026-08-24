@@ -66,6 +66,7 @@ class GroupPermission(str, enum.Enum):
     manage_marketplace = "manage_marketplace"
     manage_marketplace_orders = "manage_marketplace_orders"
     manage_featuring = "manage_featuring"
+    manage_consent_releases = "manage_consent_releases"
 
 
 class Group(UUIDPrimaryKey, Timestamped, Base):

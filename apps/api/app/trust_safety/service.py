@@ -45,6 +45,19 @@ class TrustSafetyError(ValueError):
     pass
 
 
+async def can_manage_consent_releases(
+    db: AsyncSession, creator: CreatorProfile, actor: User
+) -> bool:
+    if creator.user_id == actor.id:
+        return True
+    from app.groups.service import has_delegated_permission
+    from app.models.groups import GroupPermission
+
+    return await has_delegated_permission(
+        db, actor.id, creator.id, GroupPermission.manage_consent_releases
+    )
+
+
 async def target_snapshot(db: AsyncSession, target_type: ReportTargetType, target_id: UUID) -> dict:
     """Resolve a reportable object server-side and retain only safe immutable context."""
     models: dict[ReportTargetType, tuple[type, str | None]] = {
@@ -362,7 +375,11 @@ async def submit_consent_release(
     evidence_reference: str | None = None,
     supersedes_release_id: UUID | None = None,
 ) -> ConsentRelease:
-    if actor.id != creator.user_id or not participant_reference.strip() or not content_ids:
+    if (
+        not await can_manage_consent_releases(db, creator, actor)
+        or not participant_reference.strip()
+        or not content_ids
+    ):
         raise TrustSafetyError("Invalid consent release submission")
     for content_id in set(content_ids):
         content = await db.get(ContentItem, content_id)
@@ -429,7 +446,8 @@ async def valid_verified_release_for_content(
 async def revoke_consent_release(
     db: AsyncSession, release: ConsentRelease, actor: User
 ) -> ConsentRelease:
-    if actor.id != release.created_by_user_id:
+    creator = await db.get(CreatorProfile, release.owner_creator_id)
+    if not creator or not await can_manage_consent_releases(db, creator, actor):
         raise TrustSafetyError("Consent release cannot be revoked")
     if release.status is ConsentReleaseStatus.revoked:
         return release

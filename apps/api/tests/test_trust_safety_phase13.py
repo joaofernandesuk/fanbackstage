@@ -7,8 +7,10 @@ from app.accounts import service as accounts
 from app.content import service as content_service
 from app.creators import service as creators
 from app.discovery import service as discovery
+from app.groups import service as groups
 from app.models.content import ContentItem, ContentStatus, ContentType, ModerationStatus
 from app.models.creator import CreatorStatus
+from app.models.groups import GroupPermission
 from app.models.social import FeedPost, FeedPostStatus, FeedPostType
 from app.models.trust_safety import (
     ModerationCase,
@@ -441,3 +443,45 @@ async def test_revocation_opens_one_persistent_consent_review_case(db_session):
     )
     assert release.status.value == "revoked"
     assert await service.valid_verified_release_for_content(db_session, content.id)
+
+
+@pytest.mark.asyncio
+async def test_only_explicitly_delegated_manager_can_manage_but_not_verify_release(db_session):
+    manager, _ = await accounts.register(
+        db_session, "ts-consent-manager@example.com", "strong-password-123", None
+    )
+    creator_user, _ = await accounts.register(
+        db_session, "ts-consent-managed@example.com", "strong-password-123", None
+    )
+    creator = await creators.get_or_create_profile(db_session, creator_user)
+    content = ContentItem(
+        owner_creator_id=creator.id,
+        created_by_user_id=creator_user.id,
+        content_type=ContentType.gallery,
+        title="Managed consent",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    group = await groups.create_group(
+        db_session, manager, "Consent Group", "consent-group", 5000, None
+    )
+    membership = await groups.invite_creator(
+        db_session,
+        group.id,
+        manager,
+        creator.id,
+        None,
+        [GroupPermission.manage_consent_releases],
+    )
+    await groups.accept_invitation(db_session, membership.id, creator_user)
+    assert await service.can_manage_consent_releases(db_session, creator, manager)
+    release = await service.submit_consent_release(
+        db_session,
+        creator,
+        manager,
+        service.ConsentReleaseType.co_performer_release,
+        "participant",
+        [content.id],
+    )
+    with pytest.raises(service.TrustSafetyError, match="self-verified"):
+        await service.verify_consent_release(db_session, release, manager, True)

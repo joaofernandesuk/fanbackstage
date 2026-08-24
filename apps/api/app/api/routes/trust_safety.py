@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
 from app.models.trust_safety import (
+    ConsentRelease,
     ModerationAction,
     ModerationCase,
     ModerationCaseStatus,
@@ -16,6 +17,7 @@ from app.schemas.trust_safety import (
     AppealInput,
     CaseAssignmentInput,
     CaseNoteInput,
+    ConsentReleaseInput,
     TrustSafetyReportInput,
 )
 from app.trust_safety import service
@@ -174,5 +176,95 @@ async def decide_appeal(
         await db.commit()
         return {"id": str(appeal.id), "status": appeal.status.value}
     except (ValueError, service.TrustSafetyError) as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/creators/{creator_id}/consent-releases")
+async def list_consent_releases(creator_id: UUID, identity: CurrentIdentity, db: Db) -> list[dict]:
+    from app.models.creator import CreatorProfile
+
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator:
+        raise HTTPException(404, "Creator not found")
+    if not await service.can_manage_consent_releases(db, creator, identity[0]):
+        raise HTTPException(403, "Consent-release management permission denied")
+    releases = (
+        await db.scalars(
+            select(ConsentRelease)
+            .where(ConsentRelease.owner_creator_id == creator.id)
+            .order_by(ConsentRelease.created_at.desc())
+        )
+    ).all()
+    return [
+        {
+            "id": str(release.id),
+            "status": release.status.value,
+            "release_type": release.release_type.value,
+            "effective_until": release.effective_until,
+            "revoked_at": release.revoked_at,
+            "supersedes_release_id": str(release.supersedes_release_id)
+            if release.supersedes_release_id
+            else None,
+        }
+        for release in releases
+    ]
+
+
+@router.post("/creators/{creator_id}/consent-releases")
+async def create_consent_release(
+    creator_id: UUID, payload: ConsentReleaseInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    from app.models.creator import CreatorProfile
+
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator:
+        raise HTTPException(404, "Creator not found")
+    try:
+        release = await service.submit_consent_release(
+            db,
+            creator,
+            identity[0],
+            service.ConsentReleaseType(payload.release_type),
+            payload.participant_reference,
+            payload.content_ids,
+            payload.effective_until,
+            payload.evidence_reference,
+            payload.supersedes_release_id,
+        )
+        await db.commit()
+        return {"id": str(release.id), "status": release.status.value}
+    except (ValueError, service.TrustSafetyError) as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/consent-releases/{release_id}/verify")
+async def verify_consent_release(
+    release_id: UUID, approved: bool, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.CONSENT_RELEASE_MANAGE)
+    release = await db.get(ConsentRelease, release_id)
+    if not release:
+        raise HTTPException(404, "Consent release not found")
+    try:
+        release = await service.verify_consent_release(db, release, identity[0], approved)
+        await db.commit()
+        return {"id": str(release.id), "status": release.status.value}
+    except service.TrustSafetyError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/consent-releases/{release_id}/revoke")
+async def revoke_consent_release(release_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
+    release = await db.get(ConsentRelease, release_id)
+    if not release:
+        raise HTTPException(404, "Consent release not found")
+    try:
+        release = await service.revoke_consent_release(db, release, identity[0])
+        await db.commit()
+        return {"id": str(release.id), "status": release.status.value}
+    except service.TrustSafetyError as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc

@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -24,3 +25,12 @@ class AppealInput(BaseModel):
 
 class AppealDecisionInput(AppealInput):
     outcome: str
+
+
+class ConsentReleaseInput(BaseModel):
+    release_type: str
+    participant_reference: str = Field(min_length=1, max_length=512)
+    content_ids: list[UUID] = Field(min_length=1)
+    effective_until: datetime | None = None
+    evidence_reference: str | None = Field(default=None, max_length=512)
+    supersedes_release_id: UUID | None = None
