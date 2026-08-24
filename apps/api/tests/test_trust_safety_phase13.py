@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import pytest
 from sqlalchemy import select
 
@@ -126,3 +128,58 @@ async def test_containment_is_replay_safe_and_restoration_preserves_action_histo
     )
     assert action.reversal_action_id == reversal.id and action.reversed_at
     assert content.status is ContentStatus.pending_review
+
+
+@pytest.mark.asyncio
+async def test_high_severity_appeal_deadline_and_reviewer_independence(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-appeal-owner@example.com", "strong-password-123", None
+    )
+    original, _ = await accounts.register(
+        db_session, "ts-original@example.com", "strong-password-123", None
+    )
+    reviewer, _ = await accounts.register(
+        db_session, "ts-reviewer@example.com", "strong-password-123", None
+    )
+    reporter, _ = await accounts.register(
+        db_session, "ts-appeal-reporter@example.com", "strong-password-123", None
+    )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Appealable",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    _, case, _ = await service.open_or_attach_report(
+        db_session,
+        reporter,
+        target_type=ReportTargetType.media,
+        target_id=content.id,
+        reason=ReportReason.underage_concern,
+        details="credible",
+    )
+    action = await service.enforce_content_containment(
+        db_session, case, original, content.id, "urgent"
+    )
+    appeal = await service.submit_appeal(db_session, action, owner, "unsupported")
+    with pytest.raises(service.TrustSafetyError, match="Original moderator"):
+        await service.decide_appeal(
+            db_session, appeal, original, service.AppealStatus.overturned, "no"
+        )
+    decided = await service.decide_appeal(
+        db_session, appeal, reviewer, service.AppealStatus.overturned, "supported"
+    )
+    assert decided.status is service.AppealStatus.overturned
+    with pytest.raises(service.TrustSafetyError, match="deadline"):
+        await service.submit_appeal(
+            db_session,
+            action,
+            owner,
+            "late",
+            now=action.created_at + service.APPEAL_WINDOW + timedelta(seconds=1),
+        )

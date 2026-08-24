@@ -17,8 +17,10 @@ from app.models.messaging import Message
 from app.models.social import FeedPost, PostComment
 from app.models.streaming import LiveChatMessage, LiveRoom
 from app.models.trust_safety import (
+    AppealStatus,
     ModerationAction,
     ModerationActionType,
+    ModerationAppeal,
     ModerationCase,
     ModerationCaseNote,
     ModerationCaseStatus,
@@ -31,6 +33,7 @@ from app.models.trust_safety import (
 )
 
 REPORT_DEDUPLICATION_WINDOW = timedelta(hours=24)
+APPEAL_WINDOW = timedelta(days=30)
 URGENT_REASONS = {ReportReason.underage_concern, ReportReason.non_consensual_content}
 
 
@@ -274,3 +277,71 @@ async def reverse_content_containment(
     action.reversal_action_id = reversal.id
     action.reversed_at = datetime.now(UTC)
     return reversal
+
+
+async def submit_appeal(
+    db: AsyncSession,
+    action: ModerationAction,
+    appellant: User,
+    reason: str,
+    *,
+    now: datetime | None = None,
+) -> ModerationAppeal:
+    now = now or datetime.now(UTC)
+    if action.target_type is not ReportTargetType.media:
+        raise TrustSafetyError("This action is not appealable through this workflow")
+    content = await db.get(ContentItem, action.target_id)
+    if not content or content.created_by_user_id != appellant.id:
+        raise TrustSafetyError("You are not authorized to appeal this action")
+    deadline = action.created_at + APPEAL_WINDOW
+    if now > deadline:
+        raise TrustSafetyError("The appeal deadline has passed")
+    existing = await db.scalar(
+        select(ModerationAppeal).where(
+            ModerationAppeal.moderation_action_id == action.id,
+            ModerationAppeal.status.in_([AppealStatus.submitted, AppealStatus.under_review]),
+        )
+    )
+    if existing:
+        return existing
+    appeal = ModerationAppeal(
+        moderation_case_id=action.case_id,
+        moderation_action_id=action.id,
+        appellant_user_id=appellant.id,
+        reason=reason.strip(),
+        policy_deadline_at=deadline,
+    )
+    db.add(appeal)
+    await db.flush()
+    return appeal
+
+
+async def decide_appeal(
+    db: AsyncSession, appeal: ModerationAppeal, reviewer: User, outcome: AppealStatus, reason: str
+) -> ModerationAppeal:
+    if outcome not in {
+        AppealStatus.upheld,
+        AppealStatus.overturned,
+        AppealStatus.partially_overturned,
+    }:
+        raise TrustSafetyError("Invalid appeal decision")
+    action = await db.get(ModerationAction, appeal.moderation_action_id)
+    case = await db.get(ModerationCase, appeal.moderation_case_id)
+    assert action and case
+    if (
+        case.severity in {ModerationSeverity.high, ModerationSeverity.critical}
+        and action.actor_user_id == reviewer.id
+    ):
+        raise TrustSafetyError("Original moderator cannot finalize a high-severity appeal")
+    if (
+        outcome is AppealStatus.overturned
+        and action.action_type is ModerationActionType.temporary_containment
+    ):
+        await reverse_content_containment(db, action, reviewer, reason)
+    appeal.status, appeal.reviewer_user_id, appeal.outcome, appeal.decided_at = (
+        outcome,
+        reviewer.id,
+        reason.strip(),
+        datetime.now(UTC),
+    )
+    return appeal

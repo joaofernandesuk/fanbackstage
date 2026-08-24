@@ -16,3 +16,11 @@ class CaseAssignmentInput(BaseModel):
 
 class CaseNoteInput(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
+
+
+class AppealInput(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class AppealDecisionInput(AppealInput):
+    outcome: str

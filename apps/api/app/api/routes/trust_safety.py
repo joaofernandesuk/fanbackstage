@@ -4,9 +4,20 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
-from app.models.trust_safety import ModerationCase, ModerationCaseStatus, ModerationEvidence
+from app.models.trust_safety import (
+    ModerationAction,
+    ModerationCase,
+    ModerationCaseStatus,
+    ModerationEvidence,
+)
 from app.permissions.policies import Permission, authorize
-from app.schemas.trust_safety import CaseAssignmentInput, CaseNoteInput, TrustSafetyReportInput
+from app.schemas.trust_safety import (
+    AppealDecisionInput,
+    AppealInput,
+    CaseAssignmentInput,
+    CaseNoteInput,
+    TrustSafetyReportInput,
+)
 from app.trust_safety import service
 
 router = APIRouter(prefix="/trust-safety", tags=["trust-safety"])
@@ -124,3 +135,44 @@ async def evidence_access(
         "snapshot": evidence.snapshot,
         "safe_reference": evidence.safe_reference,
     }
+
+
+@router.post("/actions/{action_id}/appeals")
+async def submit_appeal(
+    action_id: UUID, payload: AppealInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    action = await db.get(ModerationAction, action_id)
+    if not action:
+        raise HTTPException(404, "Moderation action not found")
+    try:
+        appeal = await service.submit_appeal(db, action, identity[0], payload.reason)
+        await db.commit()
+        return {
+            "id": str(appeal.id),
+            "status": appeal.status.value,
+            "deadline": appeal.policy_deadline_at,
+        }
+    except service.TrustSafetyError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/appeals/{appeal_id}/decision")
+async def decide_appeal(
+    appeal_id: UUID, payload: AppealDecisionInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.MODERATION_APPEAL_REVIEW)
+    from app.models.trust_safety import AppealStatus, ModerationAppeal
+
+    appeal = await db.get(ModerationAppeal, appeal_id)
+    if not appeal:
+        raise HTTPException(404, "Appeal not found")
+    try:
+        appeal = await service.decide_appeal(
+            db, appeal, identity[0], AppealStatus(payload.outcome), payload.reason
+        )
+        await db.commit()
+        return {"id": str(appeal.id), "status": appeal.status.value}
+    except (ValueError, service.TrustSafetyError) as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
