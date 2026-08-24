@@ -319,3 +319,46 @@ async def test_revoked_or_expired_required_consent_disappears_from_discovery(db_
     await service.revoke_consent_release(db_session, release, owner)
     rows, _, _ = await discovery.search(db_session, None, query="consent discovery")
     assert content.id not in {row.id for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_expired_and_superseded_releases_cannot_authorize_new_serving(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-expiry-owner@example.com", "strong-password-123", None
+    )
+    reviewer, _ = await accounts.register(
+        db_session, "ts-expiry-reviewer@example.com", "strong-password-123", None
+    )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Expiry",
+        requires_verified_consent=True,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    expired = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.co_performer_release,
+        "participant",
+        [content.id],
+        effective_until=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    await service.verify_consent_release(db_session, expired, reviewer, True)
+    assert not await service.valid_verified_release_for_content(db_session, content.id)
+    current = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.co_performer_release,
+        "participant",
+        [content.id],
+        supersedes_release_id=expired.id,
+    )
+    await service.verify_consent_release(db_session, current, reviewer, True)
+    assert expired.status.value == "superseded"
+    assert await service.valid_verified_release_for_content(db_session, content.id)
