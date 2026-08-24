@@ -34,3 +34,9 @@ class ConsentReleaseInput(BaseModel):
     effective_until: datetime | None = None
     evidence_reference: str | None = Field(default=None, max_length=512)
     supersedes_release_id: UUID | None = None
+
+
+class EnforcementInput(BaseModel):
+    action: str
+    target_id: UUID
+    reason: str = Field(min_length=1, max_length=500)

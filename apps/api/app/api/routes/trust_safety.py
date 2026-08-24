@@ -20,6 +20,7 @@ from app.schemas.trust_safety import (
     CaseAssignmentInput,
     CaseNoteInput,
     ConsentReleaseInput,
+    EnforcementInput,
     TrustSafetyReportInput,
 )
 from app.trust_safety import service
@@ -168,6 +169,33 @@ async def add_note(
         await db.commit()
         return {"id": str(note.id), "created_at": note.created_at}
     except service.TrustSafetyError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/cases/{case_id}/enforcement")
+async def enforce_case(
+    case_id: UUID, payload: EnforcementInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.MODERATION_ACTION)
+    case = await db.get(ModerationCase, case_id)
+    if not case:
+        raise HTTPException(404, "Moderation case not found")
+    handlers = {
+        "contain_content": service.enforce_content_containment,
+        "suspend_creator": service.enforce_creator_suspension,
+        "suspend_marketplace": service.enforce_marketplace_suspension,
+        "terminate_live": service.enforce_live_termination,
+        "disable_featuring": service.enforce_feature_disablement,
+    }
+    handler = handlers.get(payload.action)
+    if not handler:
+        raise HTTPException(400, "Unsupported enforcement action")
+    try:
+        action = await handler(db, case, identity[0], payload.target_id, payload.reason)
+        await db.commit()
+        return {"id": str(action.id), "type": action.action_type.value}
+    except (PermissionError, ValueError, service.TrustSafetyError) as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc
 
