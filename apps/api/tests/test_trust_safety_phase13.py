@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -6,7 +6,9 @@ from sqlalchemy import select
 from app.accounts import service as accounts
 from app.content import service as content_service
 from app.creators import service as creators
+from app.discovery import service as discovery
 from app.models.content import ContentItem, ContentStatus, ContentType, ModerationStatus
+from app.models.creator import CreatorStatus
 from app.models.social import FeedPost, FeedPostStatus, FeedPostType
 from app.models.trust_safety import (
     ModerationEvidence,
@@ -279,3 +281,41 @@ async def test_mandatory_consent_fails_closed_until_current_verified_scope(db_se
     from app.content.access import can_access_content
 
     assert not await can_access_content(db_session, content, None)
+
+
+@pytest.mark.asyncio
+async def test_revoked_or_expired_required_consent_disappears_from_discovery(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-discovery-owner@example.com", "strong-password-123", None
+    )
+    reviewer, _ = await accounts.register(
+        db_session, "ts-discovery-reviewer@example.com", "strong-password-123", None
+    )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    profile.status, profile.is_public = CreatorStatus.approved, True
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Consent discovery target",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        requires_verified_consent=True,
+        published_at=datetime.now(UTC),
+    )
+    db_session.add(content)
+    await db_session.flush()
+    release = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.co_performer_release,
+        "participant",
+        [content.id],
+    )
+    await service.verify_consent_release(db_session, release, reviewer, True)
+    rows, _, _ = await discovery.search(db_session, None, query="consent discovery")
+    assert content.id in {row.id for row in rows}
+    await service.revoke_consent_release(db_session, release, owner)
+    rows, _, _ = await discovery.search(db_session, None, query="consent discovery")
+    assert content.id not in {row.id for row in rows}
