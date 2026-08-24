@@ -551,3 +551,32 @@ async def test_sensitive_evidence_is_privileged_audited_and_never_returned_raw(d
         select(AuditEvent).where(AuditEvent.event_type == "trust_safety.evidence_accessed")
     )
     assert event and event.metadata_json == {}
+
+
+@pytest.mark.asyncio
+async def test_creator_suspension_uses_creator_lifecycle_and_preserves_action_history(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-suspend-owner@example.com", "strong-password-123", None
+    )
+    moderator, _ = await accounts.register(
+        db_session, "ts-suspend-moderator@example.com", "strong-password-123", None
+    )
+    creator = await creators.get_or_create_profile(db_session, owner)
+    creator.status, creator.is_public = CreatorStatus.approved, True
+    case = ModerationCase(
+        public_id="TS-CREATOR-SUSPEND",
+        primary_target_type=ReportTargetType.creator,
+        primary_target_id=creator.id,
+        severity=ModerationSeverity.high,
+        queue=ModerationQueue.general,
+        opened_at=datetime.now(UTC),
+    )
+    db_session.add(case)
+    await db_session.flush()
+    action = await service.enforce_creator_suspension(
+        db_session, case, moderator, creator.id, "supported safety finding"
+    )
+    assert creator.status is CreatorStatus.suspended and creator.is_public is False
+    assert (
+        await service.enforce_creator_suspension(db_session, case, moderator, creator.id, "replay")
+    ).id == action.id

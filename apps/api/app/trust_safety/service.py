@@ -273,6 +273,41 @@ async def enforce_content_containment(
     return action
 
 
+async def enforce_creator_suspension(
+    db: AsyncSession, case: ModerationCase, actor: User, creator_id: UUID, reason: str
+) -> ModerationAction:
+    """Suspend through the creator lifecycle service; never rewrite financial history."""
+    existing = await db.scalar(
+        select(ModerationAction).where(
+            ModerationAction.case_id == case.id,
+            ModerationAction.action_type == ModerationActionType.creator_suspend,
+            ModerationAction.target_type == ReportTargetType.creator,
+            ModerationAction.target_id == creator_id,
+        )
+    )
+    if existing:
+        return existing
+    from app.creators import service as creator_service
+    from app.models.creator import CreatorStatus
+
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator:
+        raise TrustSafetyError("Creator not found")
+    if creator.status is not CreatorStatus.suspended:
+        await creator_service.set_status(db, creator, CreatorStatus.suspended, actor.id, reason)
+    action = ModerationAction(
+        case_id=case.id,
+        action_type=ModerationActionType.creator_suspend,
+        target_type=ReportTargetType.creator,
+        target_id=creator.id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(action)
+    await db.flush()
+    return action
+
+
 async def reverse_content_containment(
     db: AsyncSession, action: ModerationAction, actor: User, reason: str
 ) -> ModerationAction:
