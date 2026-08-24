@@ -252,6 +252,7 @@ async def reconcile(identity: CurrentIdentity, db: Db) -> dict:
     authorize(identity[0], Permission.FINANCIAL_CONFIGURE)
     expired = await service.expire_reservations(db)
     activated = await service.activate_due_bookings(db)
+    revalidated = await service.revalidate_active_bookings(db)
     deactivated = await service.deactivate_due_bookings(db)
     await record_event(
         db,
@@ -259,7 +260,17 @@ async def reconcile(identity: CurrentIdentity, db: Db) -> dict:
         actor_user_id=identity[0].id,
         target_type="featuring_lifecycle",
         target_id="scheduled_bookings",
-        metadata={"expired": expired, "activated": activated, "deactivated": deactivated},
+        metadata={
+            "expired": expired,
+            "activated": activated,
+            "revalidated": revalidated,
+            "deactivated": deactivated,
+        },
     )
     await db.commit()
-    return {"expired": expired, "activated": activated, "deactivated": deactivated}
+    return {
+        "expired": expired,
+        "activated": activated,
+        "revalidated": revalidated,
+        "deactivated": deactivated,
+    }

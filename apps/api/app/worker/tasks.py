@@ -120,15 +120,22 @@ def reconcile_featuring_lifecycle() -> dict[str, int]:
         activate_due_bookings,
         deactivate_due_bookings,
         expire_reservations,
+        revalidate_active_bookings,
     )
 
     async def run() -> dict[str, int]:
         async with SessionLocal() as session:
             expired = await expire_reservations(session)
             activated = await activate_due_bookings(session)
+            revalidated = await revalidate_active_bookings(session)
             deactivated = await deactivate_due_bookings(session)
             await session.commit()
-            return {"expired": expired, "activated": activated, "deactivated": deactivated}
+            return {
+                "expired": expired,
+                "activated": activated,
+                "revalidated": revalidated,
+                "deactivated": deactivated,
+            }
 
     return run_async(run())
 

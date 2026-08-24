@@ -435,6 +435,30 @@ async def deactivate_due_bookings(db: AsyncSession, now: datetime | None = None)
     return len(rows)
 
 
+async def revalidate_active_bookings(db: AsyncSession, now: datetime | None = None) -> int:
+    """Stop active placements whose current source-domain policy has failed closed."""
+    now = now or datetime.now(UTC)
+    rows = (
+        await db.scalars(
+            select(FeatureBooking)
+            .where(
+                FeatureBooking.status == FeatureBookingStatus.active, FeatureBooking.ends_at > now
+            )
+            .with_for_update()
+        )
+    ).all()
+    stopped = 0
+    for booking in rows:
+        try:
+            await assert_target_eligibility(db, booking.target_type, booking.target_id)
+        except FeaturingError:
+            await terminate_ineligible(
+                db, booking, FeatureIneligibilityReason.moderation_ineligible, now=now
+            )
+            stopped += 1
+    return stopped
+
+
 async def _refund(
     db: AsyncSession,
     booking: FeatureBooking,
