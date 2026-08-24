@@ -72,6 +72,11 @@ async def _owner_and_eligible(
         if not target:
             return UUID(int=0), False
         valid_type = target.content_type.value == target_type.value
+        if target.requires_verified_consent:
+            from app.trust_safety.service import valid_verified_release_for_content
+
+            if not await valid_verified_release_for_content(db, target.id):
+                return target.owner_creator_id, False
         return target.owner_creator_id, bool(
             valid_type
             and target.status is ContentStatus.published

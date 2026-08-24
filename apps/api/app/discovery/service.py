@@ -193,6 +193,11 @@ async def _content_rows(
     ).all()
     for row in contents:
         kind = row.content_type.value
+        if row.requires_verified_consent:
+            from app.trust_safety.service import valid_verified_release_for_content
+
+            if not await valid_verified_release_for_content(db, row.id):
+                continue
         if (
             row.owner_creator_id in blocked
             or (kind, row.id) in hidden
