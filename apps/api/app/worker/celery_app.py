@@ -34,6 +34,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.release_marketplace_earnings": {"queue": "financial"},
     "app.worker.tasks.expire_marketplace_reservations": {"queue": "scheduled"},
     "app.worker.tasks.reconcile_featuring_lifecycle": {"queue": "scheduled"},
+    "app.worker.tasks.expire_consent_releases": {"queue": "scheduled"},
     "app.worker.tasks.*": {"queue": "default"},
 }
 celery_app.conf.beat_schedule = {
@@ -75,6 +76,10 @@ celery_app.conf.beat_schedule = {
     },
     "featuring-lifecycle": {
         "task": "app.worker.tasks.reconcile_featuring_lifecycle",
+        "schedule": 60.0,
+    },
+    "consent-release-expiry": {
+        "task": "app.worker.tasks.expire_consent_releases",
         "schedule": 60.0,
     },
 }

@@ -353,6 +353,16 @@ async def test_expired_and_superseded_releases_cannot_authorize_new_serving(db_s
     )
     await service.verify_consent_release(db_session, expired, reviewer, True)
     assert not await service.valid_verified_release_for_content(db_session, content.id)
+    assert await service.expire_consent_releases(db_session) == 1
+    assert expired.status.value == "expired"
+    expiry_case = await db_session.scalar(
+        select(ModerationCase).where(
+            ModerationCase.primary_target_id == content.id,
+            ModerationCase.queue == ModerationQueue.consent,
+        )
+    )
+    assert expiry_case
+    assert await service.expire_consent_releases(db_session) == 0
     current = await service.submit_consent_release(
         db_session,
         profile,
@@ -363,7 +373,7 @@ async def test_expired_and_superseded_releases_cannot_authorize_new_serving(db_s
         supersedes_release_id=expired.id,
     )
     await service.verify_consent_release(db_session, current, reviewer, True)
-    assert expired.status.value == "superseded"
+    assert expired.status.value == "expired"
     assert await service.valid_verified_release_for_content(db_session, content.id)
 
 

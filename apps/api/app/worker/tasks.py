@@ -141,6 +141,21 @@ def reconcile_featuring_lifecycle() -> dict[str, int]:
 
 
 @celery_app.task
+def expire_consent_releases() -> dict[str, int]:
+    """Expire releases server-side; eligibility remains fail-closed even before this sweep."""
+    from app.db.session import SessionLocal
+    from app.trust_safety.service import expire_consent_releases as expire
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            expired = await expire(session)
+            await session.commit()
+            return expired
+
+    return {"expired": run_async(run())}
+
+
+@celery_app.task
 def process_subscription_renewals() -> dict[str, int]:
     """Create one replay-safe renewal attempt per due subscription period."""
     from app.db.session import SessionLocal
