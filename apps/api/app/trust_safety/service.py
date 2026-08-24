@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
-from app.models.content import MediaAsset
+from app.models.content import ContentItem, MediaAsset
 from app.models.creator import CreatorProfile
 from app.models.featuring import FeatureBooking
 from app.models.identity import User
@@ -45,7 +45,6 @@ async def target_snapshot(db: AsyncSession, target_type: ReportTargetType, targe
         ReportTargetType.creator: (CreatorProfile, "id"),
         ReportTargetType.post: (FeedPost, "id"),
         ReportTargetType.comment: (PostComment, "id"),
-        ReportTargetType.media: (MediaAsset, "id"),
         ReportTargetType.message: (Message, "id"),
         ReportTargetType.live_room: (LiveRoom, "id"),
         ReportTargetType.live_chat_message: (LiveChatMessage, "id"),
@@ -58,8 +57,11 @@ async def target_snapshot(db: AsyncSession, target_type: ReportTargetType, targe
 
         row = await db.get(AffiliatePartner, target_id)
     else:
-        model = models.get(target_type)
-        row = await db.get(model[0], target_id) if model else None
+        if target_type is ReportTargetType.media:
+            row = await db.get(ContentItem, target_id) or await db.get(MediaAsset, target_id)
+        else:
+            model = models.get(target_type)
+            row = await db.get(model[0], target_id) if model else None
     if not row:
         raise TrustSafetyError("Report target not found")
     snapshot = {"target_type": target_type.value, "target_id": str(target_id)}

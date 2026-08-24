@@ -4,6 +4,7 @@ from sqlalchemy import select
 from app.accounts import service as accounts
 from app.creators import service as creators
 from app.models.social import FeedPost, FeedPostStatus, FeedPostType
+from app.models.content import ContentItem, ContentStatus, ContentType, ModerationStatus
 from app.models.trust_safety import (
     ModerationEvidence,
     ModerationQueue,
@@ -81,3 +82,47 @@ async def test_underage_report_is_critical_and_unknown_targets_fail_closed(db_se
     assert report.case_id == case.id
     assert case.severity is ModerationSeverity.critical
     assert case.priority == 100
+
+
+@pytest.mark.asyncio
+async def test_containment_is_replay_safe_and_restoration_preserves_action_history(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-content-owner@example.com", "strong-password-123", None
+    )
+    moderator, _ = await accounts.register(
+        db_session, "ts-moderator@example.com", "strong-password-123", None
+    )
+    reporter, _ = await accounts.register(
+        db_session, "ts-content-reporter@example.com", "strong-password-123", None
+    )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Reportable",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    _, case, _ = await service.open_or_attach_report(
+        db_session,
+        reporter,
+        target_type=ReportTargetType.media,
+        target_id=content.id,
+        reason=ReportReason.underage_concern,
+        details="credible",
+    )
+    action = await service.enforce_content_containment(
+        db_session, case, moderator, content.id, "urgent containment"
+    )
+    assert (
+        await service.enforce_content_containment(db_session, case, moderator, content.id, "again")
+    ).id == action.id
+    assert content.status is ContentStatus.removed
+    reversal = await service.reverse_content_containment(
+        db_session, action, moderator, "unsupported"
+    )
+    assert action.reversal_action_id == reversal.id and action.reversed_at
+    assert content.status is ContentStatus.pending_review
