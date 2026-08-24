@@ -650,3 +650,31 @@ async def test_case_assignment_and_notes_require_server_side_triage_permission(d
         await trust_safety_routes.add_note(
             case.id, trust_safety_routes.CaseNoteInput(body="nope"), (user, None), db_session
         )
+
+
+@pytest.mark.asyncio
+async def test_enforcement_endpoint_denies_crafted_unauthorized_and_unsupported_actions(db_session):
+    user, _ = await accounts.register(
+        db_session, "ts-enforce-user@example.com", "strong-password-123", None
+    )
+    moderator, _ = await accounts.register(
+        db_session, "ts-enforce-mod@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, moderator, "moderator", moderator.id, None)
+    case = ModerationCase(
+        public_id="TS-ENFORCE",
+        primary_target_type=ReportTargetType.media,
+        primary_target_id=uuid4(),
+        severity=ModerationSeverity.medium,
+        queue=ModerationQueue.content,
+        opened_at=datetime.now(UTC),
+    )
+    db_session.add(case)
+    await db_session.flush()
+    payload = trust_safety_routes.EnforcementInput(
+        action="unsupported", target_id=uuid4(), reason="test"
+    )
+    with pytest.raises(HTTPException, match="Permission denied"):
+        await trust_safety_routes.enforce_case(case.id, payload, (user, None), db_session)
+    with pytest.raises(HTTPException, match="Unsupported"):
+        await trust_safety_routes.enforce_case(case.id, payload, (moderator, None), db_session)
