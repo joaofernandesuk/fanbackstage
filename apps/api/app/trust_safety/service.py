@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.service import record_event
 from app.models.content import ContentItem, MediaAsset
 from app.models.creator import CreatorProfile
-from app.models.featuring import FeatureBooking
+from app.models.featuring import FeatureBooking, FeatureIneligibilityReason
 from app.models.identity import User
 from app.models.marketplace import MarketplaceListing, MarketplaceOrder
 from app.models.messaging import Message
@@ -389,6 +389,39 @@ async def enforce_live_termination(
         action_type=ModerationActionType.live_terminate,
         target_type=ReportTargetType.live_room,
         target_id=room_id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(action)
+    await db.flush()
+    return action
+
+
+async def enforce_feature_disablement(
+    db: AsyncSession, case: ModerationCase, actor: User, booking_id: UUID, reason: str
+) -> ModerationAction:
+    existing = await db.scalar(
+        select(ModerationAction).where(
+            ModerationAction.case_id == case.id,
+            ModerationAction.action_type == ModerationActionType.featured_placement_disable,
+            ModerationAction.target_id == booking_id,
+        )
+    )
+    if existing:
+        return existing
+    booking = await db.get(FeatureBooking, booking_id)
+    if not booking:
+        raise TrustSafetyError("Feature booking not found")
+    from app.featuring import service as featuring_service
+
+    await featuring_service.terminate_ineligible(
+        db, booking, FeatureIneligibilityReason.moderation_ineligible
+    )
+    action = ModerationAction(
+        case_id=case.id,
+        action_type=ModerationActionType.featured_placement_disable,
+        target_type=ReportTargetType.featured_placement,
+        target_id=booking.id,
         actor_user_id=actor.id,
         reason=reason,
     )
