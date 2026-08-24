@@ -11,6 +11,7 @@ from app.models.content import ContentItem, ContentStatus, ContentType, Moderati
 from app.models.creator import CreatorStatus
 from app.models.social import FeedPost, FeedPostStatus, FeedPostType
 from app.models.trust_safety import (
+    ModerationCase,
     ModerationEvidence,
     ModerationQueue,
     ModerationSeverity,
@@ -361,4 +362,82 @@ async def test_expired_and_superseded_releases_cannot_authorize_new_serving(db_s
     )
     await service.verify_consent_release(db_session, current, reviewer, True)
     assert expired.status.value == "superseded"
+    assert await service.valid_verified_release_for_content(db_session, content.id)
+
+
+@pytest.mark.asyncio
+async def test_revocation_opens_one_persistent_consent_review_case(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-revocation-case-owner@example.com", "strong-password-123", None
+    )
+    reviewer, _ = await accounts.register(
+        db_session, "ts-revocation-case-reviewer@example.com", "strong-password-123", None
+    )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Revocation case",
+        requires_verified_consent=True,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    release = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.co_performer_release,
+        "participant",
+        [content.id],
+    )
+    await service.verify_consent_release(db_session, release, reviewer, True)
+    await service.revoke_consent_release(db_session, release, owner)
+    await service.revoke_consent_release(db_session, release, owner)
+    cases = list(
+        await db_session.scalars(
+            select(ModerationCase).where(
+                ModerationCase.primary_target_id == content.id,
+                ModerationCase.queue == ModerationQueue.consent,
+            )
+        )
+    )
+    assert len(cases) == 1
+    evidence = list(
+        await db_session.scalars(
+            select(ModerationEvidence).where(ModerationEvidence.case_id == cases[0].id)
+        )
+    )
+    assert len(evidence) == 1
+    assert evidence[0].snapshot == {
+        "release_id": str(release.id),
+        "content_id": str(content.id),
+        "creator_id": str(profile.id),
+        "reason": "revoked",
+        "effective_at": release.revoked_at.isoformat(),
+    }
+    replacement = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.co_performer_release,
+        "participant",
+        [content.id],
+        supersedes_release_id=release.id,
+    )
+    await service.verify_consent_release(db_session, replacement, reviewer, True)
+    assert (
+        len(
+            list(
+                await db_session.scalars(
+                    select(ModerationCase).where(
+                        ModerationCase.primary_target_id == content.id,
+                        ModerationCase.queue == ModerationQueue.consent,
+                    )
+                )
+            )
+        )
+        == 1
+    )
+    assert release.status.value == "revoked"
     assert await service.valid_verified_release_for_content(db_session, content.id)

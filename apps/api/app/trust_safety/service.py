@@ -429,10 +429,71 @@ async def valid_verified_release_for_content(
 async def revoke_consent_release(
     db: AsyncSession, release: ConsentRelease, actor: User
 ) -> ConsentRelease:
-    if (
-        actor.id != release.created_by_user_id
-        or release.status is not ConsentReleaseStatus.verified
-    ):
+    if actor.id != release.created_by_user_id:
         raise TrustSafetyError("Consent release cannot be revoked")
-    release.status, release.revoked_at = ConsentReleaseStatus.revoked, datetime.now(UTC)
+    if release.status is ConsentReleaseStatus.revoked:
+        return release
+    if release.status is not ConsentReleaseStatus.verified:
+        raise TrustSafetyError("Consent release cannot be revoked")
+
+    effective_at = datetime.now(UTC)
+    release.status, release.revoked_at = ConsentReleaseStatus.revoked, effective_at
+    linked_content_ids = list(
+        await db.scalars(
+            select(ConsentReleaseContent.content_id).where(
+                ConsentReleaseContent.consent_release_id == release.id
+            )
+        )
+    )
+    for content_id in linked_content_ids:
+        case = await db.scalar(
+            select(ModerationCase)
+            .where(
+                ModerationCase.primary_target_type == ReportTargetType.media,
+                ModerationCase.primary_target_id == content_id,
+                ModerationCase.queue == ModerationQueue.consent,
+                ModerationCase.status.notin_(
+                    [ModerationCaseStatus.resolved, ModerationCaseStatus.dismissed]
+                ),
+            )
+            .order_by(ModerationCase.created_at.desc())
+        )
+        if not case:
+            case = ModerationCase(
+                public_id=_case_public_id(),
+                primary_target_type=ReportTargetType.media,
+                primary_target_id=content_id,
+                status=ModerationCaseStatus.action_required,
+                severity=ModerationSeverity.high,
+                priority=50,
+                queue=ModerationQueue.consent,
+                opened_at=effective_at,
+                decision_summary="Consent release revoked; review linked content eligibility.",
+            )
+            db.add(case)
+            await db.flush()
+        evidence = await db.scalar(
+            select(ModerationEvidence).where(
+                ModerationEvidence.case_id == case.id,
+                ModerationEvidence.source_type == "consent_release_revocation",
+                ModerationEvidence.source_id == release.id,
+            )
+        )
+        if not evidence:
+            db.add(
+                ModerationEvidence(
+                    case_id=case.id,
+                    source_type="consent_release_revocation",
+                    source_id=release.id,
+                    snapshot={
+                        "release_id": str(release.id),
+                        "content_id": str(content_id),
+                        "creator_id": str(release.owner_creator_id),
+                        "reason": "revoked",
+                        "effective_at": effective_at.isoformat(),
+                    },
+                    sensitive=False,
+                    created_by_user_id=actor.id,
+                )
+            )
     return release
