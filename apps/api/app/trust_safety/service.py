@@ -17,6 +17,8 @@ from app.models.messaging import Message
 from app.models.social import FeedPost, PostComment
 from app.models.streaming import LiveChatMessage, LiveRoom
 from app.models.trust_safety import (
+    ModerationAction,
+    ModerationActionType,
     ModerationCase,
     ModerationCaseNote,
     ModerationCaseStatus,
@@ -217,3 +219,56 @@ async def add_case_note(
         target_id=str(case.id),
     )
     return note
+
+
+async def enforce_content_containment(
+    db: AsyncSession, case: ModerationCase, actor: User, content_id: UUID, reason: str
+) -> ModerationAction:
+    """Record once, then invoke content's authoritative moderation command."""
+    existing = await db.scalar(
+        select(ModerationAction).where(
+            ModerationAction.case_id == case.id,
+            ModerationAction.action_type == ModerationActionType.temporary_containment,
+            ModerationAction.target_type == ReportTargetType.media,
+            ModerationAction.target_id == content_id,
+        )
+    )
+    if existing:
+        return existing
+    from app.content import service as content_service
+
+    await content_service.apply_moderation_containment(db, actor, content_id, reason)
+    action = ModerationAction(
+        case_id=case.id,
+        action_type=ModerationActionType.temporary_containment,
+        target_type=ReportTargetType.media,
+        target_id=content_id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(action)
+    await db.flush()
+    return action
+
+
+async def reverse_content_containment(
+    db: AsyncSession, action: ModerationAction, actor: User, reason: str
+) -> ModerationAction:
+    if action.reversal_action_id:
+        return await db.get(ModerationAction, action.reversal_action_id)
+    from app.content import service as content_service
+
+    await content_service.restore_from_moderation(db, actor, action.target_id, reason)
+    reversal = ModerationAction(
+        case_id=action.case_id,
+        action_type=ModerationActionType.content_restore,
+        target_type=action.target_type,
+        target_id=action.target_id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(reversal)
+    await db.flush()
+    action.reversal_action_id = reversal.id
+    action.reversed_at = datetime.now(UTC)
+    return reversal

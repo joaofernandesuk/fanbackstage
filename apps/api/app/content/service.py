@@ -179,6 +179,45 @@ async def submit_for_review(db: AsyncSession, user: User, content_id: UUID) -> C
     return content
 
 
+async def apply_moderation_containment(
+    db: AsyncSession, actor: User, content_id: UUID, reason: str
+) -> ContentItem:
+    """Authoritative reversible content containment for Trust & Safety."""
+    content = await db.get(ContentItem, content_id)
+    if not content:
+        raise ValueError("Content not found")
+    content.status = ContentStatus.removed
+    content.moderation_status = ModerationStatus.removed
+    await record_event(
+        db,
+        "content.moderation_contained",
+        actor_user_id=actor.id,
+        target_type="content_item",
+        target_id=str(content.id),
+        metadata={"reason": reason},
+    )
+    return content
+
+
+async def restore_from_moderation(
+    db: AsyncSession, actor: User, content_id: UUID, reason: str
+) -> ContentItem:
+    content = await db.get(ContentItem, content_id)
+    if not content:
+        raise ValueError("Content not found")
+    content.status = ContentStatus.pending_review
+    content.moderation_status = ModerationStatus.queued
+    await record_event(
+        db,
+        "content.moderation_restored",
+        actor_user_id=actor.id,
+        target_type="content_item",
+        target_id=str(content.id),
+        metadata={"reason": reason},
+    )
+    return content
+
+
 async def approve(db: AsyncSession, content: ContentItem, actor: User) -> ContentItem:
     if content.status is not ContentStatus.pending_review:
         raise ValueError("Only content pending review can be approved")
