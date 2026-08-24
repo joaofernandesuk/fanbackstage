@@ -165,6 +165,7 @@ class ContentItem(UUIDPrimaryKey, Timestamped, Base):
     description: Mapped[str | None] = mapped_column(Text)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     feed_announcement_override: Mapped[bool | None] = mapped_column(Boolean)
+    requires_verified_consent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     gallery: Mapped["Gallery | None"] = relationship(
         back_populates="content", uselist=False, cascade="all, delete-orphan", lazy="selectin"

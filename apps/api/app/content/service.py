@@ -221,6 +221,11 @@ async def restore_from_moderation(
 async def approve(db: AsyncSession, content: ContentItem, actor: User) -> ContentItem:
     if content.status is not ContentStatus.pending_review:
         raise ValueError("Only content pending review can be approved")
+    if content.requires_verified_consent:
+        from app.trust_safety.service import valid_verified_release_for_content
+
+        if not await valid_verified_release_for_content(db, content.id):
+            raise ValueError("A valid verified consent release is required before publication")
     content.status, content.published_at = ContentStatus.published, datetime.now(UTC)
     content.moderation_status = ModerationStatus.approved
     await record_event(

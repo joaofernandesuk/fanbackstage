@@ -31,6 +31,11 @@ async def can_access_content(db: AsyncSession, content: ContentItem, user: User 
         "removed",
     }:
         return False
+    if content.requires_verified_consent:
+        from app.trust_safety.service import valid_verified_release_for_content
+
+        if not await valid_verified_release_for_content(db, content.id):
+            return False
     if user:
         owner = await db.scalar(select(CreatorProfile.id).where(CreatorProfile.user_id == user.id))
         if owner == content.owner_creator_id or {role.name for role in user.roles} & {

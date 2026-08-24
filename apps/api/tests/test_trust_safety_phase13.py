@@ -4,9 +4,10 @@ import pytest
 from sqlalchemy import select
 
 from app.accounts import service as accounts
+from app.content import service as content_service
 from app.creators import service as creators
-from app.models.social import FeedPost, FeedPostStatus, FeedPostType
 from app.models.content import ContentItem, ContentStatus, ContentType, ModerationStatus
+from app.models.social import FeedPost, FeedPostStatus, FeedPostType
 from app.models.trust_safety import (
     ModerationEvidence,
     ModerationQueue,
@@ -240,3 +241,41 @@ async def test_consent_submission_verification_scope_revocation_and_supersession
     assert release.status.value == "superseded" and replacement.status.value == "verified"
     await service.revoke_consent_release(db_session, replacement, owner)
     assert not await service.valid_verified_release_for_content(db_session, first_content.id)
+
+
+@pytest.mark.asyncio
+async def test_mandatory_consent_fails_closed_until_current_verified_scope(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-required-owner@example.com", "strong-password-123", None
+    )
+    reviewer, _ = await accounts.register(
+        db_session, "ts-required-reviewer@example.com", "strong-password-123", None
+    )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Requires release",
+        status=ContentStatus.pending_review,
+        requires_verified_consent=True,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    with pytest.raises(ValueError, match="verified consent"):
+        await content_service.approve(db_session, content, reviewer)
+    release = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.co_performer_release,
+        "participant",
+        [content.id],
+    )
+    await service.verify_consent_release(db_session, release, reviewer, True)
+    await content_service.approve(db_session, content, reviewer)
+    assert content.status is ContentStatus.published
+    await service.revoke_consent_release(db_session, release, owner)
+    from app.content.access import can_access_content
+
+    assert not await can_access_content(db_session, content, None)
