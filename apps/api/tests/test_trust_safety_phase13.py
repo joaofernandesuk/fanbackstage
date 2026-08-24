@@ -1,13 +1,16 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.accounts import service as accounts
+from app.api.routes import trust_safety as trust_safety_routes
 from app.content import service as content_service
 from app.creators import service as creators
 from app.discovery import service as discovery
 from app.groups import service as groups
+from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ContentType, ModerationStatus
 from app.models.creator import CreatorStatus
 from app.models.groups import GroupPermission
@@ -495,3 +498,56 @@ async def test_only_explicitly_delegated_manager_can_manage_but_not_verify_relea
     )
     with pytest.raises(service.TrustSafetyError, match="self-verified"):
         await service.verify_consent_release(db_session, release, manager, True)
+
+
+@pytest.mark.asyncio
+async def test_sensitive_evidence_is_privileged_audited_and_never_returned_raw(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-sensitive-owner@example.com", "strong-password-123", None
+    )
+    manager, _ = await accounts.register(
+        db_session, "ts-sensitive-manager@example.com", "strong-password-123", None
+    )
+    administrator, _ = await accounts.register(
+        db_session, "ts-sensitive-admin@example.com", "strong-password-123", None
+    )
+    await accounts.assign_role(db_session, manager, "manager", manager.id, None)
+    await accounts.assign_role(db_session, administrator, "super_admin", administrator.id, None)
+    profile = await creators.get_or_create_profile(db_session, owner)
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Sensitive evidence",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    case = ModerationCase(
+        public_id="TS-SENSITIVE",
+        primary_target_type=ReportTargetType.media,
+        primary_target_id=content.id,
+        severity=ModerationSeverity.high,
+        queue=ModerationQueue.consent,
+        opened_at=datetime.now(UTC),
+    )
+    db_session.add(case)
+    await db_session.flush()
+    evidence = ModerationEvidence(
+        case_id=case.id,
+        source_type="consent_release_document",
+        snapshot={"identity_document": "never-return-this", "safe": "case-context"},
+        safe_reference="protected://release/opaque-id",
+        sensitive=True,
+    )
+    db_session.add(evidence)
+    await db_session.flush()
+    with pytest.raises(HTTPException, match="Permission denied"):
+        await trust_safety_routes.evidence_access(case.id, evidence.id, (manager, None), db_session)
+    response = await trust_safety_routes.evidence_access(
+        case.id, evidence.id, (administrator, None), db_session
+    )
+    assert response["snapshot"] is None and response["sensitive"] is True
+    event = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "trust_safety.evidence_accessed")
+    )
+    assert event and event.metadata_json == {}

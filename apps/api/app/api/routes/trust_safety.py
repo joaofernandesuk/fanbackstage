@@ -134,8 +134,10 @@ async def evidence_access(
         "id": str(evidence.id),
         "source_type": evidence.source_type,
         "source_id": str(evidence.source_id) if evidence.source_id else None,
-        "snapshot": evidence.snapshot,
+        # Raw sensitive evidence belongs in its protected store; it never crosses this API.
+        "snapshot": None if evidence.sensitive else evidence.snapshot,
         "safe_reference": evidence.safe_reference,
+        "sensitive": evidence.sensitive,
     }
 
 

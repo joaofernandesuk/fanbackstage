@@ -15,12 +15,34 @@ async def record_event(
     correlation_id: str | None = None,
     metadata: dict | None = None,
 ) -> AuditEvent:
-    forbidden = ("password", "token", "secret", "authorization", "cookie")
-    safe_metadata = {
-        key: value
-        for key, value in (metadata or {}).items()
-        if not any(word in key.lower() for word in forbidden)
-    }
+    forbidden = (
+        "password",
+        "token",
+        "secret",
+        "authorization",
+        "cookie",
+        "signature",
+        "document",
+        "evidence",
+        "identity",
+        "participant",
+        "legal_name",
+    )
+
+    def scrub(value: object) -> object | None:
+        if isinstance(value, dict):
+            return {
+                key: cleaned
+                for key, nested in value.items()
+                if not any(word in key.lower() for word in forbidden)
+                if (cleaned := scrub(nested)) is not None
+            }
+        if isinstance(value, list):
+            return [cleaned for nested in value if (cleaned := scrub(nested)) is not None]
+        return value
+
+    safe_metadata = scrub(metadata or {})
+    assert isinstance(safe_metadata, dict)
     event = AuditEvent(
         event_type=event_type,
         actor_user_id=actor_user_id,
