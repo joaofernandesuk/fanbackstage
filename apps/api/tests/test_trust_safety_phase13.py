@@ -183,3 +183,60 @@ async def test_high_severity_appeal_deadline_and_reviewer_independence(db_sessio
             "late",
             now=action.created_at + service.APPEAL_WINDOW + timedelta(seconds=1),
         )
+
+
+@pytest.mark.asyncio
+async def test_consent_submission_verification_scope_revocation_and_supersession(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-consent-owner@example.com", "strong-password-123", None
+    )
+    reviewer, _ = await accounts.register(
+        db_session, "ts-consent-reviewer@example.com", "strong-password-123", None
+    )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    first_content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Scoped",
+        status=ContentStatus.published,
+    )
+    other_content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Other",
+        status=ContentStatus.published,
+    )
+    db_session.add_all([first_content, other_content])
+    await db_session.flush()
+    release = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.content_participation,
+        "participant-private-reference",
+        [first_content.id],
+    )
+    assert (
+        release.status.value == "pending"
+        and not await service.valid_verified_release_for_content(db_session, first_content.id)
+    )
+    with pytest.raises(service.TrustSafetyError):
+        await service.verify_consent_release(db_session, release, owner, True)
+    await service.verify_consent_release(db_session, release, reviewer, True)
+    assert await service.valid_verified_release_for_content(db_session, first_content.id)
+    assert not await service.valid_verified_release_for_content(db_session, other_content.id)
+    replacement = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.content_participation,
+        "participant-private-reference",
+        [first_content.id],
+        supersedes_release_id=release.id,
+    )
+    await service.verify_consent_release(db_session, replacement, reviewer, True)
+    assert release.status.value == "superseded" and replacement.status.value == "verified"
+    await service.revoke_consent_release(db_session, replacement, owner)
+    assert not await service.valid_verified_release_for_content(db_session, first_content.id)

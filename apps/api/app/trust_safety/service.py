@@ -18,6 +18,10 @@ from app.models.social import FeedPost, PostComment
 from app.models.streaming import LiveChatMessage, LiveRoom
 from app.models.trust_safety import (
     AppealStatus,
+    ConsentRelease,
+    ConsentReleaseContent,
+    ConsentReleaseStatus,
+    ConsentReleaseType,
     ModerationAction,
     ModerationActionType,
     ModerationAppeal,
@@ -345,3 +349,90 @@ async def decide_appeal(
         datetime.now(UTC),
     )
     return appeal
+
+
+async def submit_consent_release(
+    db: AsyncSession,
+    creator: CreatorProfile,
+    actor: User,
+    release_type: ConsentReleaseType,
+    participant_reference: str,
+    content_ids: list[UUID],
+    effective_until: datetime | None = None,
+    evidence_reference: str | None = None,
+    supersedes_release_id: UUID | None = None,
+) -> ConsentRelease:
+    if actor.id != creator.user_id or not participant_reference.strip() or not content_ids:
+        raise TrustSafetyError("Invalid consent release submission")
+    for content_id in set(content_ids):
+        content = await db.get(ContentItem, content_id)
+        if not content or content.owner_creator_id != creator.id:
+            raise TrustSafetyError("Consent scope contains unauthorized content")
+    release = ConsentRelease(
+        owner_creator_id=creator.id,
+        release_type=release_type,
+        status=ConsentReleaseStatus.pending,
+        participant_reference=participant_reference.strip(),
+        scope_snapshot={"content_ids": sorted(str(item) for item in set(content_ids))},
+        evidence_reference=evidence_reference,
+        effective_from=datetime.now(UTC),
+        effective_until=effective_until,
+        supersedes_release_id=supersedes_release_id,
+        created_by_user_id=actor.id,
+    )
+    db.add(release)
+    await db.flush()
+    for content_id in set(content_ids):
+        db.add(ConsentReleaseContent(consent_release_id=release.id, content_id=content_id))
+    return release
+
+
+async def verify_consent_release(
+    db: AsyncSession, release: ConsentRelease, reviewer: User, approved: bool
+) -> ConsentRelease:
+    if (
+        release.created_by_user_id == reviewer.id
+        or release.status is not ConsentReleaseStatus.pending
+    ):
+        raise TrustSafetyError("Consent release cannot be self-verified or is not pending")
+    release.status = ConsentReleaseStatus.verified if approved else ConsentReleaseStatus.rejected
+    release.verified_at = datetime.now(UTC) if approved else None
+    release.verified_by_user_id = reviewer.id if approved else None
+    if approved and release.supersedes_release_id:
+        prior = await db.get(ConsentRelease, release.supersedes_release_id)
+        if prior and prior.status is ConsentReleaseStatus.verified:
+            prior.status = ConsentReleaseStatus.superseded
+    return release
+
+
+async def valid_verified_release_for_content(
+    db: AsyncSession, content_id: UUID, now: datetime | None = None
+) -> bool:
+    now = now or datetime.now(UTC)
+    return bool(
+        await db.scalar(
+            select(ConsentRelease.id)
+            .join(ConsentReleaseContent)
+            .where(
+                ConsentReleaseContent.content_id == content_id,
+                ConsentRelease.status == ConsentReleaseStatus.verified,
+                ConsentRelease.revoked_at.is_(None),
+                (
+                    ConsentRelease.effective_until.is_(None)
+                    | (ConsentRelease.effective_until >= now)
+                ),
+            )
+        )
+    )
+
+
+async def revoke_consent_release(
+    db: AsyncSession, release: ConsentRelease, actor: User
+) -> ConsentRelease:
+    if (
+        actor.id != release.created_by_user_id
+        or release.status is not ConsentReleaseStatus.verified
+    ):
+        raise TrustSafetyError("Consent release cannot be revoked")
+    release.status, release.revoked_at = ConsentReleaseStatus.revoked, datetime.now(UTC)
+    return release
