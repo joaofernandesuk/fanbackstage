@@ -8,8 +8,10 @@ from app.models.trust_safety import (
     ConsentRelease,
     ModerationAction,
     ModerationCase,
+    ModerationCaseNote,
     ModerationCaseStatus,
     ModerationEvidence,
+    TrustSafetyReport,
 )
 from app.permissions.policies import Permission, authorize
 from app.schemas.trust_safety import (
@@ -67,6 +69,73 @@ async def list_cases(
         }
         for row in rows
     ]
+
+
+@router.get("/cases/{case_id}")
+async def case_detail(case_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
+    authorize(identity[0], Permission.MODERATION_CASE_VIEW)
+    case = await db.get(ModerationCase, case_id)
+    if not case:
+        raise HTTPException(404, "Moderation case not found")
+    reports = list(
+        await db.scalars(select(TrustSafetyReport).where(TrustSafetyReport.case_id == case.id))
+    )
+    notes = list(
+        await db.scalars(
+            select(ModerationCaseNote)
+            .where(ModerationCaseNote.case_id == case.id)
+            .order_by(ModerationCaseNote.created_at)
+        )
+    )
+    actions = list(
+        await db.scalars(
+            select(ModerationAction)
+            .where(ModerationAction.case_id == case.id)
+            .order_by(ModerationAction.created_at)
+        )
+    )
+    evidence = list(
+        await db.scalars(
+            select(ModerationEvidence).where(
+                ModerationEvidence.case_id == case.id, ModerationEvidence.sensitive.is_(False)
+            )
+        )
+    )
+    return {
+        "id": str(case.id),
+        "public_id": case.public_id,
+        "status": case.status.value,
+        "severity": case.severity.value,
+        "priority": case.priority,
+        "queue": case.queue.value,
+        "target_type": case.primary_target_type.value,
+        "target_id": str(case.primary_target_id),
+        "report_count": len(reports),
+        "notes": [
+            {"id": str(note.id), "body": note.body, "created_at": note.created_at} for note in notes
+        ],
+        "actions": [
+            {
+                "id": str(action.id),
+                "type": action.action_type.value,
+                "reason": action.reason,
+                "created_at": action.created_at,
+                "reversal_action_id": str(action.reversal_action_id)
+                if action.reversal_action_id
+                else None,
+            }
+            for action in actions
+        ],
+        "safe_evidence": [
+            {
+                "id": str(item.id),
+                "source_type": item.source_type,
+                "safe_reference": item.safe_reference,
+                "snapshot": item.snapshot,
+            }
+            for item in evidence
+        ],
+    }
 
 
 @router.post("/cases/{case_id}/assign")
