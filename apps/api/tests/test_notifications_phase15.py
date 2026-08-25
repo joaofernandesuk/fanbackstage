@@ -118,3 +118,39 @@ async def test_provider_events_are_replay_safe_and_hard_bounce_suppresses(db_ses
     assert await service.mark_provider_event(db_session, "provider-message-1", "hard_bounce")
     assert attempt.status is DeliveryStatus.failed_permanent
     assert not await service._eligible(db_session, intent, user)
+
+
+@pytest.mark.asyncio
+async def test_opaque_unsubscribe_token_is_tamper_safe_and_does_not_block_transactional(db_session):
+    user, _ = await register(db_session, "token@example.com", "strong-password-123", None)
+    token = service.unsubscribe_token(user.id)
+    assert service.unsubscribe_token_subject(token) == (user.id, "marketing")
+    with pytest.raises(ValueError):
+        service.unsubscribe_token_subject(f"A{token[1:]}")
+    await service.unsubscribe(db_session, user)
+    required = await service.create_intent(
+        db_session,
+        recipient_user_id=user.id,
+        notification_type="AUTH_PASSWORD_RESET",
+        classification=NotificationClass.transactional,
+        source_domain="accounts",
+        source_id="reset-token-check",
+        payload={"subject": "Reset", "body": "Reset"},
+        channels=(NotificationChannel.email,),
+    )
+    assert await service._eligible(db_session, required, user)
+
+
+@pytest.mark.asyncio
+async def test_internal_notification_target_rejects_open_redirect(db_session):
+    user, _ = await register(db_session, "links@example.com", "strong-password-123", None)
+    with pytest.raises(ValueError):
+        await service.create_intent(
+            db_session,
+            recipient_user_id=user.id,
+            notification_type="MESSAGE_RECEIVED",
+            classification=NotificationClass.transactional,
+            source_domain="messaging",
+            source_id="unsafe-link",
+            payload={"target_path": "https://attacker.example"},
+        )
