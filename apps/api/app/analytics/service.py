@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.content import ContentItem
 from app.models.finance import (
     LedgerAccount,
     LedgerAccountKind,
@@ -237,6 +238,37 @@ async def creator_ppv_metrics(
             bucket["refunded_minor"] += purchase.gross_amount_minor
         if purchase.status is PurchaseStatus.chargeback:
             bucket["charged_back_minor"] += purchase.gross_amount_minor
+    content_titles = {
+        item.id: item.title
+        for item in (
+            await db.scalars(
+                select(ContentItem).where(
+                    ContentItem.owner_creator_id == creator_id,
+                    ContentItem.id.in_([item.content_id for item in purchases]),
+                )
+            )
+        ).all()
+    }
+    content_totals: dict[tuple[str, UUID], dict] = defaultdict(
+        lambda: {"purchases": 0, "gross_minor": 0}
+    )
+    for purchase in purchases:
+        bucket = content_totals[(purchase.currency, purchase.content_id)]
+        bucket["purchases"] += 1
+        bucket["gross_minor"] += purchase.gross_amount_minor
+    top_content = [
+        {
+            "content_id": str(content_id),
+            "title": content_titles[content_id],
+            "currency": currency,
+            **value,
+        }
+        for (currency, content_id), value in content_totals.items()
+        if content_id in content_titles
+    ]
+    top_content.sort(
+        key=lambda item: (-item["gross_minor"], -item["purchases"], item["content_id"])
+    )
     return {
         "metric_definition_version": METRIC_DEFINITION_VERSION,
         "currencies": [
@@ -253,6 +285,7 @@ async def creator_ppv_metrics(
             }
             for code, data in sorted(totals.items())
         ],
+        "top_content": top_content[:20],
     }
 
 
