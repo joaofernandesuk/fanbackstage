@@ -47,6 +47,7 @@ from app.models.streaming import (
     SessionParticipant,
     SessionParticipantRole,
 )
+from app.notifications.service import emit_transactional
 
 
 class StreamingError(ValueError):
@@ -597,6 +598,26 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
         actor_user_id=actor.id,
         target_type="private_session",
         target_id=str(session.id),
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=creator.user_id,
+        notification_type="PRIVATE_LIVE_BOOKING",
+        source_domain="streaming",
+        source_id=str(session.id),
+        title="Private session booked",
+        body="A private session is awaiting payment authorization.",
+        target_path="/live",
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=session.payer_user_id,
+        notification_type="PRIVATE_LIVE_STARTED",
+        source_domain="streaming",
+        source_id=str(session.id),
+        title="Private session ready",
+        body="Your private session is ready to join.",
+        target_path="/live",
     )
     return session
 

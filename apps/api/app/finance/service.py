@@ -42,6 +42,7 @@ from app.models.subscription import (
     SubscriptionPeriodStatus,
     SubscriptionStatus,
 )
+from app.notifications.service import emit_transactional
 
 
 class FinancialError(ValueError):
@@ -553,6 +554,16 @@ async def settle_purchase(db: AsyncSession, purchase: Purchase) -> Purchase:
         target_type="purchase",
         target_id=str(purchase.id),
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=purchase.buyer_user_id,
+        notification_type="PURCHASE_RECEIPT",
+        source_domain="finance",
+        source_id=str(purchase.id),
+        title="Purchase receipt",
+        body=f"Your purchase of {purchase.gross_amount_minor} {purchase.currency} is confirmed.",
+        target_path="/purchases",
+    )
     return purchase
 
 
@@ -912,6 +923,16 @@ async def refund_purchase(
         target_type="purchase",
         target_id=str(purchase.id),
         metadata={"refund_transaction_id": str(refund.id), "reason": reason},
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=purchase.buyer_user_id,
+        notification_type="REFUND_ISSUED",
+        source_domain="finance",
+        source_id=str(refund.id),
+        title="Refund issued",
+        body=f"A refund of {purchase.gross_amount_minor} {purchase.currency} was issued.",
+        target_path="/purchases",
     )
     return purchase
 

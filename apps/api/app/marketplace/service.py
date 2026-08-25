@@ -46,6 +46,7 @@ from app.models.marketplace import (
     MarketplaceTrackingEvent,
     ShippingAllowanceScope,
 )
+from app.notifications.service import emit_transactional
 
 
 class MarketplaceError(ValueError):
@@ -692,6 +693,28 @@ async def initiate_order(
             "commissionable_base_minor": str(order.commissionable_base_minor),
         },
     )
+    seller = await db.get(CreatorProfile, order.seller_creator_id)
+    if seller:
+        await emit_transactional(
+            db,
+            recipient_user_id=order.buyer_user_id,
+            notification_type="MARKETPLACE_ORDER_PLACED",
+            source_domain="marketplace",
+            source_id=str(order.id),
+            title="Order confirmed",
+            body=f"Your order total is {order.total_paid_minor} {order.currency}.",
+            target_path="/marketplace/orders",
+        )
+        await emit_transactional(
+            db,
+            recipient_user_id=seller.user_id,
+            notification_type="MARKETPLACE_ORDER_PLACED",
+            source_domain="marketplace",
+            source_id=f"seller:{order.id}",
+            title="You have a new paid order",
+            body="Open FanBackstage to fulfil the order.",
+            target_path="/marketplace/orders",
+        )
     return order
 
 
@@ -733,6 +756,16 @@ async def shipping_address_for_order(
         target_id=str(order.id),
         metadata={"access_kind": "buyer" if is_buyer else "seller_or_support"},
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=order.buyer_user_id,
+        notification_type="MARKETPLACE_ORDER_SHIPPED",
+        source_domain="marketplace",
+        source_id=str(order.id),
+        title="Your order has shipped",
+        body="Open FanBackstage for the operational order status.",
+        target_path="/marketplace/orders",
+    )
     return address
 
 
@@ -766,6 +799,16 @@ async def release_order_reservation(
         target_type="marketplace_order",
         target_id=str(order.id),
         metadata={"reason": reason},
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=order.buyer_user_id,
+        notification_type="MARKETPLACE_ORDER_DELIVERED",
+        source_domain="marketplace",
+        source_id=str(order.id),
+        title="Order delivered",
+        body="Your delivery has been confirmed.",
+        target_path="/marketplace/orders",
     )
     return order
 
