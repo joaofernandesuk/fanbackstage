@@ -41,6 +41,7 @@ from app.models.identity import User
 from app.models.marketplace import MarketplaceListing, MarketplaceListingStatus
 from app.models.social import FeedPost, FeedPostStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
+from app.notifications.service import emit_transactional
 
 RESERVATION_SECONDS = 15 * 60
 INELIGIBLE_MODERATION = (
@@ -406,6 +407,16 @@ async def activate_due_bookings(db: AsyncSession, now: datetime | None = None) -
             target_type="feature_booking",
             target_id=str(booking.id),
         )
+        await emit_transactional(
+            db,
+            recipient_user_id=booking.purchaser_user_id,
+            notification_type="FEATURING_PLACEMENT_STARTED",
+            source_domain="featuring",
+            source_id=str(booking.id),
+            title="Featuring placement started",
+            body="Your sponsored placement is now active.",
+            target_path="/featuring",
+        )
     return count
 
 
@@ -431,6 +442,16 @@ async def deactivate_due_bookings(db: AsyncSession, now: datetime | None = None)
             target_type="feature_booking",
             target_id=str(booking.id),
             metadata={"reason": "expired"},
+        )
+        await emit_transactional(
+            db,
+            recipient_user_id=booking.purchaser_user_id,
+            notification_type="FEATURING_PLACEMENT_ENDED",
+            source_domain="featuring",
+            source_id=str(booking.id),
+            title="Featuring placement ended",
+            body="Your sponsored placement has ended.",
+            target_path="/featuring",
         )
     return len(rows)
 
@@ -559,6 +580,16 @@ async def terminate_ineligible(
         target_type="feature_booking",
         target_id=str(booking.id),
         metadata={"reason": reason.value, "delivered_seconds": booking.delivered_seconds},
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=booking.purchaser_user_id,
+        notification_type="FEATURING_BOOKING_CONFIRMED",
+        source_domain="featuring",
+        source_id=str(booking.id),
+        title="Featuring booking confirmed",
+        body="Your featuring booking payment has been confirmed.",
+        target_path="/featuring",
     )
     return booking
 

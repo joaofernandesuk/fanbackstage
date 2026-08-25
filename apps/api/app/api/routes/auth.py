@@ -184,6 +184,20 @@ async def reset_password(
             actor_user_id=user.id,
             correlation_id=request.state.correlation_id,
         )
+        await create_intent(
+            db,
+            recipient_user_id=user.id,
+            notification_type="SECURITY_PASSWORD_CHANGED",
+            classification=NotificationClass.transactional,
+            priority=NotificationPriority.critical_security,
+            source_domain="accounts",
+            source_id=f"password-reset:{service._digest(payload.token)}",
+            payload={
+                "subject": "Your password was changed",
+                "body": "Your FanBackstage password was changed. Contact support if this was not you.",
+            },
+            channels=(NotificationChannel.email, NotificationChannel.in_app),
+        )
         await db.commit()
         return MessageResponse(message="Password reset")
     except ValueError as exc:
