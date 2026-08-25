@@ -47,6 +47,7 @@ def response(item: ContentItem, has_access: bool = True) -> ContentResponse:
         locked=not has_access,
         price_amount_minor=item.price_amount_minor if item.access_policy.value == "ppv" else None,
         price_currency=item.price_currency if item.access_policy.value == "ppv" else None,
+        requires_verified_consent=item.requires_verified_consent,
     )
 
 
@@ -137,6 +138,7 @@ async def create_gallery(
             payload.access_policy,
             payload.price_amount_minor,
             payload.price_currency,
+            payload.requires_verified_consent,
         )
         await db.commit()
         return response(item)
@@ -178,6 +180,7 @@ async def create_video(payload: VideoCreate, identity: CurrentIdentity, db: Db) 
             payload.preview_duration_seconds,
             payload.price_amount_minor,
             payload.price_currency,
+            payload.requires_verified_consent,
         )
         await db.commit()
         render_video_preview.delay(str(item.id))
@@ -310,6 +313,11 @@ async def public_content(content_id: UUID, identity: OptionalIdentity, db: Db) -
     if not item or item.status.value != "published":
         raise HTTPException(status_code=404, detail="Content not found")
     has_access = await can_access_content(db, item, identity[0] if identity else None)
+    # A mandatory release is a serving prerequisite, not merely an entitlement
+    # lock.  Do not project a withdrawn/expired release's content through a
+    # public endpoint, including to its owner or staff using this route.
+    if item.requires_verified_consent and not has_access:
+        raise HTTPException(status_code=404, detail="Content not found")
     return await public_response(db, item, has_access)
 
 
@@ -334,9 +342,10 @@ async def public_creator_content(
         .unique()
         .all()
     )
-    return [
-        await public_response(
-            db, item, await can_access_content(db, item, identity[0] if identity else None)
-        )
-        for item in items
-    ]
+    result = []
+    for item in items:
+        has_access = await can_access_content(db, item, identity[0] if identity else None)
+        if item.requires_verified_consent and not has_access:
+            continue
+        result.append(await public_response(db, item, has_access))
+    return result

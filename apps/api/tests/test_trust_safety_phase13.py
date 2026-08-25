@@ -126,6 +126,7 @@ async def test_containment_is_replay_safe_and_restoration_preserves_action_histo
         reason=ReportReason.underage_concern,
         details="credible",
     )
+    assert content.status is ContentStatus.removed
     action = await service.enforce_content_containment(
         db_session, case, moderator, content.id, "urgent containment"
     )
@@ -170,7 +171,7 @@ async def test_high_severity_appeal_deadline_and_reviewer_independence(db_sessio
         reporter,
         target_type=ReportTargetType.media,
         target_id=content.id,
-        reason=ReportReason.underage_concern,
+        reason=ReportReason.non_consensual_content,
         details="credible",
     )
     action = await service.enforce_content_containment(
@@ -235,7 +236,9 @@ async def test_consent_submission_verification_scope_revocation_and_supersession
     with pytest.raises(service.TrustSafetyError):
         await service.verify_consent_release(db_session, release, owner, True)
     await service.verify_consent_release(db_session, release, reviewer, True)
-    assert (await service.verify_consent_release(db_session, release, reviewer, True)).id == release.id
+    assert (
+        await service.verify_consent_release(db_session, release, reviewer, True)
+    ).id == release.id
     assert await service.valid_verified_release_for_content(db_session, first_content.id)
     assert not await service.valid_verified_release_for_content(db_session, other_content.id)
     replacement = await service.submit_consent_release(
@@ -260,7 +263,9 @@ async def test_consent_submission_verification_scope_revocation_and_supersession
         [other_content.id],
     )
     await service.verify_consent_release(db_session, rejected, reviewer, False)
-    assert (await service.verify_consent_release(db_session, rejected, reviewer, False)).id == rejected.id
+    assert (
+        await service.verify_consent_release(db_session, rejected, reviewer, False)
+    ).id == rejected.id
     with pytest.raises(service.TrustSafetyError, match="not pending"):
         await service.verify_consent_release(db_session, rejected, reviewer, True)
 

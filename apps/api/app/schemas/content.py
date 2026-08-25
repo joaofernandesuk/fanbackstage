@@ -23,6 +23,7 @@ class GalleryCreate(BaseModel):
     access_policy: AccessPolicy = AccessPolicy.free
     price_amount_minor: int | None = Field(default=None, gt=0, le=2_147_483_647)
     price_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    requires_verified_consent: bool = False
 
     @model_validator(mode="after")
     def validate_ppv_price(self):
@@ -67,6 +68,7 @@ class ContentUpdate(BaseModel):
     price_amount_minor: int | None = Field(default=None, gt=0, le=2_147_483_647)
     price_currency: str | None = Field(default=None, min_length=3, max_length=3)
     feed_announcement_override: bool | None = None
+    requires_verified_consent: bool | None = None
 
 
 class VideoPreviewUpdate(BaseModel):
@@ -91,4 +93,5 @@ class ContentResponse(BaseModel):
     locked: bool
     price_amount_minor: int | None = None
     price_currency: str | None = None
+    requires_verified_consent: bool = False
     previews: list[ContentPreview] = Field(default_factory=list)

@@ -44,6 +44,7 @@ async def create_gallery(
     policy: AccessPolicy,
     price_amount_minor: int | None = None,
     price_currency: str | None = None,
+    requires_verified_consent: bool = False,
 ) -> ContentItem:
     creator = await approved_creator(db, user)
     validate_ppv_price(policy, price_amount_minor, price_currency)
@@ -56,6 +57,7 @@ async def create_gallery(
         access_policy=policy,
         price_amount_minor=price_amount_minor,
         price_currency=price_currency.upper() if price_currency else None,
+        requires_verified_consent=requires_verified_consent,
     )
     content.gallery = Gallery()
     db.add(content)
@@ -93,6 +95,7 @@ async def create_video(
     preview_duration_seconds: int = 20,
     price_amount_minor: int | None = None,
     price_currency: str | None = None,
+    requires_verified_consent: bool = False,
 ) -> ContentItem:
     creator = await approved_creator(db, user)
     validate_ppv_price(policy, price_amount_minor, price_currency)
@@ -109,6 +112,7 @@ async def create_video(
         access_policy=policy,
         price_amount_minor=price_amount_minor,
         price_currency=price_currency.upper() if price_currency else None,
+        requires_verified_consent=requires_verified_consent,
         status=ContentStatus.processing,
     )
     content.video = VideoContent(
@@ -277,6 +281,7 @@ async def update_content(
         "price_amount_minor",
         "price_currency",
         "feed_announcement_override",
+        "requires_verified_consent",
     ):
         if field in values:
             value = values[field]

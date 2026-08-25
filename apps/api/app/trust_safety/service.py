@@ -195,6 +195,19 @@ async def open_or_attach_report(
             created_by_user_id=reporter.id,
         )
     )
+    # A credible underage report against content cannot wait for a reviewer to
+    # pick up the queue.  The report remains evidence, while the same
+    # append-only enforcement path used by a moderator applies reversible
+    # containment.  The unique action constraint makes duplicate reports and
+    # callback retries harmless.
+    if reason is ReportReason.underage_concern and target_type is ReportTargetType.media:
+        await enforce_content_containment(
+            db,
+            case,
+            reporter,
+            target_id,
+            "Immediate temporary containment for credible underage concern",
+        )
     await record_event(
         db,
         "trust_safety.report_created",

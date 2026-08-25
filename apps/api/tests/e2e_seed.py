@@ -12,6 +12,10 @@ EMAIL = "phase2-e2e-admin@example.com"
 PASSWORD = "phase2-e2e-admin-password"
 MANAGER_EMAIL = "phase8-e2e-manager@example.com"
 MANAGER_PASSWORD = "phase8-e2e-manager-password"
+MODERATOR_EMAIL = "phase13-e2e-moderator@example.com"
+MODERATOR_PASSWORD = "phase13-e2e-moderator-password"
+REVIEWER_EMAIL = "phase13-e2e-reviewer@example.com"
+REVIEWER_PASSWORD = "phase13-e2e-reviewer-password"
 
 
 async def seed() -> None:
@@ -31,6 +35,15 @@ async def seed() -> None:
             manager, _ = await accounts.register(db, MANAGER_EMAIL, MANAGER_PASSWORD, None)
         if "manager" not in {role.name for role in manager.roles}:
             await accounts.assign_role(db, manager, "manager", user.id, None)
+        for email, password in (
+            (MODERATOR_EMAIL, MODERATOR_PASSWORD),
+            (REVIEWER_EMAIL, REVIEWER_PASSWORD),
+        ):
+            moderator = await db.scalar(select(User).where(User.email == email))
+            if not moderator:
+                moderator, _ = await accounts.register(db, email, password, None)
+            if "moderator" not in {role.name for role in moderator.roles}:
+                await accounts.assign_role(db, moderator, "moderator", user.id, None)
         await db.commit()
 
 
