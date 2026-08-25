@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.finance import (
@@ -21,6 +21,8 @@ from app.models.groups import (
     GroupPermission,
     GroupPermissionGrant,
 )
+from app.models.social import Follow
+from app.models.subscription import Subscription, SubscriptionStatus
 
 METRIC_DEFINITION_VERSION = "phase14.v1"
 METRIC_DEFINITIONS = {
@@ -109,6 +111,37 @@ async def creator_overview(
             {"currency": currency_code, "source": source, **value}
             for (currency_code, source), value in sorted(sources.items())
         ],
+    }
+
+
+async def creator_audience(
+    db: AsyncSession, creator_id: UUID, starts_at: datetime, ends_at: datetime
+) -> dict:
+    """Aggregate-only audience metrics; no follower identities are projected."""
+    followers_total = await db.scalar(
+        select(func.count()).select_from(Follow).where(Follow.creator_id == creator_id)
+    )
+    follows_created = await db.scalar(
+        select(func.count())
+        .select_from(Follow)
+        .where(
+            Follow.creator_id == creator_id,
+            Follow.created_at >= starts_at,
+            Follow.created_at < ends_at,
+        )
+    )
+    active_subscribers = await db.scalar(
+        select(func.count())
+        .select_from(Subscription)
+        .where(
+            Subscription.creator_id == creator_id, Subscription.status == SubscriptionStatus.active
+        )
+    )
+    return {
+        "metric_definition_version": METRIC_DEFINITION_VERSION,
+        "followers_total": int(followers_total or 0),
+        "follows_created": int(follows_created or 0),
+        "active_subscribers": int(active_subscribers or 0),
     }
 
 
