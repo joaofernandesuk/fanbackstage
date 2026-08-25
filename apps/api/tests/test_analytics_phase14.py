@@ -7,6 +7,7 @@ from app.analytics import service
 from app.api.routes.analytics import _safe_cell
 from app.creators import service as creators
 from app.finance.service import _account, post_entries
+from app.groups import service as groups
 from app.models.finance import LedgerAccountKind, LedgerDirection, LedgerTransactionType
 
 
@@ -69,3 +70,60 @@ def test_analytics_csv_formula_cells_are_neutralized():
     for value in ("=SUM(A1:A2)", "+1", "-1", "@cmd"):
         assert _safe_cell(value) == f"'{value}"
     assert _safe_cell("EUR") == "EUR"
+
+
+@pytest.mark.asyncio
+async def test_platform_and_creator_analytics_reconcile_immutable_reversal_history(db_session):
+    owner, _ = await accounts.register(
+        db_session, "analytics-reconcile@example.com", "strong-password-123", None
+    )
+    creator = await creators.get_or_create_profile(db_session, owner)
+    group = await groups.create_group(
+        db_session, owner, "Analytics group", "analytics-group", 5000, None
+    )
+    now = datetime.now(UTC)
+    clearing = await _account(db_session, LedgerAccountKind.platform_clearing, "EUR")
+    platform = await _account(db_session, LedgerAccountKind.platform_revenue, "EUR")
+    creator_pending = await _account(
+        db_session, LedgerAccountKind.creator_pending, "EUR", creator.id
+    )
+    group_pending = await _account(
+        db_session, LedgerAccountKind.group_pending, "EUR", owner_group_id=group.id
+    )
+    purchase = await post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.ppv_purchase,
+        currency="EUR",
+        idempotency_key="analytics-reconcile-purchase",
+        reference="analytics-reconcile-purchase",
+        entries=[
+            (clearing, LedgerDirection.debit, 1000),
+            (platform, LedgerDirection.credit, 200),
+            (creator_pending, LedgerDirection.credit, 400),
+            (group_pending, LedgerDirection.credit, 400),
+        ],
+    )
+    await post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.refund,
+        currency="EUR",
+        idempotency_key="analytics-reconcile-refund",
+        reference="analytics-reconcile-refund",
+        reversal_of_transaction_id=purchase.id,
+        entries=[
+            (creator_pending, LedgerDirection.debit, 400),
+            (group_pending, LedgerDirection.debit, 400),
+            (platform, LedgerDirection.debit, 200),
+            (clearing, LedgerDirection.credit, 1000),
+        ],
+    )
+    report = await service.platform_overview(
+        db_session, now - timedelta(days=1), now + timedelta(days=1)
+    )
+    eur = {row["currency"]: row for row in report["currencies"]}["EUR"]
+    assert eur["gmv_minor"] == 1000
+    assert eur["refunds_minor"] == 1000
+    assert eur["creator_distributable_minor"] == 0
+    assert eur["group_distributable_minor"] == 0
+    assert eur["platform_fee_minor"] == 0
+    assert eur["platform_retained_net_minor"] == 0
