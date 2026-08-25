@@ -48,6 +48,7 @@ from app.models.subscription import (
     SubscriptionPeriodStatus,
     SubscriptionStatus,
 )
+from app.notifications.service import emit_transactional
 
 
 class MessagingError(ValueError):
@@ -234,6 +235,16 @@ async def send_message(
         target_type="message",
         target_id=str(message.id),
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=creator.user_id,
+        notification_type="MESSAGE_RECEIVED",
+        source_domain="messaging",
+        source_id=str(message.id),
+        title="You have a new message",
+        body="Open FanBackstage to view your message.",
+        target_path="/messages",
+    )
     return message
 
 
@@ -276,6 +287,16 @@ async def send_in_conversation(
         actor_user_id=sender.id,
         target_type="message",
         target_id=str(message.id),
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=other,
+        notification_type="MESSAGE_RECEIVED",
+        source_domain="messaging",
+        source_id=str(message.id),
+        title="You have a new message",
+        body="Open FanBackstage to view your message.",
+        target_path="/messages",
     )
     return message
 

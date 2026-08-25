@@ -39,6 +39,7 @@ from app.models.subscription import (
     SubscriptionRenewalAttempt,
     SubscriptionStatus,
 )
+from app.notifications.service import emit_transactional
 
 
 class SubscriptionError(ValueError):
@@ -368,6 +369,16 @@ async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> S
         target_id=str(subscription.id),
         metadata={"period_id": str(period.id)},
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=subscription.subscriber_user_id,
+        notification_type="SUBSCRIPTION_RENEWED" if period.sequence > 1 else "SUBSCRIPTION_STARTED",
+        source_domain="subscriptions",
+        source_id=str(period.id),
+        title="Subscription confirmed",
+        body="Your subscription payment has been confirmed.",
+        target_path="/subscriptions",
+    )
     return subscription
 
 
@@ -394,6 +405,17 @@ async def set_auto_renew(
         target_id=str(subscription.id),
         metadata={"auto_renew": enabled},
     )
+    if not enabled:
+        await emit_transactional(
+            db,
+            recipient_user_id=subscription.subscriber_user_id,
+            notification_type="SUBSCRIPTION_CANCELLED",
+            source_domain="subscriptions",
+            source_id=str(subscription.id),
+            title="Subscription cancellation scheduled",
+            body="Your subscription will not renew automatically.",
+            target_path="/subscriptions",
+        )
     return subscription
 
 
@@ -455,6 +477,16 @@ async def fail_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> Sub
         )
     else:
         subscription.status = SubscriptionStatus.payment_failed
+    await emit_transactional(
+        db,
+        recipient_user_id=subscription.subscriber_user_id,
+        notification_type="SUBSCRIPTION_PAYMENT_FAILED",
+        source_domain="subscriptions",
+        source_id=str(period.id),
+        title="Subscription payment failed",
+        body="Update your payment method to continue your subscription.",
+        target_path="/subscriptions",
+    )
     return subscription
 
 

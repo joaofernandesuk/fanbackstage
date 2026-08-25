@@ -100,6 +100,7 @@ async def create_intent(
         return existing
     if classification is NotificationClass.marketing and notification_type in MANDATORY_TYPES:
         raise ValueError("Mandatory notification cannot be marketing")
+    stored_payload = {**payload, "_email_enabled": NotificationChannel.email in channels}
     intent = NotificationIntent(
         recipient_user_id=recipient_user_id,
         notification_type=notification_type,
@@ -113,7 +114,7 @@ async def create_intent(
         source_domain=source_domain,
         source_id=source_id,
         idempotency_key=key,
-        payload_json=payload,
+        payload_json=stored_payload,
         secure_payload=_cipher().encrypt(json.dumps(secure_payload).encode()).decode()
         if secure_payload
         else None,
@@ -132,6 +133,64 @@ async def create_intent(
             )
         )
     return intent
+
+
+async def emit_transactional(
+    db: AsyncSession,
+    *,
+    recipient_user_id: UUID,
+    notification_type: str,
+    source_domain: str,
+    source_id: str,
+    title: str,
+    body: str,
+    target_path: str | None = None,
+    email: bool = True,
+) -> NotificationIntent:
+    """Create a privacy-minimised operational notification from an authoritative event."""
+    channels = (
+        (NotificationChannel.email, NotificationChannel.in_app)
+        if email
+        else (NotificationChannel.in_app,)
+    )
+    return await create_intent(
+        db,
+        recipient_user_id=recipient_user_id,
+        notification_type=notification_type,
+        classification=NotificationClass.transactional,
+        source_domain=source_domain,
+        source_id=source_id,
+        payload={"title": title, "subject": title, "body": body, "target_path": target_path},
+        channels=channels,
+    )
+
+
+async def reconcile_queued_intents(db: AsyncSession, limit: int = 100) -> int:
+    """Replay-safe recovery for durable intents after worker loss or enqueue failure."""
+    rows = (
+        await db.scalars(
+            select(NotificationIntent)
+            .where(
+                ~NotificationIntent.id.in_(
+                    select(NotificationDeliveryAttempt.intent_id).where(
+                        NotificationDeliveryAttempt.channel == NotificationChannel.email,
+                        NotificationDeliveryAttempt.status.in_(
+                            [
+                                DeliveryStatus.sent,
+                                DeliveryStatus.delivered,
+                                DeliveryStatus.suppressed,
+                            ]
+                        ),
+                    )
+                )
+            )
+            .order_by(NotificationIntent.created_at)
+            .limit(limit)
+        )
+    ).all()
+    for intent in rows:
+        await deliver_intent(db, intent.id)
+    return len(rows)
 
 
 async def _eligible(db: AsyncSession, intent: NotificationIntent, user: User) -> bool:
@@ -166,6 +225,8 @@ async def deliver_intent(db: AsyncSession, intent_id: UUID) -> DeliveryStatus:
     intent = await db.get(NotificationIntent, intent_id)
     if not intent:
         return DeliveryStatus.failed_permanent
+    if not intent.payload_json.get("_email_enabled", True):
+        return DeliveryStatus.suppressed
     user = await db.get(User, intent.recipient_user_id)
     if not user:
         return DeliveryStatus.failed_permanent

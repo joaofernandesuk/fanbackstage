@@ -42,6 +42,20 @@ def deliver_notification(self, intent_id: str) -> dict[str, str]:
 
 
 @celery_app.task
+def reconcile_notification_delivery() -> dict[str, int]:
+    from app.db.session import SessionLocal
+    from app.notifications.service import reconcile_queued_intents
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            reconciled = await reconcile_queued_intents(session)
+            await session.commit()
+            return reconciled
+
+    return {"reconciled": run_async(run())}
+
+
+@celery_app.task
 def ffmpeg_version() -> dict[str, str]:
     """Worker-runtime capability check; no media input, output, or product state."""
     completed = subprocess.run(["ffmpeg", "-version"], check=True, capture_output=True, text=True)

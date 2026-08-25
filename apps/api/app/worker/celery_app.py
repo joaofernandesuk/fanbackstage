@@ -37,6 +37,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.reconcile_featuring_lifecycle": {"queue": "scheduled"},
     "app.worker.tasks.expire_consent_releases": {"queue": "scheduled"},
     "app.worker.tasks.deliver_notification": {"queue": "notifications"},
+    "app.worker.tasks.reconcile_notification_delivery": {"queue": "notifications"},
     "app.worker.tasks.*": {"queue": "default"},
 }
 celery_app.conf.beat_schedule = {
@@ -82,6 +83,10 @@ celery_app.conf.beat_schedule = {
     },
     "consent-release-expiry": {
         "task": "app.worker.tasks.expire_consent_releases",
+        "schedule": 60.0,
+    },
+    "notification-delivery-reconciliation": {
+        "task": "app.worker.tasks.reconcile_notification_delivery",
         "schedule": 60.0,
     },
 }

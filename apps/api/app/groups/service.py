@@ -24,6 +24,7 @@ from app.models.groups import (
     GroupPermissionGrant,
 )
 from app.models.identity import User
+from app.notifications.service import emit_transactional
 
 
 class GroupError(ValueError):
@@ -95,7 +96,8 @@ async def invite_creator(
     group = await db.get(Group, group_id)
     if not group or group.status.value != "active":
         raise GroupError("Group is not active")
-    if not await db.get(CreatorProfile, creator_id):
+    creator = await db.get(CreatorProfile, creator_id)
+    if not creator:
         raise GroupError("Creator not found")
     existing = await db.scalar(
         select(GroupCreatorMembership).where(
@@ -144,6 +146,16 @@ async def invite_creator(
         target_id=str(membership.id),
         metadata={"contract_id": str(contract.id)},
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=creator.user_id,
+        notification_type="GROUP_INVITATION",
+        source_domain="groups",
+        source_id=str(membership.id),
+        title="You have a group invitation",
+        body="Review the invitation and proposed contract in FanBackstage.",
+        target_path="/groups",
+    )
     return membership
 
 
@@ -187,6 +199,18 @@ async def accept_invitation(
         target_type="group_membership",
         target_id=str(membership.id),
         metadata={"contract_id": str(contract.id)},
+    )
+    group = await db.get(Group, membership.group_id)
+    assert group is not None
+    await emit_transactional(
+        db,
+        recipient_user_id=group.owner_user_id,
+        notification_type="GROUP_INVITATION_ACCEPTED",
+        source_domain="groups",
+        source_id=str(membership.id),
+        title="Group invitation accepted",
+        body="A creator accepted a group invitation.",
+        target_path="/groups",
     )
     return membership
 
