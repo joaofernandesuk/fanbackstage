@@ -34,4 +34,6 @@ class PreferenceResponse(BaseModel):
 
 class ProviderWebhookInput(BaseModel):
     provider_message_id: str = Field(min_length=1, max_length=255)
-    event: str = Field(pattern="^(delivered|hard_bounce|complaint)$")
+    event: str = Field(
+        pattern="^(accepted|delivered|soft_bounce|deferred|hard_bounce|complaint|rejected)$"
+    )

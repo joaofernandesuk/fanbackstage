@@ -76,6 +76,30 @@ def _safe_path(path: str | None) -> str | None:
     return path
 
 
+def unsubscribe_token(user_id: UUID, category: str = "marketing") -> str:
+    """Opaque authenticated token; user identity is encrypted, never exposed in the URL."""
+    return (
+        _cipher()
+        .encrypt(json.dumps({"user_id": str(user_id), "category": category}).encode())
+        .decode()
+    )
+
+
+def unsubscribe_token_subject(token: str) -> tuple[UUID, str]:
+    try:
+        value = json.loads(
+            _cipher().decrypt(
+                token.encode(), ttl=get_settings().notification_unsubscribe_ttl_days * 86400
+            )
+        )
+        category = value["category"]
+        if category != "marketing":
+            raise ValueError("Invalid unsubscribe category")
+        return UUID(value["user_id"]), category
+    except Exception as exc:
+        raise ValueError("Invalid or expired unsubscribe token") from exc
+
+
 async def create_intent(
     db: AsyncSession,
     *,
@@ -270,6 +294,8 @@ async def deliver_intent(db: AsyncSession, intent_id: UUID) -> DeliveryStatus:
         if intent.secure_payload
         else {}
     )
+    if intent.classification is NotificationClass.marketing:
+        secure["unsubscribe_token"] = unsubscribe_token(user.id)
     try:
         attempt.provider_message_id = await email_provider.send(
             template=intent.notification_type,
@@ -354,12 +380,21 @@ async def mark_provider_event(db: AsyncSession, provider_message_id: str, event:
         return False
     if event == "delivered":
         attempt.status = DeliveryStatus.delivered
-    elif event in {"hard_bounce", "complaint"}:
+    elif event in {"accepted", "soft_bounce", "deferred"}:
+        attempt.status = (
+            DeliveryStatus.sent if event == "accepted" else DeliveryStatus.failed_retryable
+        )
+        attempt.error_code = event if event != "accepted" else None
+    elif event in {"hard_bounce", "complaint", "rejected"}:
         attempt.status = DeliveryStatus.failed_permanent
-        if attempt.recipient_snapshot and not await db.scalar(
-            select(EmailSuppression.id).where(
-                EmailSuppression.email_hash == email_hash(attempt.recipient_snapshot),
-                EmailSuppression.reason == SuppressionReason(event),
+        if (
+            event in {"hard_bounce", "complaint"}
+            and attempt.recipient_snapshot
+            and not await db.scalar(
+                select(EmailSuppression.id).where(
+                    EmailSuppression.email_hash == email_hash(attempt.recipient_snapshot),
+                    EmailSuppression.reason == SuppressionReason(event),
+                )
             )
         ):
             db.add(

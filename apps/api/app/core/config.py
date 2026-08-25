@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     email_from: str = "no-reply@fanbackstage.local"
     notification_webhook_secret: str = "development-notification-webhook-secret"
     notification_max_attempts: int = 3
+    notification_retry_base_seconds: int = 30
+    notification_unsubscribe_ttl_days: int = 30
     kyc_provider: str = "development"
     storage_endpoint_url: str = "http://localhost:9000"
     storage_access_key: str = "fanbackstage"

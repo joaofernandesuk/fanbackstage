@@ -35,6 +35,7 @@ from app.models.trust_safety import (
     ReportTargetType,
     TrustSafetyReport,
 )
+from app.notifications.service import emit_transactional
 
 REPORT_DEDUPLICATION_WINDOW = timedelta(hours=24)
 APPEAL_WINDOW = timedelta(days=30)
@@ -524,6 +525,16 @@ async def submit_appeal(
     )
     db.add(appeal)
     await db.flush()
+    await emit_transactional(
+        db,
+        recipient_user_id=appellant.id,
+        notification_type="APPEAL_SUBMITTED",
+        source_domain="trust_safety",
+        source_id=str(appeal.id),
+        title="Appeal received",
+        body="Your appeal has been received for review.",
+        target_path="/appeals",
+    )
     return appeal
 
 
@@ -554,6 +565,16 @@ async def decide_appeal(
         reviewer.id,
         reason.strip(),
         datetime.now(UTC),
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=appeal.appellant_user_id,
+        notification_type="APPEAL_DECIDED",
+        source_domain="trust_safety",
+        source_id=str(appeal.id),
+        title="Appeal decided",
+        body="Your appeal decision is available in FanBackstage.",
+        target_path="/appeals",
     )
     return appeal
 
@@ -595,6 +616,16 @@ async def submit_consent_release(
     await db.flush()
     for content_id in set(content_ids):
         db.add(ConsentReleaseContent(consent_release_id=release.id, content_id=content_id))
+    await emit_transactional(
+        db,
+        recipient_user_id=creator.user_id,
+        notification_type="CONSENT_REVIEW_REQUESTED",
+        source_domain="trust_safety",
+        source_id=str(release.id),
+        title="Consent review requested",
+        body="A consent release is awaiting review.",
+        target_path="/creator-studio/consent",
+    )
     return release
 
 
@@ -622,6 +653,18 @@ async def verify_consent_release(
         target_type="consent_release",
         target_id=str(release.id),
         metadata={"approved": approved},
+    )
+    creator = await db.get(CreatorProfile, release.owner_creator_id)
+    assert creator is not None
+    await emit_transactional(
+        db,
+        recipient_user_id=creator.user_id,
+        notification_type="CONSENT_VERIFIED" if approved else "CONSENT_REJECTED",
+        source_domain="trust_safety",
+        source_id=str(release.id),
+        title="Consent review completed",
+        body="Your consent release review is available in FanBackstage.",
+        target_path="/creator-studio/consent",
     )
     return release
 

@@ -156,6 +156,18 @@ async def invite_creator(
         body="Review the invitation and proposed contract in FanBackstage.",
         target_path="/groups",
     )
+    group = await db.get(Group, membership.group_id)
+    assert group is not None
+    await emit_transactional(
+        db,
+        recipient_user_id=group.owner_user_id,
+        notification_type="GROUP_INVITATION_REJECTED",
+        source_domain="groups",
+        source_id=str(membership.id),
+        title="Group invitation declined",
+        body="A creator declined a group invitation.",
+        target_path="/groups",
+    )
     return membership
 
 
@@ -286,6 +298,18 @@ async def propose_amendment(
         target_type="group_contract",
         target_id=str(contract.id),
     )
+    creator = await db.get(CreatorProfile, membership.creator_id)
+    assert creator is not None
+    await emit_transactional(
+        db,
+        recipient_user_id=creator.user_id,
+        notification_type="GROUP_CONTRACT_PROPOSAL",
+        source_domain="groups",
+        source_id=str(contract.id),
+        title="Group contract proposal",
+        body="Review the proposed group contract in FanBackstage.",
+        target_path="/groups",
+    )
     return contract
 
 
@@ -323,6 +347,19 @@ async def decide_amendment(
         target_type="group_contract",
         target_id=str(contract.id),
     )
+    membership = await db.get(GroupCreatorMembership, contract.membership_id)
+    group = await db.get(Group, membership.group_id) if membership else None
+    if group:
+        await emit_transactional(
+            db,
+            recipient_user_id=group.owner_user_id,
+            notification_type="GROUP_CONTRACT_ACCEPTED" if accept else "GROUP_CONTRACT_REJECTED",
+            source_domain="groups",
+            source_id=str(contract.id),
+            title="Group contract updated",
+            body="A group contract proposal has been decided.",
+            target_path="/groups",
+        )
     return contract
 
 

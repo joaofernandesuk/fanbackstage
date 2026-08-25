@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 from uuid import UUID
 
+from app.core.config import get_settings
 from app.worker.celery_app import celery_app
 
 _event_loop: asyncio.AbstractEventLoop | None = None
@@ -26,11 +27,11 @@ def health_ping(self) -> dict[str, str]:
     return {"status": "ok", "queue": self.request.delivery_info.get("routing_key", "default")}
 
 
-@celery_app.task(bind=True, autoretry_for=(ConnectionError,), retry_backoff=True, max_retries=3)
+@celery_app.task(bind=True)
 def deliver_notification(self, intent_id: str) -> dict[str, str]:
     """Deliver a persisted intent; retries cannot create another logical intent."""
     from app.db.session import SessionLocal
-    from app.notifications.service import deliver_intent
+    from app.notifications.service import DeliveryStatus, deliver_intent
 
     async def run() -> str:
         async with SessionLocal() as session:
@@ -38,7 +39,15 @@ def deliver_notification(self, intent_id: str) -> dict[str, str]:
             await session.commit()
             return status.value
 
-    return {"intent_id": intent_id, "status": run_async(run())}
+    status = run_async(run())
+    if (
+        status == DeliveryStatus.failed_retryable.value
+        and self.request.retries < get_settings().notification_max_attempts
+    ):
+        raise self.retry(
+            countdown=get_settings().notification_retry_base_seconds * (2**self.request.retries)
+        )
+    return {"intent_id": intent_id, "status": status}
 
 
 @celery_app.task

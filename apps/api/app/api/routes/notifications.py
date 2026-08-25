@@ -6,7 +6,13 @@ from sqlalchemy import func, select, update
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.models.notification import InAppNotification, NotificationPreference
-from app.notifications.service import _now, mark_provider_event, unsubscribe, update_preference
+from app.notifications.service import (
+    _now,
+    mark_provider_event,
+    unsubscribe,
+    unsubscribe_token_subject,
+    update_preference,
+)
 from app.schemas.auth import MessageResponse
 from app.schemas.notification import (
     NotificationPage,
@@ -130,6 +136,21 @@ async def unsubscribe_marketing(identity: CurrentIdentity, db: Db) -> MessageRes
     await unsubscribe(db, identity[0])
     await db.commit()
     return MessageResponse(message="Marketing email unsubscribed")
+
+
+@router.post("/unsubscribe-token", response_model=MessageResponse)
+async def unsubscribe_marketing_token(token: str, db: Db) -> MessageResponse:
+    try:
+        user_id, _ = unsubscribe_token_subject(token)
+        user = await db.get(__import__("app.models.identity", fromlist=["User"]).User, user_id)
+        if not user:
+            raise ValueError("Unknown recipient")
+        await unsubscribe(db, user)
+        await db.commit()
+        return MessageResponse(message="Marketing email unsubscribed")
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid unsubscribe link") from exc
 
 
 @router.post("/provider-events", response_model=MessageResponse, include_in_schema=False)

@@ -49,7 +49,8 @@ class SmtpEmailProvider(EmailProvider):
         message["Message-ID"] = f"<{idempotency_key}@fanbackstage.local>"
         message["X-FanBackstage-Stream"] = classification
         if classification == "marketing":
-            message["List-Unsubscribe"] = f"<{settings.web_origin}/unsubscribe>"
+            unsubscribe = secure_payload.get("unsubscribe_token")
+            message["List-Unsubscribe"] = f"<{settings.web_origin}/unsubscribe?token={unsubscribe}>"
             message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
         message["Subject"] = str(payload.get("subject") or "FanBackstage notification")
         body = str(payload.get("body") or "You have a FanBackstage notification.")
