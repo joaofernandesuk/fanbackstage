@@ -361,6 +361,16 @@ async def expire_reservations(db: AsyncSession, now: datetime | None = None) -> 
     for booking in rows:
         booking.status = FeatureBookingStatus.failed
         booking.reservation_expires_at = None
+        await emit_transactional(
+            db,
+            recipient_user_id=booking.purchaser_user_id,
+            notification_type="FEATURING_PAYMENT_FAILED",
+            source_domain="featuring",
+            source_id=str(booking.id),
+            title="Featuring payment was not completed",
+            body="Your featuring reservation has expired without payment.",
+            target_path="/featuring",
+        )
     return len(rows)
 
 
@@ -584,11 +594,23 @@ async def terminate_ineligible(
     await emit_transactional(
         db,
         recipient_user_id=booking.purchaser_user_id,
-        notification_type="FEATURING_BOOKING_CONFIRMED",
+        notification_type=(
+            "FEATURING_REFUND_ISSUED"
+            if reason is not FeatureIneligibilityReason.creator_ended
+            else "FEATURING_PLACEMENT_DISABLED"
+        ),
         source_domain="featuring",
         source_id=str(booking.id),
-        title="Featuring booking confirmed",
-        body="Your featuring booking payment has been confirmed.",
+        title=(
+            "Featuring refund issued"
+            if reason is not FeatureIneligibilityReason.creator_ended
+            else "Featuring placement ended"
+        ),
+        body=(
+            "Your placement is no longer eligible and any unused time has been refunded."
+            if reason is not FeatureIneligibilityReason.creator_ended
+            else "Your sponsored placement is no longer active."
+        ),
         target_path="/featuring",
     )
     return booking
@@ -845,5 +867,15 @@ async def settle_payment(db: AsyncSession, booking: FeatureBooking) -> FeatureBo
         target_type="feature_booking",
         target_id=str(booking.id),
         metadata={"ledger_transaction_id": str(ledger.id)},
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=booking.purchaser_user_id,
+        notification_type="FEATURING_BOOKING_CONFIRMED",
+        source_domain="featuring",
+        source_id=str(booking.id),
+        title="Featuring booking confirmed",
+        body="Your featuring booking payment has been confirmed.",
+        target_path="/featuring",
     )
     return booking

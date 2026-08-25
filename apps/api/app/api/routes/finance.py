@@ -13,6 +13,7 @@ from app.models.featuring import FeatureBooking
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
 from app.models.marketplace import MarketplaceOrder
 from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
+from app.models.notification import NotificationIntent
 from app.models.streaming import PrivateSession
 from app.models.subscription import SubscriptionPeriod
 from app.permissions.policies import Permission, authorize
@@ -26,6 +27,24 @@ from app.schemas.finance import (
 )
 
 router = APIRouter(tags=["finance"])
+
+
+async def dispatch_purchase_receipt(db: Db, purchase: Purchase | None) -> None:
+    """Queue the durable receipt only after its financial transaction committed."""
+    if purchase is None:
+        return
+    intent = await db.scalar(
+        select(NotificationIntent).where(
+            NotificationIntent.notification_type == "PURCHASE_RECEIPT",
+            NotificationIntent.source_domain == "finance",
+            NotificationIntent.source_id == str(purchase.id),
+            NotificationIntent.recipient_user_id == purchase.buyer_user_id,
+        )
+    )
+    if intent:
+        from app.worker.tasks import deliver_notification
+
+        deliver_notification.delay(str(intent.id))
 
 
 def purchase_response(purchase: Purchase) -> PurchaseResponse:
@@ -100,6 +119,7 @@ async def complete_development_payment(
     try:
         purchase = await service.process_development_webhook(db, payload, signature)
         await db.commit()
+        await dispatch_purchase_receipt(db, purchase)
     except service.FinancialError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -155,10 +175,11 @@ async def complete_development_payment(
 async def development_webhook(request: Request, db: Db) -> None:
     payload = await request.body()
     try:
-        await service.process_development_webhook(
+        purchase = await service.process_development_webhook(
             db, payload, request.headers.get("X-Payment-Signature")
         )
         await db.commit()
+        await dispatch_purchase_receipt(db, purchase)
     except service.FinancialError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc

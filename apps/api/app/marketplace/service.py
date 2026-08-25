@@ -756,16 +756,6 @@ async def shipping_address_for_order(
         target_id=str(order.id),
         metadata={"access_kind": "buyer" if is_buyer else "seller_or_support"},
     )
-    await emit_transactional(
-        db,
-        recipient_user_id=order.buyer_user_id,
-        notification_type="MARKETPLACE_ORDER_SHIPPED",
-        source_domain="marketplace",
-        source_id=str(order.id),
-        title="Your order has shipped",
-        body="Open FanBackstage for the operational order status.",
-        target_path="/marketplace/orders",
-    )
     return address
 
 
@@ -803,11 +793,11 @@ async def release_order_reservation(
     await emit_transactional(
         db,
         recipient_user_id=order.buyer_user_id,
-        notification_type="MARKETPLACE_ORDER_DELIVERED",
+        notification_type="MARKETPLACE_ORDER_CANCELLED",
         source_domain="marketplace",
         source_id=str(order.id),
-        title="Order delivered",
-        body="Your delivery has been confirmed.",
+        title="Order payment was not completed",
+        body="Your order reservation has been cancelled.",
         target_path="/marketplace/orders",
     )
     return order
@@ -982,6 +972,16 @@ async def mark_order_shipped(
             "has_tracking_reference": bool(order.tracking_reference),
         },
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=order.buyer_user_id,
+        notification_type="MARKETPLACE_ORDER_SHIPPED",
+        source_domain="marketplace",
+        source_id=str(order.id),
+        title="Your order has shipped",
+        body="Open FanBackstage for the operational order status.",
+        target_path="/marketplace/orders",
+    )
     return order
 
 
@@ -1022,6 +1022,16 @@ async def confirm_order_delivery(db: AsyncSession, order_id: UUID, buyer: User) 
             "seller_tier": profile.tier.value,
             "hold_duration_seconds": policy.hold_duration_seconds,
         },
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=order.buyer_user_id,
+        notification_type="MARKETPLACE_ORDER_DELIVERED",
+        source_domain="marketplace",
+        source_id=str(order.id),
+        title="Order delivered",
+        body="Your delivery has been confirmed.",
+        target_path="/marketplace/orders",
     )
     return order
 
@@ -1277,6 +1287,16 @@ async def refund_order(
         target_id=str(order.id),
         metadata={"reason": reason, "stock_restored": restore_stock},
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=order.buyer_user_id,
+        notification_type="MARKETPLACE_ORDER_REFUNDED",
+        source_domain="marketplace",
+        source_id=str(order.id),
+        title="Order refunded",
+        body="Your marketplace order refund has been completed.",
+        target_path="/marketplace/orders",
+    )
     return order
 
 
@@ -1406,5 +1426,15 @@ async def chargeback_order(
         target_type="marketplace_order",
         target_id=str(order.id),
         metadata={"reason": reason},
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=order.buyer_user_id,
+        notification_type="MARKETPLACE_ORDER_CHARGEBACK",
+        source_domain="marketplace",
+        source_id=str(order.id),
+        title="Order payment reversed",
+        body="Your marketplace order payment was reversed.",
+        target_path="/marketplace/orders",
     )
     return order

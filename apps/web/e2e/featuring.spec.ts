@@ -59,7 +59,9 @@ test("Phase 12 booking settles, inserts one labelled sponsored card, and expires
   await page.goto("/creator-onboarding");
   await page.getByRole("button", { name: "Save profile" }).click();
   const targets = await api(page, "/featuring/eligible-targets");
-  const booking = await api(page, "/featuring/bookings", "POST", { slot_id: slot.body.id, target_type: "creator", target_id: targets.body[0].target_id, starts_at: new Date(Date.now() + 1100).toISOString(), duration_seconds: 2 });
+  const target = targets.body.find((row: { target_id: string; target_type: string }) => row.target_type === "creator" && row.target_id === application.id);
+  expect(target, JSON.stringify(targets.body)).toBeTruthy();
+  const booking = await api(page, "/featuring/bookings", "POST", { slot_id: slot.body.id, target_type: "creator", target_id: target.target_id, starts_at: new Date(Date.now() + 1100).toISOString(), duration_seconds: 2 });
   expect(booking.status, JSON.stringify(booking.body)).toBe(200);
   const payment = await api(page, `/featuring/bookings/${booking.body.id}/payment`, "POST");
   expect((await api(page, `/payments/development/${payment.body.payment_attempt_id}/complete`, "POST")).status).toBe(200);

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { securityLink } from "./mailpit";
+import { mailpitMessage, securityLink } from "./mailpit";
 
 const apiBase =
   process.env.E2E_API_URL ?? process.env.NEXT_PUBLIC_FANBACKSTAGE_API_URL ?? "http://127.0.0.1:38180";
@@ -13,6 +13,14 @@ const image = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+const phase15Harness = join(process.cwd(), "../api/tests/e2e_phase15_notification_harness.py");
+const phase15Python = join(process.cwd(), "../api/.venv/bin/python");
+
+function phase15Receipt(email: string, purchaseId: string) {
+  return JSON.parse(execFileSync(phase15Python, [phase15Harness, "receipt", email, purchaseId], {
+    env: { ...process.env, FANBACKSTAGE_E2E_RELEASE_VALIDATION: "1" }, encoding: "utf8",
+  })) as { intent_count: number; payload: { body: string } | null; attempt_count: number; statuses: string[]; payment_attempt_id: string };
+}
 
 function videoFixture(): Buffer {
   const directory = mkdtempSync(join(tmpdir(), "fanbackstage-phase2-"));
@@ -185,6 +193,29 @@ test("creator media travels through the real private processing stack", async ({
     const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
     return (await response.json()).has_access;
   }, { apiBase, contentId: published[0].id }), { timeout: 10_000 }).toBe(true);
+  const purchases = await buyerPage.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/purchases/mine`, { credentials: "include" });
+    return { status: response.status, body: await response.json() };
+  }, { apiBase });
+  expect(purchases.status).toBe(200);
+  expect(purchases.body).toHaveLength(1);
+  expect(purchases.body[0]).toMatchObject({ gross_amount_minor: 999, currency: "EUR", status: "paid" });
+  // Replaying the authoritative payment completion must return the settled
+  // purchase rather than create another financial event or receipt intent.
+  const receiptBeforeReplay = phase15Receipt(buyerEmail, purchases.body[0].id);
+  const duplicatePayment = await buyerPage.evaluate(async ({ apiBase, paymentAttemptId }) => {
+    const response = await fetch(`${apiBase}/api/v1/payments/development/${paymentAttemptId}/complete`, {
+      method: "POST", credentials: "include",
+    });
+    return { status: response.status, body: await response.json() };
+  }, { apiBase, paymentAttemptId: receiptBeforeReplay.payment_attempt_id });
+  expect(duplicatePayment.status).toBe(200);
+  await expect.poll(() => phase15Receipt(buyerEmail, purchases.body[0].id).statuses[0], { timeout: 10_000 }).toBe("sent");
+  const receipt = phase15Receipt(buyerEmail, purchases.body[0].id);
+  expect(receipt).toMatchObject({ intent_count: 1, attempt_count: 1, statuses: ["sent"] });
+  expect(receipt.payload?.body).toBe("Your purchase of 999 EUR is confirmed.");
+  const receiptMail = await mailpitMessage(buyerEmail, "Your purchase of 999 EUR is confirmed.");
+  expect(receiptMail.Subject).toBe("Purchase receipt");
   await buyerContext.close();
   const subscriberContext = await browser.newContext();
   const subscriberPage = await subscriberContext.newPage();
@@ -252,4 +283,32 @@ test("creator media travels through the real private processing stack", async ({
     const response = await fetch(`${apiBase}/api/v1/media/mine`, { credentials: "include" });
     return (await response.json() as { status: string }[]).filter(asset => asset.status === "ready").length;
   }, { apiBase }), { timeout: 30000 }).toBeGreaterThan(1);
+  // A later commission-policy revision is intentionally forward-looking: it
+  // cannot rewrite the settled purchase snapshot or its already-rendered receipt.
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Log out" }).click();
+  await login(page, admin.email, admin.password);
+  const previousCommission = await page.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/admin/finance/commission`, { credentials: "include" });
+    return { status: response.status, body: await response.json() };
+  }, { apiBase });
+  expect(previousCommission.status).toBe(200);
+  const commission = await page.evaluate(async ({ apiBase, previousCommission }) => {
+    const response = await fetch(`${apiBase}/api/v1/admin/finance/commission`, {
+      method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ basis_points: previousCommission.body.basis_points === 2500 ? 2000 : 2500 }),
+    });
+    return { status: response.status, body: await response.json() };
+  }, { apiBase, previousCommission });
+  expect(commission.status).toBe(200);
+  expect(phase15Receipt(buyerEmail, purchases.body[0].id).payload?.body)
+    .toBe("Your purchase of 999 EUR is confirmed.");
+  const restoredCommission = await page.evaluate(async ({ apiBase, basisPoints }) => {
+    const response = await fetch(`${apiBase}/api/v1/admin/finance/commission`, {
+      method: "PUT", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ basis_points: basisPoints }),
+    });
+    return response.status;
+  }, { apiBase, basisPoints: previousCommission.body.basis_points });
+  expect(restoredCommission).toBe(200);
 });

@@ -5,7 +5,10 @@ api_url="$E2E_API_URL"
 api_port="$E2E_API_PORT"
 cd ../api
 runner="${E2E_API_RUNNER:-uv run }"
-run() { sh -c "$runner$1"; }
+# Replace the helper shell with the requested process.  This keeps the captured
+# worker/API PIDs authoritative so Playwright cannot leave a stale Celery worker
+# consuming a later run's notification jobs.
+run() { sh -c "exec $runner$1"; }
 run "alembic upgrade head"
 run "python tests/e2e_seed.py"
 # The private-live E2E exercises provider-authoritative presence repair when a

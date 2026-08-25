@@ -15,6 +15,8 @@ const storageEndpoint =
   `http://127.0.0.1:${process.env.E2E_MINIO_PORT ?? process.env.FANBACKSTAGE_MINIO_PORT ?? "9000"}`;
 const environment = {
   ...process.env,
+  E2E_API_PORT: apiPort,
+  E2E_WEB_PORT: webPort,
   FANBACKSTAGE_DATABASE_URL:
     process.env.FANBACKSTAGE_DATABASE_URL ??
     "postgresql+asyncpg://fanbackstage:fanbackstage@127.0.0.1:5432/fanbackstage",
