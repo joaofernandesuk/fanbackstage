@@ -5,7 +5,9 @@ from sqlalchemy import select
 
 from app.analytics import service
 from app.api.deps import CurrentIdentity, Db
+from app.groups import service as groups_service
 from app.models.creator import CreatorProfile
+from app.models.groups import Group
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -37,4 +39,31 @@ async def creator_analytics_overview(
     return {
         "creator_id": str(creator.id),
         **(await service.creator_overview(db, creator.id, start, end, currency)),
+    }
+
+
+@router.get("/groups/{group_id}/overview")
+async def group_analytics_overview(
+    group_id: str,
+    identity: CurrentIdentity,
+    db: Db,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+    currency: str | None = None,
+) -> dict:
+    from uuid import UUID
+
+    try:
+        resolved = UUID(group_id)
+    except ValueError as exc:
+        raise HTTPException(404, "Group not found") from exc
+    group = await db.get(Group, resolved)
+    if not group or not await groups_service.manager_membership(db, group.id, identity[0].id):
+        raise HTTPException(403, "Group analytics permission denied")
+    if currency and len(currency) != 3:
+        raise HTTPException(400, "Currency must be a three-letter code")
+    start, end = _range(starts_at, ends_at)
+    return {
+        "group_id": str(group.id),
+        **(await service.group_overview(db, group.id, start, end, currency)),
     }

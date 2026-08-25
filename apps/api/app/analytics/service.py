@@ -103,3 +103,52 @@ async def creator_overview(
             for (currency_code, source), value in sorted(sources.items())
         ],
     }
+
+
+async def group_overview(
+    db: AsyncSession,
+    group_id: UUID,
+    starts_at: datetime,
+    ends_at: datetime,
+    currency: str | None = None,
+) -> dict:
+    """Event-time group earnings from immutable group accounts, never current contracts."""
+    query = (
+        select(LedgerEntry, LedgerAccount, LedgerTransaction)
+        .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+        .join(LedgerTransaction, LedgerTransaction.id == LedgerEntry.transaction_id)
+        .where(
+            LedgerAccount.owner_group_id == group_id,
+            LedgerAccount.kind.in_(
+                [LedgerAccountKind.group_pending, LedgerAccountKind.group_available]
+            ),
+            LedgerTransaction.effective_at >= starts_at,
+            LedgerTransaction.effective_at < ends_at,
+        )
+    )
+    if currency:
+        query = query.where(LedgerTransaction.currency == currency.upper())
+    totals: dict[str, dict] = defaultdict(
+        lambda: {
+            "group_net_minor": 0,
+            "pending_minor": 0,
+            "available_minor": 0,
+            "reversed_minor": 0,
+        }
+    )
+    for entry, account, transaction in (await db.execute(query)).all():
+        value, bucket = _signed(entry), totals[transaction.currency]
+        bucket["group_net_minor"] += value
+        bucket[
+            "pending_minor"
+            if account.kind is LedgerAccountKind.group_pending
+            else "available_minor"
+        ] += value
+        if value < 0:
+            bucket["reversed_minor"] += -value
+    return {
+        "metric_definition_version": METRIC_DEFINITION_VERSION,
+        "starts_at": starts_at.astimezone(UTC),
+        "ends_at": ends_at.astimezone(UTC),
+        "currencies": [{"currency": key, **value} for key, value in sorted(totals.items())],
+    }
