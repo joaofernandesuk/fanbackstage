@@ -1,0 +1,119 @@
+name: fanbackstage-dev
+
+x-api-environment: &api-environment
+  FANBACKSTAGE_ENVIRONMENT: development
+  FANBACKSTAGE_DEMO_SEED_ENABLED: "true"
+  FANBACKSTAGE_WEB_ORIGIN: http://localhost:13000
+  FANBACKSTAGE_API_ORIGIN: http://localhost:18000
+  FANBACKSTAGE_DATABASE_URL: postgresql+asyncpg://fanbackstage:fanbackstage@postgres:5432/fanbackstage
+  FANBACKSTAGE_REDIS_URL: redis://redis:6379/0
+  FANBACKSTAGE_SMTP_HOST: mailpit
+  FANBACKSTAGE_SMTP_PORT: "1025"
+  FANBACKSTAGE_STORAGE_ENDPOINT_URL: http://minio:9000
+  FANBACKSTAGE_STORAGE_ACCESS_KEY: fanbackstage
+  FANBACKSTAGE_STORAGE_SECRET_KEY: fanbackstage-development-only
+  FANBACKSTAGE_LIVEKIT_URL: ws://localhost:17880
+  FANBACKSTAGE_LIVEKIT_API_KEY: devkey
+  FANBACKSTAGE_LIVEKIT_API_SECRET: fanbackstage-livekit-development-secret-2026
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fanbackstage
+      POSTGRES_USER: fanbackstage
+      POSTGRES_PASSWORD: fanbackstage
+    ports: ["15432:5432"]
+    volumes: [fanbackstage_dev_postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fanbackstage -d fanbackstage"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    ports: ["16390:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  mailpit:
+    image: axllent/mailpit:latest
+    ports: ["11035:1025", "18035:8025"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8025/api/v1/info >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: fanbackstage
+      MINIO_ROOT_PASSWORD: fanbackstage-development-only
+    ports: ["19010:9000", "19011:9001"]
+    volumes: [fanbackstage_dev_minio:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    ports: ["17880:7880", "17881:7881", "17882:7882/udp"]
+    volumes: [./infra/livekit/livekit.dev.yaml:/etc/livekit.yaml:ro]
+    restart: unless-stopped
+  api:
+    build: {context: ./apps/api, dockerfile: Dockerfile.dev}
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    environment: *api-environment
+    ports: ["18000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+      mailpit: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/ready')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  worker:
+    build: {context: ./apps/api, dockerfile: Dockerfile.dev}
+    command: celery -A app.worker.celery_app worker --loglevel=INFO
+    environment: *api-environment
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+  beat:
+    build: {context: ./apps/api, dockerfile: Dockerfile.dev}
+    command: celery -A app.worker.celery_app beat --loglevel=INFO
+    environment: *api-environment
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+  web:
+    build: {context: ./apps/web, dockerfile: Dockerfile.dev}
+    command: pnpm dev --hostname 0.0.0.0 --port 3000
+    environment:
+      NEXT_PUBLIC_FANBACKSTAGE_API_URL: http://localhost:18000
+    ports: ["13000:3000"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  fanbackstage_dev_postgres:
+  fanbackstage_dev_minio:

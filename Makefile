@@ -14,7 +14,7 @@ dev-stop:
 dev-reset:
 	./scripts/dev-reset.sh
 demo-seed:
-	@if command -v uv >/dev/null 2>&1; then cd apps/api && uv run python -m app.seed.demo; else cd apps/api && .venv/bin/python -m app.seed.demo; fi
+	docker compose -f docker-compose.dev.yml exec -T api python -m app.seed.demo
 smoke:
 	./scripts/smoke.sh
 dev-backup:

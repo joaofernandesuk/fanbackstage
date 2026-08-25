@@ -1,0 +1,12 @@
+port: 7880
+bind_addresses: ["0.0.0.0"]
+rtc:
+  use_external_ip: false
+  node_ip: 127.0.0.1
+  tcp_port: 7881
+  udp_port: 7882
+keys:
+  devkey: fanbackstage-livekit-development-secret-2026
+webhook:
+  api_key: devkey
+  urls: ["http://api:8000/api/v1/live/webhooks/livekit"]
