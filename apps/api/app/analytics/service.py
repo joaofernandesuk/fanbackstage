@@ -309,6 +309,10 @@ async def creator_marketplace_metrics(
             "units": 0,
             "gmv_minor": 0,
             "creator_net_minor": 0,
+            "shipping_charged_minor": 0,
+            "shipping_pass_through_minor": 0,
+            "shipping_excess_minor": 0,
+            "platform_fee_minor": 0,
             "refunded_minor": 0,
             "charged_back_minor": 0,
         }
@@ -321,6 +325,10 @@ async def creator_marketplace_metrics(
         bucket["units"] += order.quantity
         bucket["gmv_minor"] += order.total_paid_minor
         bucket["creator_net_minor"] += order.creator_amount_minor
+        bucket["shipping_charged_minor"] += order.shipping_charged_minor
+        bucket["shipping_pass_through_minor"] += order.shipping_pass_through_minor
+        bucket["shipping_excess_minor"] += order.shipping_excess_minor
+        bucket["platform_fee_minor"] += order.platform_fee_minor
         if order.status is MarketplaceOrderStatus.refunded:
             bucket["refunded_minor"] += order.total_paid_minor
         if order.status is MarketplaceOrderStatus.chargeback:
