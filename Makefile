@@ -1,13 +1,24 @@
 .DEFAULT_GOAL := help
 
 help:
-	@echo "FanBackstage: make deps | dev | test | lint | phase14-format | migrate | worker | e2e"
+	@echo "FanBackstage: make deps | dev | dev-status | dev-stop | dev-reset | demo-seed | smoke | dev-backup | test | lint | migrate | e2e"
 deps:
 	cd apps/api && uv sync --all-groups
 	cd apps/web && pnpm install --frozen-lockfile=false
 dev:
-	docker compose up -d postgres redis mailpit minio livekit
-	@echo "Run 'make api' and 'make web' in separate terminals."
+	./scripts/dev-up.sh
+dev-status:
+	./scripts/dev-status.sh
+dev-stop:
+	./scripts/dev-stop.sh
+dev-reset:
+	./scripts/dev-reset.sh
+demo-seed:
+	@if command -v uv >/dev/null 2>&1; then cd apps/api && uv run python -m app.seed.demo; else cd apps/api && .venv/bin/python -m app.seed.demo; fi
+smoke:
+	./scripts/smoke.sh
+dev-backup:
+	./scripts/dev-backup.sh
 api:
 	cd apps/api && uv run uvicorn app.main:app --reload --port 8000
 web:

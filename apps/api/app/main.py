@@ -55,6 +55,15 @@ async def correlation_id(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.correlation_id
     response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if not request.url.path.startswith("/docs") and not request.url.path.startswith("/openapi"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        )
+    if get_settings().environment == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     logger.info(
         "request_completed",
         extra={"correlation_id": request.state.correlation_id, "status_code": response.status_code},
