@@ -24,6 +24,7 @@ from app.models.groups import (
     GroupPermission,
     GroupPermissionGrant,
 )
+from app.models.marketplace import MarketplaceOrder, MarketplaceOrderStatus
 from app.models.social import Follow
 from app.models.subscription import (
     Subscription,
@@ -286,6 +287,56 @@ async def creator_ppv_metrics(
             for code, data in sorted(totals.items())
         ],
         "top_content": top_content[:20],
+    }
+
+
+async def creator_marketplace_metrics(
+    db: AsyncSession, creator_id: UUID, starts_at: datetime, ends_at: datetime
+) -> dict:
+    """Seller aggregates from immutable order snapshots; no address/tracking/buyer projection."""
+    orders = (
+        await db.scalars(
+            select(MarketplaceOrder).where(
+                MarketplaceOrder.seller_creator_id == creator_id,
+                MarketplaceOrder.created_at >= starts_at,
+                MarketplaceOrder.created_at < ends_at,
+            )
+        )
+    ).all()
+    totals: dict[str, dict] = defaultdict(
+        lambda: {
+            "orders": 0,
+            "units": 0,
+            "gmv_minor": 0,
+            "creator_net_minor": 0,
+            "refunded_minor": 0,
+            "charged_back_minor": 0,
+        }
+    )
+    for order in orders:
+        if order.status is MarketplaceOrderStatus.awaiting_payment:
+            continue
+        bucket = totals[order.currency]
+        bucket["orders"] += 1
+        bucket["units"] += order.quantity
+        bucket["gmv_minor"] += order.total_paid_minor
+        bucket["creator_net_minor"] += order.creator_amount_minor
+        if order.status is MarketplaceOrderStatus.refunded:
+            bucket["refunded_minor"] += order.total_paid_minor
+        if order.status is MarketplaceOrderStatus.chargeback:
+            bucket["charged_back_minor"] += order.total_paid_minor
+    return {
+        "metric_definition_version": METRIC_DEFINITION_VERSION,
+        "currencies": [
+            {
+                "currency": code,
+                **value,
+                "net_after_reversals_minor": value["creator_net_minor"]
+                - value["refunded_minor"]
+                - value["charged_back_minor"],
+            }
+            for code, value in sorted(totals.items())
+        ],
     }
 
 

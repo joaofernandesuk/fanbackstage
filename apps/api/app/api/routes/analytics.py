@@ -99,6 +99,25 @@ async def creator_analytics_ppv(
     }
 
 
+@router.get("/creator/marketplace")
+async def creator_analytics_marketplace(
+    identity: CurrentIdentity,
+    db: Db,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+) -> dict:
+    creator = await db.scalar(
+        select(CreatorProfile).where(CreatorProfile.user_id == identity[0].id)
+    )
+    if not creator:
+        raise HTTPException(403, "Creator analytics are unavailable")
+    start, end = _range(starts_at, ends_at)
+    return {
+        "creator_id": str(creator.id),
+        **(await service.creator_marketplace_metrics(db, creator.id, start, end)),
+    }
+
+
 @router.get("/groups/{group_id}/creators")
 async def group_creator_analytics(
     group_id: str,
