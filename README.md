@@ -19,6 +19,8 @@ The web app is at `http://localhost:3000`; the API is at `http://localhost:8000`
 
 Run `make lint` and `make test`. Run `make e2e` for the real local media journey; it starts the full dependency stack and launches the API, worker, and browser application through Playwright. CI also runs a production web build, real-stack browser journeys, and fresh reversible Alembic migration checks against PostgreSQL.
 
+Release validation may use a separate Compose project and non-default host ports. In that case, pass the same explicit isolated PostgreSQL, Redis, Mailpit, and MinIO endpoint variables to the API, worker, and Playwright runner. In particular, the browser-reachable MinIO endpoint must belong to that Compose project; pointing the signed-upload flow at a shared local MinIO instance invalidates media-test isolation without changing production storage policy.
+
 ## Architecture
 
 The API is the source of truth for permissions and future business rules. Authentication uses expiring opaque HTTP-only session cookies backed by revocable database records. See [Phase 0 implementation notes](docs/PHASE_0_IMPLEMENTATION_NOTES.md) and the preserved [project documentation](docs/README.md).
