@@ -22,8 +22,13 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    configuration = config.get_section(config.config_ini_section, {})
+    # `get_section` may retain the ini default despite `set_main_option`.
+    # Pass the already-normalised runtime URL explicitly so release validation
+    # and production migrations target exactly the configured database.
+    configuration["sqlalchemy.url"] = config.get_main_option("sqlalchemy.url")
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
