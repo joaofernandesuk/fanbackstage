@@ -3,7 +3,7 @@
 import enum
 from uuid import UUID
 
-from sqlalchemy import Boolean, Enum, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Enum, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -54,6 +54,7 @@ class DiscoveryEvent(UUIDPrimaryKey, Timestamped, Base):
             "entity_id",
             name="uq_discovery_event_dedupe",
         ),
+        Index("ix_discovery_events_created_at", "created_at"),
     )
     event_type: Mapped[str] = mapped_column(String(32), index=True)
     request_key: Mapped[str] = mapped_column(String(128), index=True)

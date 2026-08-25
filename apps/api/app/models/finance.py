@@ -106,6 +106,7 @@ class LedgerTransaction(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "ledger_transactions"
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_ledger_transactions_idempotency"),
+        Index("ix_ledger_transactions_effective_at", "effective_at"),
     )
     transaction_type: Mapped[LedgerTransactionType] = mapped_column(
         Enum(LedgerTransactionType, name="ledger_transaction_type"), index=True

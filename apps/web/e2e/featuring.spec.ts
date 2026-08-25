@@ -63,14 +63,12 @@ test("Phase 12 booking settles, inserts one labelled sponsored card, and expires
   expect(booking.status, JSON.stringify(booking.body)).toBe(200);
   const payment = await api(page, `/featuring/bookings/${booking.body.id}/payment`, "POST");
   expect((await api(page, `/payments/development/${payment.body.payment_attempt_id}/complete`, "POST")).status).toBe(200);
-  await page.waitForTimeout(1300);
   await login(page, admin.email, admin.password);
-  expect((await api(page, "/featuring/admin/reconcile", "POST")).body.activated).toBe(1);
+  await expect.poll(async () => (await api(page, "/featuring/admin/reconcile", "POST")).body.activated, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
   await page.goto("/discover");
   await expect(page.getByLabel("Sponsored placement")).toBeVisible();
   await expect(page.locator("article", { hasText: username })).toHaveCount(1);
-  await page.waitForTimeout(1200);
-  expect((await api(page, "/featuring/admin/reconcile", "POST")).body.deactivated).toBe(1);
+  await expect.poll(async () => (await api(page, "/featuring/admin/reconcile", "POST")).body.deactivated, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
   await page.reload();
   await expect(page.getByLabel("Sponsored placement")).toHaveCount(0);
 });

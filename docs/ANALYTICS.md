@@ -110,3 +110,22 @@ their API projections. They are aggregate-only, currency-separated, capped at
 They never expose buyer identity, KYC, addresses/shipping/tracking, private
 message content, private-live participant data, Trust & Safety evidence, or
 protected-media information.
+
+## Phase 14 query-plan review
+
+The financial overview projections restrict `ledger_transactions` to an
+`effective_at` range before aggregating immutable ledger entries. The
+`ix_ledger_transactions_effective_at` B-tree index supports those bounded time
+windows for platform reporting. Creator and group reports first resolve their
+small, owner-scoped ledger-account sets through the existing owner indexes and
+then use the existing `ledger_entries.ledger_account_id` and
+`ledger_entries.transaction_id` join indexes. A speculative composite index was
+not added because the current SQL does not predicate a single table on both the
+owner and event time.
+
+Discovery-derived analytics restrict `discovery_events` to `created_at` ranges;
+`ix_discovery_events_created_at` supports that common bounded scan. Existing
+`entity_id` and `actor_user_id` indexes remain the selective scope indexes for
+content performance and retention queries. The Phase 14 plan review verified
+that these are read-only projections: the only analytics write is the required
+append-oriented audit event emitted after an authorised CSV export.
