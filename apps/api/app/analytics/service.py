@@ -14,6 +14,13 @@ from app.models.finance import (
     LedgerEntry,
     LedgerTransaction,
 )
+from app.models.groups import (
+    GroupCreatorMembership,
+    GroupManagerMembership,
+    GroupMembershipStatus,
+    GroupPermission,
+    GroupPermissionGrant,
+)
 
 METRIC_DEFINITION_VERSION = "phase14.v1"
 METRIC_DEFINITIONS = {
@@ -163,3 +170,57 @@ async def group_overview(
             for (code, source), value in sorted(sources.items())
         ],
     }
+
+
+async def current_managed_creators(db: AsyncSession, group_id: UUID, actor_id: UUID) -> list[UUID]:
+    """Only active creator grants are current/private analytics scope."""
+    return list(
+        await db.scalars(
+            select(GroupCreatorMembership.creator_id)
+            .join(
+                GroupPermissionGrant,
+                GroupPermissionGrant.membership_id == GroupCreatorMembership.id,
+            )
+            .join(
+                GroupManagerMembership,
+                GroupManagerMembership.id == GroupPermissionGrant.manager_membership_id,
+            )
+            .where(
+                GroupCreatorMembership.group_id == group_id,
+                GroupCreatorMembership.status == GroupMembershipStatus.active,
+                GroupManagerMembership.user_id == actor_id,
+                GroupPermissionGrant.permission == GroupPermission.view_analytics,
+            )
+        )
+    )
+
+
+async def group_creator_comparison(
+    db: AsyncSession, group_id: UUID, actor_id: UUID, starts_at: datetime, ends_at: datetime
+) -> list[dict]:
+    creator_ids = await current_managed_creators(db, group_id, actor_id)
+    if not creator_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(LedgerEntry, LedgerTransaction)
+            .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+            .join(LedgerTransaction, LedgerTransaction.id == LedgerEntry.transaction_id)
+            .where(
+                LedgerAccount.owner_group_id == group_id,
+                LedgerTransaction.effective_at >= starts_at,
+                LedgerTransaction.effective_at < ends_at,
+                LedgerTransaction.metadata_json["creator_id"].astext.in_(
+                    [str(item) for item in creator_ids]
+                ),
+            )
+        )
+    ).all()
+    totals: dict[tuple[str, str], int] = defaultdict(int)
+    for entry, transaction in rows:
+        creator_id = transaction.metadata_json["creator_id"]
+        totals[(creator_id, transaction.currency)] += _signed(entry)
+    return [
+        {"creator_id": creator_id, "currency": currency, "group_net_minor": amount}
+        for (creator_id, currency), amount in sorted(totals.items())
+    ]

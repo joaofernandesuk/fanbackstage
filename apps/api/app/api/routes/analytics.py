@@ -42,6 +42,34 @@ async def creator_analytics_overview(
     }
 
 
+@router.get("/groups/{group_id}/creators")
+async def group_creator_analytics(
+    group_id: str,
+    identity: CurrentIdentity,
+    db: Db,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+) -> dict:
+    from uuid import UUID
+
+    try:
+        resolved = UUID(group_id)
+    except ValueError as exc:
+        raise HTTPException(404, "Group not found") from exc
+    group = await db.get(Group, resolved)
+    if not group or not await groups_service.manager_membership(db, group.id, identity[0].id):
+        raise HTTPException(403, "Group analytics permission denied")
+    start, end = _range(starts_at, ends_at)
+    creator_ids = await service.current_managed_creators(db, group.id, identity[0].id)
+    return {
+        "group_id": str(group.id),
+        "active_managed_creator_ids": [str(item) for item in creator_ids],
+        "creator_comparison": await service.group_creator_comparison(
+            db, group.id, identity[0].id, start, end
+        ),
+    }
+
+
 @router.get("/groups/{group_id}/overview")
 async def group_analytics_overview(
     group_id: str,
