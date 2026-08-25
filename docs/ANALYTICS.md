@@ -94,3 +94,19 @@ event carries its booking and surface identifiers, so sponsored performance is
 never mixed with organic discovery analytics. These events are observational:
 they do not alter organic ranking, ledger state, or Phase 10 signup/referral
 attribution.
+
+## Phase 14 attribution and export boundary
+
+Referral/acquisition records, organic Discovery interactions, and sponsored
+Featuring interactions are reported as independent dimensions. A sponsored
+event is explicitly marked and uses the `sponsored_*` event taxonomy, so it
+cannot be counted as organic activity; reporting does not write any attribution
+or allocation records. Financial referral attribution remains the immutable
+ledger-linked allocation created by the referral domain.
+
+CSV exports use the same server-side creator, group, and administrator scope as
+their API projections. They are aggregate-only, currency-separated, capped at
+50,000 rows, neutralise spreadsheet formula prefixes, and emit an audit event.
+They never expose buyer identity, KYC, addresses/shipping/tracking, private
+message content, private-live participant data, Trust & Safety evidence, or
+protected-media information.

@@ -733,7 +733,13 @@ async def record_sponsored_event(
         ranking_version=config.version,
         entity_type=booking.target_type.value,
         entity_id=booking.target_id,
-        metadata={"booking_id": str(booking.id), "surface_id": str(booking.surface_id)},
+        # This is intentionally a separate attribution dimension.  It is not an
+        # organic discovery interaction and does not alter referral attribution.
+        metadata={
+            "booking_id": str(booking.id),
+            "surface_id": str(booking.surface_id),
+            "sponsored": True,
+        },
     )
     return True
 

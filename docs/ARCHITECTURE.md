@@ -182,7 +182,10 @@ commercial snapshots; reporting never becomes transactional truth or rewrites
 historic group/referral allocations. API and CSV projections are scope-authorised
 server-side, remain currency-separated, cap synchronous exports at 50,000 rows,
 neutralise spreadsheet formulas, and omit private-message bodies, buyer identity,
-shipping/tracking, KYC, and protected-media data. Platform exports are audited.
+shipping/tracking, KYC, and protected-media data. Creator, group, and platform
+exports are all audited. Referral/acquisition, organic discovery, sponsored
+Featuring, and immutable referral financial allocation are independent
+dimensions: observing one never overwrites or reclassifies another.
 
 Cohort assignment uses the original authoritative signup, purchase, subscription,
 and approval event timestamps and is never recomputed from current policy. Retention

@@ -730,15 +730,19 @@ async def creator_featuring_metrics(
         if refund := refunds.get(item.id):
             bucket["refunds_minor"] += refund.amount_minor
     for event in events:
-        if event.entity_id not in booking_targets or not event.metadata_json.get("sponsored"):
+        if (
+            event.entity_id not in booking_targets
+            or not event.metadata_json.get("sponsored")
+            or not event.event_type.startswith("sponsored_")
+        ):
             continue
         # Event names are deliberately generic so event instrumentation can evolve independently.
         for data in totals.values():
-            if event.event_type in {"impression", "view"}:
+            if event.event_type == "sponsored_impression":
                 data["impressions"] += 1
-            elif event.event_type == "click":
+            elif event.event_type == "sponsored_click":
                 data["clicks"] += 1
-            elif event.event_type in {"conversion", "purchase"}:
+            elif event.event_type == "sponsored_conversion":
                 data["conversions"] += 1
     return {
         "metric_definition_version": METRIC_DEFINITION_VERSION,
@@ -992,10 +996,14 @@ async def platform_growth_and_attribution(
         "attribution_dimensions": {
             "referral_acquisition": len(attributions),
             "organic_discovery_interactions": sum(
-                not bool(item.metadata_json.get("sponsored")) for item in interactions
+                not bool(item.metadata_json.get("sponsored"))
+                and not item.event_type.startswith("sponsored_")
+                for item in interactions
             ),
             "sponsored_featuring_interactions": sum(
-                bool(item.metadata_json.get("sponsored")) for item in interactions
+                bool(item.metadata_json.get("sponsored"))
+                or item.event_type.startswith("sponsored_")
+                for item in interactions
             ),
             "financial_allocations": int(financial_allocations or 0),
         },

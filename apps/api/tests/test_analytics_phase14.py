@@ -1,13 +1,16 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from app.accounts import service as accounts
 from app.analytics import service
-from app.api.routes.analytics import _safe_cell
+from app.api.routes.analytics import _csv_response, _safe_cell
 from app.creators import service as creators
 from app.finance.service import _account, post_entries
 from app.groups import service as groups
+from app.models.discovery import DiscoveryEntityType, DiscoveryEvent
 from app.models.finance import LedgerAccountKind, LedgerDirection, LedgerTransactionType
 
 
@@ -70,6 +73,59 @@ def test_analytics_csv_formula_cells_are_neutralized():
     for value in ("=SUM(A1:A2)", "+1", "-1", "@cmd"):
         assert _safe_cell(value) == f"'{value}"
     assert _safe_cell("EUR") == "EUR"
+
+
+@pytest.mark.asyncio
+async def test_analytics_export_has_a_hard_50000_row_limit_before_it_writes():
+    with pytest.raises(HTTPException, match="50,000") as exc:
+        await _csv_response(
+            None,  # type: ignore[arg-type]
+            identity=(None, None),  # type: ignore[arg-type]
+            scope="creator",
+            filename="report.csv",
+            fields=["currency"],
+            rows=[{"currency": "EUR"}] * 50_001,
+        )
+    assert exc.value.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_attribution_dimensions_coexist_without_reclassifying_sponsored_as_organic(
+    db_session,
+):
+    user, _ = await accounts.register(
+        db_session, "analytics-attribution@example.com", "strong-password-123", None
+    )
+    now = datetime.now(UTC)
+    db_session.add_all(
+        [
+            DiscoveryEvent(
+                event_type="click",
+                request_key="organic-analytics",
+                actor_user_id=user.id,
+                entity_type=DiscoveryEntityType.creator,
+                entity_id=uuid4(),
+                ranking_version=1,
+                metadata_json={},
+            ),
+            DiscoveryEvent(
+                event_type="sponsored_click",
+                request_key="sponsored-analytics",
+                actor_user_id=user.id,
+                entity_type=DiscoveryEntityType.creator,
+                entity_id=uuid4(),
+                ranking_version=1,
+                metadata_json={"sponsored": True, "booking_id": str(uuid4())},
+            ),
+        ]
+    )
+    await db_session.flush()
+    report = await service.platform_growth_and_attribution(
+        db_session, now - timedelta(days=1), now + timedelta(days=1)
+    )
+    dimensions = report["attribution_dimensions"]
+    assert dimensions["organic_discovery_interactions"] == 1
+    assert dimensions["sponsored_featuring_interactions"] == 1
 
 
 @pytest.mark.asyncio

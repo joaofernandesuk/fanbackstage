@@ -247,6 +247,38 @@ def _safe_cell(value: object) -> object:
     return f"'{text}" if text.startswith(("=", "+", "-", "@")) else value
 
 
+async def _csv_response(
+    db: Db,
+    *,
+    identity: CurrentIdentity,
+    scope: str,
+    filename: str,
+    fields: list[str],
+    rows: list[dict],
+) -> Response:
+    """Render a bounded, aggregate-only export and audit the access."""
+    if len(rows) > 50_000:
+        raise HTTPException(413, "Analytics export exceeds the 50,000 row limit")
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: _safe_cell(row.get(key, "")) for key in fields})
+    await record_event(
+        db,
+        "analytics.exported",
+        actor_user_id=identity[0].id,
+        target_type="analytics",
+        metadata={"scope": scope, "rows": len(rows)},
+    )
+    await db.commit()
+    return Response(
+        output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @router.get("/creator/revenue-export.csv")
 async def creator_revenue_export(
     identity: CurrentIdentity,
@@ -257,24 +289,13 @@ async def creator_revenue_export(
     creator = await _creator_scope(identity, db)
     start, end = _range(starts_at, ends_at)
     report = await service.creator_overview(db, creator.id, start, end)
-    output = io.StringIO()
-    writer = csv.DictWriter(
-        output,
-        fieldnames=[
-            "currency",
-            "source",
-            "gross_sales_minor",
-            "creator_net_minor",
-            "reversed_minor",
-        ],
-    )
-    writer.writeheader()
-    for row in report["revenue_sources"][:50_000]:
-        writer.writerow({key: _safe_cell(value) for key, value in row.items()})
-    return Response(
-        output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=creator-revenue.csv"},
+    return await _csv_response(
+        db,
+        identity=identity,
+        scope="creator",
+        filename="creator-revenue.csv",
+        fields=["currency", "source", "gross_sales_minor", "creator_net_minor", "reversed_minor"],
+        rows=report["revenue_sources"],
     )
 
 
@@ -288,7 +309,6 @@ async def platform_detail_export(
     authorize(identity[0], Permission.ADMIN_ACCESS)
     start, end = _range(starts_at, ends_at)
     report = await service.platform_overview(db, start, end)
-    output = io.StringIO()
     fields = [
         "currency",
         "gmv_minor",
@@ -301,22 +321,13 @@ async def platform_detail_export(
         "referral_affiliate_commission_minor",
         "featuring_revenue_minor",
     ]
-    writer = csv.DictWriter(output, fieldnames=fields)
-    writer.writeheader()
-    for row in report["currencies"][:50_000]:
-        writer.writerow({key: _safe_cell(row.get(key, "")) for key in fields})
-    await record_event(
+    return await _csv_response(
         db,
-        "analytics.platform_exported",
-        actor_user_id=identity[0].id,
-        target_type="analytics",
-        metadata={"rows": len(report["currencies"])},
-    )
-    await db.commit()
-    return Response(
-        output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=platform-bi.csv"},
+        identity=identity,
+        scope="platform",
+        filename="platform-bi.csv",
+        fields=fields,
+        rows=report["currencies"],
     )
 
 
@@ -394,14 +405,11 @@ async def group_revenue_export(
         raise HTTPException(403, "Group analytics permission denied")
     start, end = _range(starts_at, ends_at)
     report = await service.group_overview(db, group.id, start, end)
-    fields = ["currency", "source", "group_net_minor", "reversed_minor"]
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=fields)
-    writer.writeheader()
-    for row in report["revenue_sources"][:50_000]:
-        writer.writerow({key: _safe_cell(row.get(key, "")) for key in fields})
-    return Response(
-        output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=group-revenue.csv"},
+    return await _csv_response(
+        db,
+        identity=identity,
+        scope="group",
+        filename="group-revenue.csv",
+        fields=["currency", "source", "group_net_minor", "reversed_minor"],
+        rows=report["revenue_sources"],
     )
