@@ -4,6 +4,7 @@ import pytest
 
 from app.accounts import service as accounts
 from app.analytics import service
+from app.api.routes.analytics import _safe_cell
 from app.creators import service as creators
 from app.finance.service import _account, post_entries
 from app.models.finance import LedgerAccountKind, LedgerDirection, LedgerTransactionType
@@ -62,3 +63,9 @@ async def test_creator_analytics_is_ledger_derived_and_currency_separated(db_ses
     assert by_currency["EUR"]["reversed_minor"] == 250
     assert by_currency["USD"]["gross_sales_minor"] == 500
     assert report["metric_definition_version"] == "phase14.v1"
+
+
+def test_analytics_csv_formula_cells_are_neutralized():
+    for value in ("=SUM(A1:A2)", "+1", "-1", "@cmd"):
+        assert _safe_cell(value) == f"'{value}"
+    assert _safe_cell("EUR") == "EUR"

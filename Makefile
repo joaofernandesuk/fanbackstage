@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 
 help:
-	@echo "FanBackstage: make deps | dev | test | lint | migrate | worker | e2e"
+	@echo "FanBackstage: make deps | dev | test | lint | phase14-format | migrate | worker | e2e"
 deps:
 	cd apps/api && uv sync --all-groups
 	cd apps/web && pnpm install --frozen-lockfile=false
@@ -24,5 +24,8 @@ test:
 lint:
 	cd apps/api && uv run ruff check . && uv run ruff format --check .
 	cd apps/web && pnpm lint && pnpm typecheck
+phase14-format:
+	@files="$$(git diff --name-only --diff-filter=ACMR origin/codex/phase-14-analytics-bi...HEAD -- '*.py'; git diff --name-only -- '*.py')"; \
+	if [ -n "$$files" ]; then apps/api/.venv/bin/ruff format --check $$files; fi
 down:
 	docker compose down
