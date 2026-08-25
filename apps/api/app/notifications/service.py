@@ -25,6 +25,7 @@ from app.models.notification import (
     NotificationPriority,
     SuppressionReason,
 )
+from app.notifications.templates import render
 
 MANDATORY_TYPES = {
     "AUTH_EMAIL_VERIFICATION",
@@ -296,11 +297,15 @@ async def deliver_intent(db: AsyncSession, intent_id: UUID) -> DeliveryStatus:
     )
     if intent.classification is NotificationClass.marketing:
         secure["unsubscribe_token"] = unsubscribe_token(user.id)
+    subject, body, template_version = render(
+        intent.notification_type, intent.payload_json, intent.classification.value
+    )
+    attempt.template_version = template_version
     try:
         attempt.provider_message_id = await email_provider.send(
             template=intent.notification_type,
             recipient=user.email,
-            payload=intent.payload_json,
+            payload={"subject": subject, "body": body},
             secure_payload=secure,
             classification=intent.classification.value,
             idempotency_key=intent.idempotency_key,

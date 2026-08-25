@@ -19,6 +19,7 @@ from app.models.marketplace import (
     MarketplaceSellerRiskProfile,
     MarketplaceShippingAllowance,
 )
+from app.models.notification import EmailSuppression, NotificationDeliveryAttempt
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
 from app.permissions.policies import Permission, authorize
 from app.referrals import service as referral_service
@@ -43,6 +44,50 @@ from app.schemas.referral import (
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/notifications/deliveries")
+async def notification_deliveries(identity: CurrentIdentity, db: Db) -> list[dict]:
+    """Operational status only; no recipients, message bodies, tokens, or provider payloads."""
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    rows = (
+        await db.scalars(
+            select(NotificationDeliveryAttempt)
+            .order_by(NotificationDeliveryAttempt.created_at.desc())
+            .limit(100)
+        )
+    ).all()
+    return [
+        {
+            "id": str(row.id),
+            "intent_id": str(row.intent_id),
+            "channel": row.channel.value,
+            "status": row.status.value,
+            "attempt_number": row.attempt_number,
+            "provider": row.provider,
+            "error_code": row.error_code,
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/notifications/suppressions")
+async def notification_suppressions(identity: CurrentIdentity, db: Db) -> list[dict]:
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    rows = (
+        await db.scalars(select(EmailSuppression).order_by(EmailSuppression.created_at.desc()))
+    ).all()
+    return [
+        {
+            "id": str(row.id),
+            "reason": row.reason.value,
+            "marketing_only": row.marketing_only,
+            "source": row.source,
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
 
 
 def affiliate_response(partner: referral_service.AffiliatePartner) -> AffiliatePartnerResponse:
