@@ -588,11 +588,13 @@ async def submit_consent_release(
 async def verify_consent_release(
     db: AsyncSession, release: ConsentRelease, reviewer: User, approved: bool
 ) -> ConsentRelease:
-    if (
-        release.created_by_user_id == reviewer.id
-        or release.status is not ConsentReleaseStatus.pending
-    ):
-        raise TrustSafetyError("Consent release cannot be self-verified or is not pending")
+    if release.created_by_user_id == reviewer.id:
+        raise TrustSafetyError("Consent release cannot be self-verified")
+    requested = ConsentReleaseStatus.verified if approved else ConsentReleaseStatus.rejected
+    if release.status is requested:
+        return release
+    if release.status is not ConsentReleaseStatus.pending:
+        raise TrustSafetyError("Consent release is not pending")
     release.status = ConsentReleaseStatus.verified if approved else ConsentReleaseStatus.rejected
     release.verified_at = datetime.now(UTC) if approved else None
     release.verified_by_user_id = reviewer.id if approved else None
@@ -600,6 +602,14 @@ async def verify_consent_release(
         prior = await db.get(ConsentRelease, release.supersedes_release_id)
         if prior and prior.status is ConsentReleaseStatus.verified:
             prior.status = ConsentReleaseStatus.superseded
+    await record_event(
+        db,
+        "trust_safety.consent_release_reviewed",
+        actor_user_id=reviewer.id,
+        target_type="consent_release",
+        target_id=str(release.id),
+        metadata={"approved": approved},
+    )
     return release
 
 

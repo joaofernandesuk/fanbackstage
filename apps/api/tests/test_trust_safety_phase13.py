@@ -235,6 +235,7 @@ async def test_consent_submission_verification_scope_revocation_and_supersession
     with pytest.raises(service.TrustSafetyError):
         await service.verify_consent_release(db_session, release, owner, True)
     await service.verify_consent_release(db_session, release, reviewer, True)
+    assert (await service.verify_consent_release(db_session, release, reviewer, True)).id == release.id
     assert await service.valid_verified_release_for_content(db_session, first_content.id)
     assert not await service.valid_verified_release_for_content(db_session, other_content.id)
     replacement = await service.submit_consent_release(
