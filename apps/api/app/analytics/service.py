@@ -136,6 +136,9 @@ async def group_overview(
             "reversed_minor": 0,
         }
     )
+    sources: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"group_net_minor": 0, "reversed_minor": 0}
+    )
     for entry, account, transaction in (await db.execute(query)).all():
         value, bucket = _signed(entry), totals[transaction.currency]
         bucket["group_net_minor"] += value
@@ -146,9 +149,17 @@ async def group_overview(
         ] += value
         if value < 0:
             bucket["reversed_minor"] += -value
+        source = sources[(transaction.currency, _source(transaction.transaction_type.value))]
+        source["group_net_minor"] += value
+        if value < 0:
+            source["reversed_minor"] += -value
     return {
         "metric_definition_version": METRIC_DEFINITION_VERSION,
         "starts_at": starts_at.astimezone(UTC),
         "ends_at": ends_at.astimezone(UTC),
         "currencies": [{"currency": key, **value} for key, value in sorted(totals.items())],
+        "revenue_sources": [
+            {"currency": code, "source": source, **value}
+            for (code, source), value in sorted(sources.items())
+        ],
     }
