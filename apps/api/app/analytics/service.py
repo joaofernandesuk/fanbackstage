@@ -13,6 +13,8 @@ from app.models.finance import (
     LedgerDirection,
     LedgerEntry,
     LedgerTransaction,
+    Purchase,
+    PurchaseStatus,
 )
 from app.models.groups import (
     GroupCreatorMembership,
@@ -198,6 +200,59 @@ async def creator_subscription_metrics(
         ),
         "cancellations": sum(1 for item in subscriptions if item.cancel_at_period_end),
         "duration_mix": dict(sorted(duration_mix.items())),
+    }
+
+
+async def creator_ppv_metrics(
+    db: AsyncSession, creator_id: UUID, starts_at: datetime, ends_at: datetime
+) -> dict:
+    """Purchase aggregates retain original gross while status supplies refund visibility."""
+    purchases = (
+        await db.scalars(
+            select(Purchase).where(
+                Purchase.seller_creator_id == creator_id,
+                Purchase.created_at >= starts_at,
+                Purchase.created_at < ends_at,
+                Purchase.status.in_(
+                    [PurchaseStatus.paid, PurchaseStatus.refunded, PurchaseStatus.chargeback]
+                ),
+            )
+        )
+    ).all()
+    totals: dict[str, dict] = defaultdict(
+        lambda: {
+            "purchases": 0,
+            "unique_buyers": set(),
+            "gross_minor": 0,
+            "refunded_minor": 0,
+            "charged_back_minor": 0,
+        }
+    )
+    for purchase in purchases:
+        bucket = totals[purchase.currency]
+        bucket["purchases"] += 1
+        bucket["unique_buyers"].add(purchase.buyer_user_id)
+        bucket["gross_minor"] += purchase.gross_amount_minor
+        if purchase.status is PurchaseStatus.refunded:
+            bucket["refunded_minor"] += purchase.gross_amount_minor
+        if purchase.status is PurchaseStatus.chargeback:
+            bucket["charged_back_minor"] += purchase.gross_amount_minor
+    return {
+        "metric_definition_version": METRIC_DEFINITION_VERSION,
+        "currencies": [
+            {
+                "currency": code,
+                "purchases": data["purchases"],
+                "unique_buyers": len(data["unique_buyers"]),
+                "gross_minor": data["gross_minor"],
+                "refunded_minor": data["refunded_minor"],
+                "charged_back_minor": data["charged_back_minor"],
+                "net_minor": data["gross_minor"]
+                - data["refunded_minor"]
+                - data["charged_back_minor"],
+            }
+            for code, data in sorted(totals.items())
+        ],
     }
 
 
