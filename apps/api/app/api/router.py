@@ -16,6 +16,7 @@ from app.api.routes import (
     media,
     messaging,
     messaging_moderation,
+    notifications,
     referrals,
     social,
     streaming,
@@ -29,6 +30,7 @@ api_router.include_router(referrals.router)
 api_router.include_router(discovery.router)
 api_router.include_router(featuring.router)
 api_router.include_router(account.router)
+api_router.include_router(notifications.router)
 api_router.include_router(analytics.router)
 api_router.include_router(admin.router)
 api_router.include_router(creators.router)

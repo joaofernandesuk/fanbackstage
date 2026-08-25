@@ -2,6 +2,13 @@
 
 Age/identity/performer consent, reporting, moderation, admin access, audit and security are foundational domains.
 
+## Phase 15 communication boundary
+
+Trust & Safety notices are transactional and contain only an action category, broad reason,
+date, and appeal status/link where applicable. Notification payloads and delivery audit data
+must not include evidence, reporter identity, moderator notes, identity documents, or raw
+participant information.
+
 # 30. Reporting, Moderation and Trust & Safety
 
 Every user-visible content surface must expose a Report action where technically meaningful: profile, photo, video, gallery, post, comment, message, live, marketplace item and blog.

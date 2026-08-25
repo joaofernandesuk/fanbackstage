@@ -8,7 +8,7 @@ FanBackstage.com is a modular creator entertainment platform. This repository im
 
 1. Copy `.env.example` to `.env` and replace the development session secret for shared environments.
 2. Install [uv](https://docs.astral.sh/uv/) and pnpm, then run `make deps`.
-3. Run `make dev` to start PostgreSQL, Redis, Mailpit, MinIO and the local LiveKit scaffold. Mailpit is available at `http://localhost:8025` by default; it receives development verification and password-reset emails.
+3. Run `make dev` to start PostgreSQL, Redis, Mailpit, MinIO and the local LiveKit scaffold. Mailpit is available at `http://localhost:8025` by default; it receives development verification, password-reset, and other local notification emails.
 4. Run `make migrate`, then `make api`, `make worker`, and `make web` in separate terminals. The worker and MinIO are required for upload/processing flows.
 
 Development pins MinIO to `RELEASE.2025-09-07T16-13-09Z`. Its private bucket is never made public: direct browser PUTs are restricted with MinIO's server-level CORS allowlist (`http://localhost:3000` and the Playwright origins `http://127.0.0.1:31000` and `http://127.0.0.1:38181`). CORS only permits the browser request; it grants no object-read permission.
@@ -24,6 +24,8 @@ Release validation may use a separate Compose project and non-default host ports
 ## Architecture
 
 The API is the source of truth for permissions and future business rules. Authentication uses expiring opaque HTTP-only session cookies backed by revocable database records. See [Phase 0 implementation notes](docs/PHASE_0_IMPLEMENTATION_NOTES.md) and the preserved [project documentation](docs/README.md).
+
+Notification email is provider-neutral and delivered asynchronously through Celery. See [Notifications and Email](docs/NOTIFICATIONS_AND_EMAIL.md) for the transactional/marketing boundary, preferences, suppressions, and Mailpit workflow.
 
 ## Scope
 

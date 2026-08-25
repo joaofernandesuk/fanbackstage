@@ -87,6 +87,7 @@ For detailed pinned Phase 0 technology decisions, provider boundaries and stream
 | Referral | ReferralProgramme, ReferralCode, Attribution, ReferralEarning |
 | Moderation | Report, ModerationCase, ModerationAction, Appeal |
 | Audit | AuditEvent |
+| Notifications | NotificationIntent, InAppNotification, NotificationPreference, NotificationDeliveryAttempt, EmailSuppression |
 
 # 37. Important State Machines
 

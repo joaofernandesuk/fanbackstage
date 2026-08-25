@@ -26,6 +26,21 @@ def health_ping(self) -> dict[str, str]:
     return {"status": "ok", "queue": self.request.delivery_info.get("routing_key", "default")}
 
 
+@celery_app.task(bind=True, autoretry_for=(ConnectionError,), retry_backoff=True, max_retries=3)
+def deliver_notification(self, intent_id: str) -> dict[str, str]:
+    """Deliver a persisted intent; retries cannot create another logical intent."""
+    from app.db.session import SessionLocal
+    from app.notifications.service import deliver_intent
+
+    async def run() -> str:
+        async with SessionLocal() as session:
+            status = await deliver_intent(session, UUID(intent_id))
+            await session.commit()
+            return status.value
+
+    return {"intent_id": intent_id, "status": run_async(run())}
+
+
 @celery_app.task
 def ffmpeg_version() -> dict[str, str]:
     """Worker-runtime capability check; no media input, output, or product state."""

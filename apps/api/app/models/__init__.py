@@ -55,6 +55,13 @@ from app.models.messaging import (
     PendingMessageSend,
     UserBlock,
 )
+from app.models.notification import (
+    EmailSuppression,
+    InAppNotification,
+    NotificationDeliveryAttempt,
+    NotificationIntent,
+    NotificationPreference,
+)
 from app.models.referral import (
     AffiliatePartner,
     ReferralCommissionAllocation,
@@ -127,6 +134,7 @@ __all__ = [
     "DiscoveryConfig",
     "DiscoveryEvent",
     "DiscoveryHide",
+    "EmailSuppression",
     "FeatureBooking",
     "FeaturePrice",
     "FeatureRefund",
@@ -142,6 +150,7 @@ __all__ = [
     "GroupManagerMembership",
     "GroupPermissionGrant",
     "Hashtag",
+    "InAppNotification",
     "LedgerAccount",
     "LedgerEntry",
     "LedgerTransaction",
@@ -172,6 +181,9 @@ __all__ = [
     "ModerationCase",
     "ModerationCaseNote",
     "ModerationEvidence",
+    "NotificationDeliveryAttempt",
+    "NotificationIntent",
+    "NotificationPreference",
     "PaymentAttempt",
     "PaymentWebhookEvent",
     "PendingMessageSend",

@@ -1,5 +1,11 @@
 # FanBackstage Phase 0 implementation notes
 
+## Phase 15 authentication delivery integration
+
+Email verification and password-reset links retain the existing opaque, hashed, expiring,
+single-use security-token model. The raw action token is encrypted in the durable notification
+intent solely until Mailpit/provider dispatch and is excluded from audit metadata and logs.
+
 ## Decisions
 
 - Authentication uses opaque, random server-side session secrets in HTTP-only, `SameSite=Lax` cookies. Database-backed sessions support expiry and revocation; cookie authentication remains CSRF-sensitive for future unsafe cross-origin flows, so the current CORS policy permits only the configured web origin and future cross-site mutation flows must add an explicit CSRF token.

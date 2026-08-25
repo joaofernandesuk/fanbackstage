@@ -2,6 +2,12 @@
 
 Server-side authorisation rules for users, creators, managers, moderators and administrators.
 
+## Phase 15 notifications
+
+Users may read and change only their own in-app notifications and optional preferences.
+Provider delivery events require the server-configured webhook secret; no client may post
+delivery state. Notification targets are internal paths only.
+
 # 2. Roles, Identity and Account Model
 
 | Role | Capabilities |

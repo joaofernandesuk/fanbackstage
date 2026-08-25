@@ -2,6 +2,12 @@
 
 Canonical domain entities and state relationships. Detailed fields belong in migrations/models but must follow these concepts.
 
+## Phase 15 notifications
+
+Notification intents are durable, deduplicated delivery requests. In-app notifications and
+delivery attempts are derived channel records; preferences and hashed-email suppressions are
+communication controls, never alternative identity stores.
+
 # 35. Core Data Model Domains
 
 | Domain | Representative entities |

@@ -5,8 +5,9 @@ from app.accounts import service
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_auth_rate_limit
-from app.integrations.email import email_provider
 from app.models.identity import TokenPurpose, User
+from app.models.notification import NotificationChannel, NotificationClass, NotificationPriority
+from app.notifications.service import create_intent
 from app.referrals.service import ATTRIBUTION_COOKIE_NAME, snapshot_signup_attribution
 from app.schemas.auth import (
     ForgotPasswordRequest,
@@ -51,8 +52,25 @@ async def register(payload: RegisterRequest, request: Request, db: Db) -> UserRe
             db, str(payload.email), payload.password, request.state.correlation_id
         )
         await snapshot_signup_attribution(db, user, request.cookies.get(ATTRIBUTION_COOKIE_NAME))
+        intent = await create_intent(
+            db,
+            recipient_user_id=user.id,
+            notification_type="AUTH_EMAIL_VERIFICATION",
+            classification=NotificationClass.transactional,
+            priority=NotificationPriority.critical_security,
+            source_domain="accounts",
+            source_id=str(user.id),
+            payload={
+                "subject": "Verify your FanBackstage email",
+                "body": "Verify your email to secure your account.",
+            },
+            channels=(NotificationChannel.email,),
+            secure_payload={"path": "/verify-email", "token": token},
+        )
         await db.commit()
-        await email_provider.send_security_link(user.email, "/verify-email", token)
+        from app.worker.tasks import deliver_notification
+
+        deliver_notification.delay(str(intent.id))
         await db.refresh(user, ["roles"])
         return user_response(user)
     except ValueError as exc:
@@ -129,8 +147,25 @@ async def forgot_password(
             actor_user_id=user.id,
             correlation_id=request.state.correlation_id,
         )
+        intent = await create_intent(
+            db,
+            recipient_user_id=user.id,
+            notification_type="AUTH_PASSWORD_RESET",
+            classification=NotificationClass.transactional,
+            priority=NotificationPriority.critical_security,
+            source_domain="accounts",
+            source_id=service._digest(token),
+            payload={
+                "subject": "Reset your FanBackstage password",
+                "body": "Use this one-time link to reset your password.",
+            },
+            channels=(NotificationChannel.email,),
+            secure_payload={"path": "/reset-password", "token": token},
+        )
         await db.commit()
-        await email_provider.send_security_link(user.email, "/reset-password", token)
+        from app.worker.tasks import deliver_notification
+
+        deliver_notification.delay(str(intent.id))
     return MessageResponse(message="If an account exists, reset instructions have been sent")
 
 

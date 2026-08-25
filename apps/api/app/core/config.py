@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "no-reply@fanbackstage.local"
+    notification_webhook_secret: str = "development-notification-webhook-secret"
+    notification_max_attempts: int = 3
     kyc_provider: str = "development"
     storage_endpoint_url: str = "http://localhost:9000"
     storage_access_key: str = "fanbackstage"
@@ -66,6 +68,11 @@ class Settings(BaseSettings):
             raise RuntimeError("The development KYC provider cannot run in production")
         if self.environment == "production" and self.payment_provider == "development":
             raise RuntimeError("The development payment provider cannot run in production")
+        if (
+            self.environment == "production"
+            and self.notification_webhook_secret == "development-notification-webhook-secret"
+        ):
+            raise RuntimeError("FANBACKSTAGE_NOTIFICATION_WEBHOOK_SECRET must be set in production")
         if (
             self.environment == "production"
             and self.livekit_api_secret == "fanbackstage-livekit-development-secret-2026"

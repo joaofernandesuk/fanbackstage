@@ -16,6 +16,7 @@ celery_app.conf.task_queues = tuple(
         "default",
         "media",
         "notifications",
+        "notifications_marketing",
         "moderation",
         "analytics",
         "financial",
@@ -35,6 +36,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.expire_marketplace_reservations": {"queue": "scheduled"},
     "app.worker.tasks.reconcile_featuring_lifecycle": {"queue": "scheduled"},
     "app.worker.tasks.expire_consent_releases": {"queue": "scheduled"},
+    "app.worker.tasks.deliver_notification": {"queue": "notifications"},
     "app.worker.tasks.*": {"queue": "default"},
 }
 celery_app.conf.beat_schedule = {
