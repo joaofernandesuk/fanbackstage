@@ -22,7 +22,12 @@ from app.models.groups import (
     GroupPermissionGrant,
 )
 from app.models.social import Follow
-from app.models.subscription import Subscription, SubscriptionStatus
+from app.models.subscription import (
+    Subscription,
+    SubscriptionPeriod,
+    SubscriptionPeriodStatus,
+    SubscriptionStatus,
+)
 
 METRIC_DEFINITION_VERSION = "phase14.v1"
 METRIC_DEFINITIONS = {
@@ -142,6 +147,57 @@ async def creator_audience(
         "followers_total": int(followers_total or 0),
         "follows_created": int(follows_created or 0),
         "active_subscribers": int(active_subscribers or 0),
+    }
+
+
+async def creator_subscription_metrics(
+    db: AsyncSession, creator_id: UUID, starts_at: datetime, ends_at: datetime
+) -> dict:
+    """Subscription lifecycle aggregates; subscriber identities stay outside analytics."""
+    periods = (
+        await db.scalars(
+            select(SubscriptionPeriod)
+            .join(Subscription, Subscription.id == SubscriptionPeriod.subscription_id)
+            .where(
+                Subscription.creator_id == creator_id,
+                SubscriptionPeriod.created_at >= starts_at,
+                SubscriptionPeriod.created_at < ends_at,
+            )
+        )
+    ).all()
+    subscriptions = (
+        await db.scalars(
+            select(Subscription).where(
+                Subscription.creator_id == creator_id,
+                Subscription.created_at >= starts_at,
+                Subscription.created_at < ends_at,
+            )
+        )
+    ).all()
+    duration_mix: dict[str, int] = defaultdict(int)
+    for period in periods:
+        duration_mix[period.duration.value] += 1
+    return {
+        "metric_definition_version": METRIC_DEFINITION_VERSION,
+        "new_subscriptions": len(subscriptions),
+        "renewals": sum(
+            1
+            for item in periods
+            if item.sequence > 1 and item.status is SubscriptionPeriodStatus.active
+        ),
+        "failed_renewals": sum(
+            1
+            for item in periods
+            if item.sequence > 1 and item.status is SubscriptionPeriodStatus.failed
+        ),
+        "expirations": sum(
+            1 for item in subscriptions if item.status is SubscriptionStatus.expired
+        ),
+        "payment_failed": sum(
+            1 for item in subscriptions if item.status is SubscriptionStatus.payment_failed
+        ),
+        "cancellations": sum(1 for item in subscriptions if item.cancel_at_period_end),
+        "duration_mix": dict(sorted(duration_mix.items())),
     }
 
 
