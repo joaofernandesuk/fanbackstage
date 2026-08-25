@@ -251,6 +251,18 @@ async def test_consent_submission_verification_scope_revocation_and_supersession
     assert release.status.value == "superseded" and replacement.status.value == "verified"
     await service.revoke_consent_release(db_session, replacement, owner)
     assert not await service.valid_verified_release_for_content(db_session, first_content.id)
+    rejected = await service.submit_consent_release(
+        db_session,
+        profile,
+        owner,
+        service.ConsentReleaseType.content_participation,
+        "participant-private-reference",
+        [other_content.id],
+    )
+    await service.verify_consent_release(db_session, rejected, reviewer, False)
+    assert (await service.verify_consent_release(db_session, rejected, reviewer, False)).id == rejected.id
+    with pytest.raises(service.TrustSafetyError, match="not pending"):
+        await service.verify_consent_release(db_session, rejected, reviewer, True)
 
 
 @pytest.mark.asyncio
