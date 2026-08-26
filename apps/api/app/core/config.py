@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     notification_unsubscribe_ttl_days: int = 30
     kyc_provider: str = "development"
     storage_endpoint_url: str = "http://localhost:9000"
+    storage_public_endpoint_url: str | None = None
     storage_access_key: str = "fanbackstage"
     storage_secret_key: str = "fanbackstage-development-only"
     storage_bucket: str = "fanbackstage-private"
@@ -97,6 +98,10 @@ class Settings(BaseSettings):
             "http://localhost"
         ) or self.storage_endpoint_url.startswith("http://127.0.0.1"):
             raise RuntimeError("Production cannot use a local MinIO storage endpoint")
+        if self.storage_public_endpoint_url and not self.storage_public_endpoint_url.startswith(
+            "https://"
+        ):
+            raise RuntimeError("Production public storage delivery requires HTTPS")
         if (
             self.storage_access_key == "fanbackstage"
             or self.storage_secret_key == "fanbackstage-development-only"

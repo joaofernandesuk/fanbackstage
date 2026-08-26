@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -33,9 +34,9 @@ async function apiOk<T>(page: Page, path: string, method = "GET", body?: unknown
 async function login(page: Page, email: string, password: string) {
   await page.goto("/login");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Log in" }).click();
-  await expect(page.getByText(email)).toBeVisible();
+  await expectAuthenticatedAs(page, email);
 }
 
 async function logout(page: Page) {
@@ -46,7 +47,7 @@ async function logout(page: Page) {
 async function register(page: Page, email: string, password: string) {
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();

@@ -82,6 +82,7 @@ from app.models.social import (
     PostReaction,
     ReactionType,
 )
+from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveAccessMode, LiveRoom
 from app.models.subscription import SubscriptionPeriod
 from app.referrals import service as referrals
@@ -93,12 +94,15 @@ from app.seed.manifest import (
     PASSWORD,
     PUBLIC_CREATORS,
     RESTRICTED_CREATOR,
+    STORY_CREATORS,
     USERS,
     CreatorSeed,
     gallery_title,
     listing_count_for_creator,
     listing_title,
     post_body,
+    story_caption,
+    story_cohort_idempotency_key,
     video_title,
 )
 from app.seed.media import (
@@ -108,6 +112,7 @@ from app.seed.media import (
     restore_video_preview_ready,
 )
 from app.social import service as social
+from app.stories import service as stories
 from app.streaming import service as streaming
 from app.subscriptions import service as subscriptions
 
@@ -119,6 +124,7 @@ class SeedStats:
     posts: int
     content_items: int
     listings: int
+    active_stories: int
 
 
 @dataclass(frozen=True)
@@ -488,6 +494,90 @@ async def _ensure_posts(
             await social.publish(db, creator_user, post.id)
         rows.append(post)
     return rows
+
+
+async def _ensure_stories(
+    db: AsyncSession,
+    users: dict[str, User],
+    profiles: dict[str, CreatorProfile],
+    provider,
+    asset_root: Path,
+) -> None:
+    """Keep a fresh 24-hour Story set while retaining expired demo history."""
+
+    reference = datetime.now(UTC)
+    await stories.expire_due_stories(db, now=reference)
+    for creator_position, seed in enumerate(STORY_CREATORS):
+        creator = profiles[seed.slug]
+        creator_user = users[seed.email]
+        story_image = await ensure_image_asset(
+            db,
+            creator_user,
+            creator,
+            seed.slug,
+            provider,
+            asset_root,
+            variant="story",
+        )
+        story_video = await ensure_video_asset(
+            db,
+            creator_user,
+            creator,
+            seed.slug,
+            provider,
+            asset_root,
+            variant="story",
+        )
+        for position in range(3):
+            caption = story_caption(seed, position)
+            existing = await db.scalar(
+                select(Story.id).where(
+                    Story.creator_id == creator.id,
+                    Story.caption == caption,
+                    Story.status == StoryStatus.active,
+                    Story.expires_at > reference,
+                )
+            )
+            if existing:
+                continue
+            if position < 2 or creator_position % 3 == 2:
+                policy = AccessPolicy.free
+            elif creator_position % 3 == 0:
+                policy = AccessPolicy.followers
+            else:
+                policy = AccessPolicy.subscription
+            await stories.create_story(
+                db,
+                creator_user,
+                (story_image.id if position % 2 == 0 else story_video.id),
+                caption,
+                f"{seed.display_name} demo Story {position + 1}",
+                policy,
+                story_cohort_idempotency_key(seed, position, reference),
+                now=reference - timedelta(minutes=(creator_position * 10) + position + 1),
+            )
+
+        if creator_position >= 4:
+            continue
+        caption = story_caption(seed, creator_position, historical=True)
+        historical = await db.scalar(
+            select(Story.id).where(
+                Story.creator_id == creator.id,
+                Story.caption == caption,
+            )
+        )
+        if not historical:
+            await stories.create_story(
+                db,
+                creator_user,
+                story_image.id,
+                caption,
+                f"Expired {seed.display_name} demo Story",
+                AccessPolicy.free,
+                f"demo-story-{seed.slug}-historical-{creator_position + 1}",
+                now=reference - timedelta(days=2, minutes=creator_position),
+            )
+    await stories.expire_due_stories(db, now=reference)
 
 
 async def _ensure_social_graph(
@@ -955,7 +1045,24 @@ async def _seed_stats(db: AsyncSession, profiles: dict[str, CreatorProfile]) -> 
         )
         or 0
     )
-    return SeedStats(user_count, creator_count, post_count, content_count, listing_count)
+    active_story_count = int(
+        await db.scalar(
+            select(func.count(Story.id)).where(
+                Story.creator_id.in_(public_ids),
+                Story.status == StoryStatus.active,
+                Story.expires_at > datetime.now(UTC),
+            )
+        )
+        or 0
+    )
+    return SeedStats(
+        user_count,
+        creator_count,
+        post_count,
+        content_count,
+        listing_count,
+        active_story_count,
+    )
 
 
 async def seed_database(
@@ -999,6 +1106,7 @@ async def seed_database(
             seed,
             content[seed.slug],
         )
+    await _ensure_stories(db, users, profiles, provider, asset_root)
     await _ensure_social_graph(db, users, profiles, posts)
     await _ensure_conversations(db, users, profiles)
     await _ensure_live_history(db, users, profiles)

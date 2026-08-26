@@ -254,6 +254,21 @@ def publish_scheduled_posts() -> dict[str, int]:
 
 
 @celery_app.task
+def expire_stories() -> dict[str, int]:
+    """Expire due Stories durably; repeated or concurrent sweeps are harmless."""
+    from app.db.session import SessionLocal
+    from app.stories.service import expire_due_stories
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            count = await expire_due_stories(session)
+            await session.commit()
+            return count
+
+    return {"expired": run_async(run())}
+
+
+@celery_app.task
 def process_scheduled_mass_messages() -> dict[str, int]:
     """Durably fan out due messaging campaigns; duplicate recipients are prevented in PostgreSQL."""
     from app.db.session import SessionLocal

@@ -84,6 +84,7 @@ from app.models.social import (
     PostReaction,
     SocialReport,
 )
+from app.models.story import Story
 from app.models.streaming import (
     CreatorLiveSettings,
     LiveBan,
@@ -207,6 +208,7 @@ __all__ = [
     "SessionParticipant",
     "SignupAttribution",
     "SocialReport",
+    "Story",
     "Subscription",
     "SubscriptionPeriod",
     "SubscriptionPlan",

@@ -22,19 +22,11 @@ export type DemoMedia = Readonly<{
   portrait: string;
 }>;
 
-export type DemoStorySlide = Readonly<{
-  eyebrow: string;
-  title: string;
-  body: string;
-  media: keyof Pick<DemoMedia, "content" | "cover" | "portrait">;
-}>;
-
 export type DemoPersona = Readonly<{
   username: DemoUsername;
   displayName: string;
   accent: "cyan" | "violet" | "pink" | "orange";
   editorialLabel: string;
-  storySlides: readonly DemoStorySlide[];
 }>;
 
 function media(username: DemoUsername): DemoMedia {
@@ -65,20 +57,6 @@ const PERSONAS: readonly DemoPersona[] = [
   displayName,
   accent: accent as DemoPersona["accent"],
   editorialLabel,
-  storySlides: [
-    {
-      eyebrow: "Backstage now",
-      title: editorialLabel,
-      body: `A closer look at ${displayName}'s latest creative session.`,
-      media: "portrait" as const,
-    },
-    {
-      eyebrow: "Studio notes",
-      title: "Made for this community",
-      body: "A preview from the creator's public demo collection.",
-      media: "content" as const,
-    },
-  ],
 }));
 
 export const DEMO_PERSONAS: Readonly<Record<DemoUsername, DemoPersona>> = Object.freeze(

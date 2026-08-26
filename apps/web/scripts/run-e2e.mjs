@@ -7,6 +7,9 @@ const apiUrl = process.env.E2E_API_URL ?? `http://127.0.0.1:${apiPort}`;
 const webUrl = process.env.E2E_WEB_URL ?? `http://127.0.0.1:${webPort}`;
 const mailpitUrl = process.env.E2E_MAILPIT_URL ?? `http://127.0.0.1:${process.env.E2E_MAILPIT_UI_PORT ?? "8025"}`;
 const mailpitSmtpPort = Number(process.env.E2E_MAILPIT_SMTP_PORT ?? process.env.FANBACKSTAGE_SMTP_PORT ?? "1025");
+const notificationWebhookSecret =
+  process.env.FANBACKSTAGE_NOTIFICATION_WEBHOOK_SECRET ??
+  "fanbackstage-isolated-e2e-notification-webhook-secret";
 
 function assertPortFree(port, label) {
   return new Promise((resolve, reject) => {
@@ -39,6 +42,13 @@ for (const [url, label] of [[apiUrl, "API"], [webUrl, "WEB"]]) {
 }
 const child = spawn("pnpm", ["exec", "playwright", "test", ...process.argv.slice(2)], {
   stdio: "inherit",
-  env: { ...process.env, E2E_API_PORT: apiPort, E2E_WEB_PORT: webPort, E2E_API_URL: apiUrl, E2E_WEB_URL: webUrl },
+  env: {
+    ...process.env,
+    E2E_API_PORT: apiPort,
+    E2E_WEB_PORT: webPort,
+    E2E_API_URL: apiUrl,
+    E2E_WEB_URL: webUrl,
+    FANBACKSTAGE_NOTIFICATION_WEBHOOK_SECRET: notificationWebhookSecret,
+  },
 });
 child.on("exit", (code) => process.exit(code ?? 1));

@@ -1,16 +1,143 @@
-.browser { display: grid; gap: 58px; }
-.railSection { background: linear-gradient(135deg, rgb(14 165 255 / 0.08), rgb(139 92 246 / 0.07)); border: 1px solid var(--border-subtle); border-radius: 22px; padding: 22px; }
+.browser {
+  display: grid;
+  gap: 58px;
+}
+
+.railSection {
+  background:
+    radial-gradient(circle at 88% 10%, rgb(236 72 153 / 0.09), transparent 22rem),
+    linear-gradient(135deg, rgb(14 165 255 / 0.08), rgb(139 92 246 / 0.07));
+  border: 1px solid var(--border-subtle);
+  border-radius: 22px;
+  padding: 22px;
+}
+
 .loading,
-.grid { display: grid; gap: 17px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.editorialCard { aspect-ratio: 3 / 4; background: var(--surface-soft); border: 1px solid var(--border-subtle); border-radius: 22px; min-height: 340px; overflow: hidden; position: relative; }
-.editorialCard > img { object-fit: cover; transition: transform 300ms ease; }
-.editorialCard:hover > img { transform: scale(1.025); }
-.scrim { background: linear-gradient(to top, rgb(5 8 20 / 0.92), transparent 60%); inset: 0; position: absolute; }
-.copy { bottom: 0; left: 0; padding: 20px; position: absolute; right: 0; }
-.copy p { color: #94ddff; font-size: 0.62rem; font-weight: 900; letter-spacing: 0.13em; margin: 0 0 8px; text-transform: uppercase; }
-.copy h2 { font-size: 1.35rem; margin: 0; }
-.copy span { color: rgb(255 255 255 / 0.68); display: block; font-size: 0.72rem; margin-top: 4px; }
-.copy a { border: 1px solid rgb(255 255 255 / 0.23); border-radius: 999px; display: inline-flex; font-size: 0.68rem; font-weight: 820; margin-top: 15px; padding: 8px 12px; text-decoration: none; }
-@media (max-width: 1050px) { .loading, .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .loading, .grid { grid-template-columns: 1fr; } .railSection { padding: 17px; } }
-@media (prefers-reduced-motion: reduce) { .editorialCard > img { transition: none; } }
+.grid {
+  display: grid;
+  gap: 17px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.creatorCard {
+  background:
+    linear-gradient(145deg, rgb(21 27 49 / 0.95), rgb(9 12 28 / 0.98));
+  border: 1px solid var(--border-subtle);
+  border-radius: 22px;
+  display: flex;
+  flex-direction: column;
+  min-height: 276px;
+  overflow: hidden;
+  padding: 20px;
+  position: relative;
+}
+
+.cardGlow {
+  background: radial-gradient(circle, rgb(14 165 255 / 0.16), transparent 68%);
+  height: 180px;
+  pointer-events: none;
+  position: absolute;
+  right: -65px;
+  top: -82px;
+  width: 180px;
+}
+
+.creatorRow {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  position: relative;
+}
+
+.creatorRow > div:last-child {
+  min-width: 0;
+}
+
+.creatorRow h2 {
+  align-items: center;
+  display: flex;
+  font-size: 1.05rem;
+  gap: 5px;
+  margin: 0;
+}
+
+.creatorRow p {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  margin: 5px 0 0;
+}
+
+.caption {
+  color: var(--text-secondary);
+  display: -webkit-box;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  margin: 22px 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.cardMeta {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  font-size: 0.65rem;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: auto;
+}
+
+.policies {
+  display: flex;
+  gap: 4px;
+}
+
+.profileLink {
+  align-items: center;
+  border-top: 1px solid var(--border-subtle);
+  color: #8ad6ff;
+  display: flex;
+  font-size: 0.72rem;
+  font-weight: 820;
+  justify-content: space-between;
+  margin-top: 17px;
+  padding-top: 15px;
+  text-decoration: none;
+}
+
+.profileLink:hover {
+  color: white;
+}
+
+.pagination {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+}
+
+.pagination p {
+  color: var(--danger);
+  font-size: 0.78rem;
+  margin: 0;
+}
+
+@media (max-width: 1050px) {
+  .loading,
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .loading,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .railSection {
+    padding: 17px;
+  }
+}

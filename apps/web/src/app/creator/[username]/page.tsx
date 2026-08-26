@@ -15,10 +15,11 @@ import {
 } from "../../../components/consumer-ui";
 import { Feed } from "../../../components/feed";
 import { PrivateSessionRequest } from "../../../components/private-session-request";
+import { StoryRailSource } from "../../../components/story-experience";
 import styles from "../../../components/social-surface.module.css";
 import { SubscriptionOptions } from "../../../components/subscription-options";
 import { api, ApiError } from "../../../lib/api";
-import { mediaForUsername, personaForUsername } from "../../../lib/demo-personas";
+import { mediaForUsername } from "../../../lib/demo-personas";
 import { formatMoney, type MarketplaceListing } from "../../../lib/public-api";
 
 type TaxonomyItem = { id: string; code: string; label: string };
@@ -152,7 +153,6 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   }, [params]);
 
   const visual = mediaForUsername(creator?.username);
-  const persona = personaForUsername(creator?.username);
   const fallbackContent = visual?.content || "/images/fanbackstage-hero.png";
   const selectedContent = useMemo(() => {
     if (tab === "photos") return content.filter((item) => item.content_type !== "video" && !item.locked);
@@ -263,16 +263,11 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
             <ContentGallery content={selectedContent} creator={creator} fallback={fallbackContent} onPurchase={(item) => void purchase(item)} purchasing={purchasing} />
           )}
           {tab === "stories" && (
-            persona ? (
-              <div className={styles.contentGrid}>
-                {persona.storySlides.map((slide, index) => (
-                  <Link className={styles.contentTile} href={`/stories?creator=${creator.username}&slide=${index}`} key={slide.title}>
-                    <div className={styles.contentTileMedia}><Image alt={`${creator.display_name}: ${slide.title}`} fill sizes="350px" src={visual?.[slide.media] || fallbackContent} /></div>
-                    <div className={styles.contentTileInfo}><p className="eyebrow">{slide.eyebrow}</p><h3>{slide.title}</h3><p>{slide.body}</p></div>
-                  </Link>
-                ))}
-              </div>
-            ) : <EmptyState body="No active public stories from this creator." title="Stories have expired" />
+            <StoryRailSource
+              creatorUsername={creator.username}
+              emptyBody={`${creator.display_name} has no active Stories available to you right now.`}
+              limit={50}
+            />
           )}
           {tab === "marketplace" && (
             listings.length ? (

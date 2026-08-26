@@ -15,7 +15,7 @@ import {
 } from "../lib/public-api";
 import { ContentCard, CreatorCard, MarketplaceCard, MarketplaceDiscoveryCard } from "./consumer-cards";
 import { EmptyState, SectionHeader, Skeleton } from "./consumer-ui";
-import { StoryRail } from "./story-experience";
+import { StoryRailSource } from "./story-experience";
 import styles from "./discovery.module.css";
 
 type Filter = "all" | "creator" | "video" | "marketplace_listing" | "live";
@@ -135,10 +135,10 @@ export function Discovery({ initialQuery = "" }: { initialQuery?: string }) {
         <div className={styles.loadingGrid}>{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} />)}</div>
       ) : page && page.items.length ? (
         <>
-          {filter === "all" && grouped.creators.length > 0 && (
+          {filter === "all" && (
             <section aria-labelledby="discover-stories">
               <SectionHeader eyebrow="Quick look" href="/stories" id="discover-stories" title="Stories" />
-              <StoryRail creators={grouped.creators} limit={12} />
+              <StoryRailSource limit={12} />
             </section>
           )}
           {liveResults.length > 0 && (

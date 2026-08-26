@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
+import { expectAuthenticatedAs } from "./auth-helpers";
 import { mailpitContains, mailpitMessage, securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -21,6 +22,13 @@ function releaseHarness<T>(...args: string[]): T {
   })) as T;
 }
 
+async function expectAttemptStatus(intentId: string, status: string) {
+  await expect.poll(
+    () => releaseHarness<State>("inspect", intentId).attempts[0]?.status,
+    { timeout: 15_000 },
+  ).toBe(status);
+}
+
 async function api(page: Page, path: string, method = "GET", body?: unknown, headers?: Record<string, string>) {
   return page.evaluate(async ({ apiBase, path, method, body, headers }) => {
     const response = await fetch(`${apiBase}/api/v1${path}`, {
@@ -36,15 +44,15 @@ async function api(page: Page, path: string, method = "GET", body?: unknown, hea
 async function registerAndLogin(page: Page, email: string, password: string) {
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
   await page.goto("/login");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Log in" }).click();
-  await expect(page.getByText(email)).toBeVisible();
+  await expectAuthenticatedAs(page, email);
 }
 
 async function providerEvent(provider_message_id: string, event: string, secret?: string) {
@@ -80,7 +88,7 @@ test("Phase 15 marketing race and provider replay use the isolated worker and Ma
   expect((await api(page, `/notifications/unsubscribe-token?token=x${token.slice(1)}`, "POST")).status).toBe(400);
   expect((await api(page, `/notifications/unsubscribe-token?token=${encodeURIComponent(token)}`, "POST")).status).toBe(200);
   releaseHarness("enqueue", marketing.intent_id);
-  await expect.poll(() => releaseHarness<State>("inspect", marketing.intent_id).attempts[0]?.status).toBe("suppressed");
+  await expectAttemptStatus(marketing.intent_id, "suppressed");
   await expect.poll(() => mailpitContains(marketingEmail, `unsubscribe-${stamp}`), { timeout: 2_000 }).toBe(false);
 
   const ineligibleEmail = `phase15-ineligible-${stamp}@example.com`;
@@ -93,13 +101,13 @@ test("Phase 15 marketing race and provider replay use the isolated worker and Ma
   const ineligible = releaseHarness<{ intent_id: string }>("queue", ineligibleEmail, "marketing", `ineligible-${stamp}`);
   releaseHarness("make-ineligible", ineligibleEmail);
   releaseHarness("enqueue", ineligible.intent_id);
-  await expect.poll(() => releaseHarness<State>("inspect", ineligible.intent_id).attempts[0]?.status).toBe("suppressed");
+  await expectAttemptStatus(ineligible.intent_id, "suppressed");
   await expect.poll(() => mailpitContains(ineligibleEmail, `ineligible-${stamp}`), { timeout: 2_000 }).toBe(false);
   await ineligibleContext.close();
 
   const mandatory = releaseHarness<{ intent_id: string }>("queue", marketingEmail, "transactional", `mandatory-${stamp}`);
   releaseHarness("enqueue", mandatory.intent_id);
-  await expect.poll(() => releaseHarness<State>("inspect", mandatory.intent_id).attempts[0]?.status).toBe("sent");
+  await expectAttemptStatus(mandatory.intent_id, "sent");
   const mandatoryMail = await mailpitMessage(marketingEmail, `mandatory-${stamp}`);
   expect(mandatoryMail.Subject).toBe(`Phase 15 transactional mandatory-${stamp}`);
 
@@ -109,7 +117,7 @@ test("Phase 15 marketing race and provider replay use the isolated worker and Ma
   await registerAndLogin(webhookPage, webhookEmail, password);
   const delivered = releaseHarness<{ intent_id: string }>("queue", webhookEmail, "transactional", `delivered-${stamp}`);
   releaseHarness("enqueue", delivered.intent_id);
-  await expect.poll(() => releaseHarness<State>("inspect", delivered.intent_id).attempts[0]?.status).toBe("sent");
+  await expectAttemptStatus(delivered.intent_id, "sent");
   const providerMessageId = releaseHarness<State>("inspect", delivered.intent_id).attempts[0]?.provider_message_id;
   expect(providerMessageId).toBeTruthy();
   expect(await providerEvent(providerMessageId!, "delivered")).toBe(401);
@@ -122,7 +130,7 @@ test("Phase 15 marketing race and provider replay use the isolated worker and Ma
 
   const bounced = releaseHarness<{ intent_id: string }>("queue", webhookEmail, "transactional", `bounce-${stamp}`);
   releaseHarness("enqueue", bounced.intent_id);
-  await expect.poll(() => releaseHarness<State>("inspect", bounced.intent_id).attempts[0]?.status).toBe("sent");
+  await expectAttemptStatus(bounced.intent_id, "sent");
   const bounceMessageId = releaseHarness<State>("inspect", bounced.intent_id).attempts[0].provider_message_id!;
   for (const event of ["deferred", "hard_bounce", "hard_bounce"]) {
     expect(await providerEvent(bounceMessageId, event, webhookHeaders["X-FanBackstage-Provider-Secret"])).toBe(200);
@@ -131,7 +139,7 @@ test("Phase 15 marketing race and provider replay use the isolated worker and Ma
   expect(releaseHarness<{ count: number }>("suppression-count", webhookEmail).count).toBe(1);
   const suppressedFuture = releaseHarness<{ intent_id: string }>("queue", webhookEmail, "transactional", `suppressed-${stamp}`);
   releaseHarness("enqueue", suppressedFuture.intent_id);
-  await expect.poll(() => releaseHarness<State>("inspect", suppressedFuture.intent_id).attempts[0]?.status).toBe("suppressed");
+  await expectAttemptStatus(suppressedFuture.intent_id, "suppressed");
   await expect.poll(() => mailpitContains(webhookEmail, `suppressed-${stamp}`), { timeout: 2_000 }).toBe(false);
   await webhookContext.close();
 
@@ -141,7 +149,7 @@ test("Phase 15 marketing race and provider replay use the isolated worker and Ma
   await registerAndLogin(complaintPage, complaintEmail, password);
   const complaint = releaseHarness<{ intent_id: string }>("queue", complaintEmail, "transactional", `complaint-${stamp}`);
   releaseHarness("enqueue", complaint.intent_id);
-  await expect.poll(() => releaseHarness<State>("inspect", complaint.intent_id).attempts[0]?.status).toBe("sent");
+  await expectAttemptStatus(complaint.intent_id, "sent");
   const complaintMessageId = releaseHarness<State>("inspect", complaint.intent_id).attempts[0].provider_message_id!;
   expect(await providerEvent(complaintMessageId, "complaint", webhookHeaders["X-FanBackstage-Provider-Secret"])).toBe(200);
   expect(releaseHarness<{ count: number }>("suppression-count", complaintEmail).count).toBe(1);

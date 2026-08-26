@@ -48,7 +48,8 @@ The validator expects exactly:
 - two real groups/agencies with accepted, versioned financial contracts;
 - 48 published feed posts (four per public creator);
 - 24 published content items (one gallery and one video per public creator), including 12 videos;
-- 18 published physical marketplace listings.
+- 18 published physical marketplace listings;
+- 24 active authoritative Stories across eight creators, plus at least four expired historical Stories.
 
 It also requires a dense follow/reaction/comment graph, at least three conversations with message history, settled subscriptions and PPV purchases, three marketplace orders in varied states, balanced ledger transactions, one signup referral attribution and reward allocation, transactional notifications, an active paid Featuring example, and safely ended live-room history. Financial entitlements, immutable ledger entries, group allocation snapshots, referral allocations, and Featuring settlement are produced through their owning domain services and signed development payment webhooks; the seed never inserts them directly.
 
@@ -63,7 +64,11 @@ Creator visuals use stable public references:
 
 Repository-owned JPEG masters live under `apps/api/app/seed/assets/`. Images use the normal private upload, server-side finalize, and media-processing path. The same masters were rendered into tiny three-second MP4 fixtures checked in beside them. The slim development API image has no ffmpeg binary, so the seed’s narrowly scoped development adapter uploads those MP4s through the normal private storage boundary and installs their pre-rendered poster/playback/preview derivative metadata. This adapter accepts only repository paths from the immutable creator manifest and is unreachable from product APIs.
 
-Stories and Highlights are intentionally not seeded in PostgreSQL because no backend Stories domain exists yet. The validator says so explicitly. Live history is ended within the same uncommitted seed transaction, so the application never exposes a fake active room without a broadcaster. Private paid-live sessions are also omitted because their canonical state requires genuine provider attendance events. Analytics remain derived from the canonical interactions above; the seed does not fabricate analytics rows.
+Inside Docker, API storage I/O stays on the private `minio:9000` network address. Presigned browser URLs use the separate `http://localhost:19010` signing endpoint, so Story media and creator uploads work from the local web origin without making the bucket public or leaking original object keys through application payloads.
+
+Stories reuse the same checked-in local masters, creator-owned private media pipeline, and authorised derivative types as the content system, while creating distinct Story-safe `MediaAsset` rows so no paid/private content delivery contract can be broadened. Each active demo cohort uses the real 24-hour lifecycle; two free Stories per seeded Story creator keep the anonymous consumer rail useful, while a smaller set exercises follower/subscription access. Expired rows remain durable historical state and never return to the consumer rail. Running the seed again immediately is count-stable; after a cohort naturally expires, a later seed run creates a fresh active cohort without reviving or deleting the historical records. Highlights remain intentionally out of scope.
+
+Live history is ended within the same uncommitted seed transaction, so the application never exposes a fake active room without a broadcaster. Private paid-live sessions are also omitted because their canonical state requires genuine provider attendance events. Analytics remain derived from the canonical interactions above; the seed does not fabricate analytics rows.
 
 ## Reset and quick checks
 

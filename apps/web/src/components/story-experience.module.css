@@ -1,9 +1,19 @@
-.rail {
+.rail,
+.railSkeleton {
   display: flex;
   gap: 17px;
   overflow-x: auto;
   padding: 5px 3px 14px;
   scrollbar-color: var(--border-strong) transparent;
+}
+
+.railSkeleton span {
+  animation: storyShimmer 1.35s ease-in-out infinite alternate;
+  background: linear-gradient(135deg, rgb(14 165 255 / 0.12), rgb(139 92 246 / 0.2));
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  flex: 0 0 72px;
+  height: 72px;
 }
 
 .storyItem {
@@ -31,6 +41,25 @@
   display: grid;
   padding: 3px;
   place-items: center;
+  position: relative;
+}
+
+.storyCount {
+  align-items: center;
+  background: var(--brand-midnight);
+  border: 2px solid var(--brand-pink);
+  border-radius: 999px;
+  bottom: -2px;
+  color: white;
+  display: flex;
+  font-size: 0.56rem;
+  font-weight: 900;
+  height: 23px;
+  justify-content: center;
+  min-width: 23px;
+  padding: 0 5px;
+  position: absolute;
+  right: -3px;
 }
 
 .storyButton:focus-visible .storyRing {
@@ -46,36 +75,62 @@
 
 .overlay {
   align-items: center;
-  background: rgb(2 4 11 / 0.94);
-  display: flex;
-  inset: 0;
+  background: transparent;
+  border: 0;
+  height: 100dvh;
   justify-content: center;
+  margin: 0;
+  max-height: none;
+  max-width: none;
   padding: 20px;
-  position: fixed;
-  z-index: 1000;
+  width: 100vw;
+}
+
+.overlay[open] {
+  display: flex;
+}
+
+.overlay::backdrop {
+  background:
+    radial-gradient(circle at 50% 25%, rgb(139 92 246 / 0.2), transparent 36rem),
+    rgb(2 4 11 / 0.95);
+  backdrop-filter: blur(12px);
 }
 
 .viewer {
-  aspect-ratio: 9 / 15;
-  background: var(--brand-midnight);
+  aspect-ratio: 9 / 16;
+  background:
+    radial-gradient(circle at 25% 20%, rgb(14 165 255 / 0.16), transparent 38%),
+    linear-gradient(150deg, #111735, var(--brand-midnight));
   border: 1px solid rgb(255 255 255 / 0.18);
   border-radius: 24px;
-  box-shadow: 0 32px 120px rgb(0 0 0 / 0.7);
-  max-height: calc(100vh - 40px);
+  box-shadow: 0 32px 120px rgb(0 0 0 / 0.72);
+  max-height: calc(100dvh - 40px);
   max-width: calc(100vw - 40px);
   overflow: hidden;
   position: relative;
   width: min(430px, 100%);
 }
 
-.viewer > img {
+.viewer > img,
+.viewer > video {
+  height: 100%;
+  inset: 0;
   object-fit: cover;
+  position: absolute;
+  width: 100%;
+}
+
+.viewer > .mediaHidden {
+  opacity: 0;
 }
 
 .scrim {
-  background: linear-gradient(to bottom, rgb(5 8 20 / 0.62), transparent 30%, transparent 52%, rgb(5 8 20 / 0.88));
+  background: linear-gradient(to bottom, rgb(5 8 20 / 0.74), transparent 31%, transparent 52%, rgb(5 8 20 / 0.9));
   inset: 0;
+  pointer-events: none;
   position: absolute;
+  z-index: 1;
 }
 
 .progress {
@@ -87,47 +142,76 @@
   position: absolute;
   right: 14px;
   top: 12px;
+  z-index: 4;
 }
 
 .progress span {
-  background: rgb(255 255 255 / 0.3);
+  background: rgb(255 255 255 / 0.28);
   border-radius: 4px;
   height: 3px;
 }
 
 .progress .complete {
-  background: white;
+  background: rgb(255 255 255 / 0.92);
+}
+
+.progress .current {
+  background: linear-gradient(90deg, var(--brand-cyan), var(--brand-pink));
+  box-shadow: 0 0 12px rgb(14 165 255 / 0.45);
 }
 
 .viewerHeader {
   align-items: center;
   display: flex;
-  gap: 10px;
+  gap: 9px;
   left: 15px;
   position: absolute;
   right: 15px;
   top: 28px;
+  z-index: 5;
 }
 
-.viewerHeader div {
+.creatorIdentity {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  text-decoration: none;
+}
+
+.creatorIdentity > span:last-child {
   display: grid;
   font-size: 0.76rem;
   gap: 2px;
+  min-width: 0;
 }
 
-.viewerHeader span {
-  color: rgb(255 255 255 / 0.68);
+.creatorIdentity strong {
+  align-items: center;
+  display: flex;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creatorIdentity small {
+  color: rgb(255 255 255 / 0.7);
   font-size: 0.67rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .close {
   align-items: center;
-  background: rgb(5 8 20 / 0.5);
-  border: 1px solid rgb(255 255 255 / 0.2);
+  background: rgb(5 8 20 / 0.58);
+  border: 1px solid rgb(255 255 255 / 0.22);
   border-radius: 50%;
   color: white;
   cursor: pointer;
   display: flex;
+  flex: 0 0 36px;
   font-size: 1.45rem;
   height: 36px;
   justify-content: center;
@@ -136,71 +220,155 @@
 }
 
 .storyCopy {
-  bottom: 32px;
+  bottom: 48px;
   left: 24px;
+  pointer-events: none;
   position: absolute;
   right: 24px;
-  z-index: 2;
+  z-index: 4;
 }
 
-.storyCopy p {
-  color: #8ad6ff;
-  font-size: 0.65rem;
-  font-weight: 900;
-  letter-spacing: 0.13em;
+.storyCopy > p {
+  color: white;
+  font-size: clamp(1.05rem, 3.4vw, 1.34rem);
+  font-weight: 760;
+  line-height: 1.35;
   margin: 0;
-  text-transform: uppercase;
+  max-width: 32ch;
+  text-shadow: 0 2px 20px rgb(0 0 0 / 0.72);
 }
 
-.storyCopy h2 {
-  font-size: clamp(1.8rem, 5vw, 2.8rem);
-  margin: 8px 0;
+.storyActions {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 18px;
+  pointer-events: auto;
 }
 
-.storyCopy span {
-  color: rgb(255 255 255 / 0.8);
-  display: block;
-  font-size: 0.82rem;
-  line-height: 1.5;
-}
-
-.storyCopy a {
+.storyActions a {
   background: white;
   border-radius: 999px;
   color: var(--brand-midnight);
   display: inline-flex;
+  flex: 0 0 auto;
   font-size: 0.74rem;
   font-weight: 850;
-  margin-top: 18px;
   padding: 10px 16px;
   text-decoration: none;
 }
 
+.storyActions span {
+  color: rgb(255 255 255 / 0.62);
+  font-size: 0.63rem;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.storyActionMeta {
+  align-items: end;
+  display: grid;
+  gap: 7px;
+  justify-items: end;
+  max-width: 55%;
+}
+
+.reportButton,
+.reportConfirm button {
+  background: rgb(5 8 20 / 0.62);
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: 999px;
+  color: white;
+  cursor: pointer;
+  font-size: 0.63rem;
+  font-weight: 760;
+  padding: 7px 10px;
+}
+
+.reportConfirm {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.reportConfirm > span:first-child {
+  flex-basis: 100%;
+}
+
 .nav {
   align-items: center;
-  background: rgb(5 8 20 / 0.35);
+  background: rgb(5 8 20 / 0.28);
   border: 0;
   color: white;
   cursor: pointer;
   display: flex;
   font-size: 2rem;
-  height: 28%;
+  height: 26%;
   justify-content: center;
   position: absolute;
-  top: 34%;
-  width: 44px;
-  z-index: 3;
+  top: 35%;
+  width: 42px;
+  z-index: 4;
+}
+
+.nav:hover {
+  background: rgb(5 8 20 / 0.5);
 }
 
 .nav:disabled {
   opacity: 0;
+  pointer-events: none;
 }
 
 .previous { left: 0; }
 .next { right: 0; }
 
+.mediaLoading,
+.mediaState {
+  align-items: center;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+}
+
+.mediaLoading::after {
+  animation: storySpin 850ms linear infinite;
+  border: 3px solid rgb(255 255 255 / 0.18);
+  border-radius: 50%;
+  border-top-color: var(--brand-cyan);
+  content: "";
+  height: 38px;
+  width: 38px;
+}
+
+.mediaState {
+  flex-direction: column;
+  gap: 7px;
+  padding: 36px;
+  text-align: center;
+}
+
+.mediaState span {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+@keyframes storyShimmer {
+  from { opacity: 0.38; }
+  to { opacity: 0.95; }
+}
+
+@keyframes storySpin {
+  to { transform: rotate(360deg); }
+}
+
 @media (max-width: 520px) {
   .overlay { padding: 0; }
+
   .viewer {
     border: 0;
     border-radius: 0;
@@ -209,9 +377,28 @@
     max-width: none;
     width: 100vw;
   }
+
+  .viewerHeader {
+    top: calc(28px + env(safe-area-inset-top));
+  }
+
+  .progress {
+    top: calc(12px + env(safe-area-inset-top));
+  }
+
+  .storyCopy {
+    bottom: calc(42px + env(safe-area-inset-bottom));
+  }
+
+  .storyActions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .storyButton,
-  .viewer { scroll-behavior: auto; }
+  .railSkeleton span,
+  .mediaLoading::after {
+    animation: none;
+  }
 }

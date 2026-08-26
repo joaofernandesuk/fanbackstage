@@ -19,6 +19,7 @@ from app.api.routes import (
     notifications,
     referrals,
     social,
+    stories,
     streaming,
     subscriptions,
     trust_safety,
@@ -41,6 +42,7 @@ api_router.include_router(finance.router)
 api_router.include_router(groups.router)
 api_router.include_router(subscriptions.router)
 api_router.include_router(social.router)
+api_router.include_router(stories.router)
 api_router.include_router(messaging.router)
 api_router.include_router(messaging_moderation.router)
 api_router.include_router(streaming.router)

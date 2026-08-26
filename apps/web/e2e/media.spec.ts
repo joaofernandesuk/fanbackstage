@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { expectAuthenticatedAs } from "./auth-helpers";
 import { mailpitMessage, securityLink } from "./mailpit";
 
 const apiBase =
@@ -32,9 +33,9 @@ function videoFixture(): Buffer {
 async function login(page: import("@playwright/test").Page, email: string, password: string) {
   await page.goto("/login");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Log in" }).click();
-  await expect(page.getByText(email)).toBeVisible();
+  await expectAuthenticatedAs(page, email);
 }
 
 async function approve(page: import("@playwright/test").Page, path: string) {
@@ -55,7 +56,7 @@ test("creator media travels through the real private processing stack", async ({
 
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
@@ -185,7 +186,7 @@ test("creator media travels through the real private processing stack", async ({
   const buyerEmail = `phase3-buyer-${stamp}@example.com`;
   await buyerPage.goto("/register");
   await buyerPage.getByLabel("Email").fill(buyerEmail);
-  await buyerPage.getByLabel("Password").fill(password);
+  await buyerPage.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await buyerPage.getByRole("button", { name: "Create account" }).click();
   await buyerPage.goto(await securityLink(buyerEmail, "/verify-email"));
   await buyerPage.getByRole("button", { name: "Verify email" }).click();
@@ -229,7 +230,7 @@ test("creator media travels through the real private processing stack", async ({
   const subscriberEmail = `phase4-subscriber-${stamp}@example.com`;
   await subscriberPage.goto("/register");
   await subscriberPage.getByLabel("Email").fill(subscriberEmail);
-  await subscriberPage.getByLabel("Password").fill(password);
+  await subscriberPage.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await subscriberPage.getByRole("button", { name: "Create account" }).click();
   await subscriberPage.goto(await securityLink(subscriberEmail, "/verify-email"));
   await subscriberPage.getByRole("button", { name: "Verify email" }).click();

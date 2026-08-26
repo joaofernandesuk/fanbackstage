@@ -8,6 +8,7 @@ another copy of the same demo object.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 DEMO_EMAIL_SUFFIX = "@demo.fanbackstage.local"
 PASSWORD = "fanbackstage-demo-local-only"
@@ -20,6 +21,8 @@ TARGET_PUBLISHED_CONTENT_COUNT = 24
 TARGET_PUBLISHED_VIDEO_COUNT = 12
 TARGET_PUBLISHED_LISTING_COUNT = 18
 TARGET_GROUP_COUNT = 2
+TARGET_ACTIVE_STORY_COUNT = 24
+TARGET_EXPIRED_STORY_COUNT = 4
 
 
 @dataclass(frozen=True)
@@ -173,6 +176,7 @@ CREATORS = (
 
 PUBLIC_CREATORS = CREATORS[:-1]
 RESTRICTED_CREATOR = CREATORS[-1]
+STORY_CREATORS = PUBLIC_CREATORS[:8]
 
 CORE_USERS = (
     UserSeed(f"admin{DEMO_EMAIL_SUFFIX}", ("admin", "super_admin")),
@@ -233,6 +237,21 @@ def listing_title(creator: CreatorSeed, position: int) -> str:
 
 def listing_count_for_creator(position: int) -> int:
     return 2 if position < 6 else 1
+
+
+def story_caption(creator: CreatorSeed, position: int, *, historical: bool = False) -> str:
+    moments = (
+        "A quick look at today’s set",
+        "A quiet moment between takes",
+        "One detail from the creative process",
+    )
+    prefix = "Archive" if historical else "Story"
+    return f"{prefix} {position + 1} — {creator.display_name}: {moments[position % len(moments)]}."
+
+
+def story_cohort_idempotency_key(creator: CreatorSeed, position: int, reference: datetime) -> str:
+    """Hour-granular key: active rows short-circuit reruns; expired cohorts always advance."""
+    return f"demo-story-{creator.slug}-{reference:%Y%m%d%H}-{position + 1}"
 
 
 def expected_listing_titles() -> tuple[str, ...]:

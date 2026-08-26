@@ -1,8 +1,9 @@
 import re
 import secrets
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.service import assign_role
@@ -63,16 +64,24 @@ async def get_or_create_profile(db: AsyncSession, user: User) -> CreatorProfile:
     profile = await profile_for_user(db, user.id)
     if profile:
         return profile
-    profile = CreatorProfile(user_id=user.id)
-    db.add(profile)
-    await db.flush()
-    await record_event(
-        db,
-        "creator.application_started",
-        actor_user_id=user.id,
-        target_type="creator_profile",
-        target_id=str(profile.id),
+
+    created_profile_id = await db.scalar(
+        insert(CreatorProfile)
+        .values(id=uuid4(), user_id=user.id)
+        .on_conflict_do_nothing(index_elements=[CreatorProfile.user_id])
+        .returning(CreatorProfile.id)
     )
+    profile = await profile_for_user(db, user.id)
+    if profile is None:
+        raise RuntimeError("Creator profile insert did not return a canonical profile")
+    if created_profile_id is not None:
+        await record_event(
+            db,
+            "creator.application_started",
+            actor_user_id=user.id,
+            target_type="creator_profile",
+            target_id=str(profile.id),
+        )
     return profile
 
 

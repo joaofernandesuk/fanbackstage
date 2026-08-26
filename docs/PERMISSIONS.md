@@ -126,6 +126,8 @@ Use capability-based permissions with object scope where needed. Group-manager p
 | Change platform commission | No | No | No | Restricted admin permission |
 
 Phase 5 feed commands are server-authorized: only an approved creator owns its posts/settings, viewers can react/comment only after post access resolves, and public follows target only approved public creators.
+
+Phase 5 Story commands are likewise server-authorized. Only an approved creator may create a Story, the selected ready media asset must belong to that creator, and it must not already be governed by a content/post/message/marketplace delivery context. Creation requires a creator-scoped idempotency key. A creator may list and soft-delete only their own Stories. Consumer rail, detail, and media delivery fail closed for expired/deleted/removed Stories, two-way blocks, non-public or non-approved creators, unsafe/unready media, and unmet follower/subscription access. Authenticated consumers can file deduplicated Story reports through the existing social-report boundary; moderation access can contain the exact Story with a replay-safe audited removal, after which even owner media delivery is denied. Moderation roles may otherwise inspect eligible active Stories through the existing role boundary, but do not gain original-media URLs. Group-manager Story publication is not implemented without an explicit delegated capability.
 # Phase 3 financial permissions
 
 Financial inspection requires `financial.access`; changing the platform commission requires `financial.configure` and remains limited to `super_admin`. Buyer history is limited to the authenticated buyer, and creator balances are limited to the approved creator who owns them.

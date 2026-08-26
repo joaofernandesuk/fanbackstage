@@ -1,6 +1,8 @@
+import asyncio
+
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.accounts import service as accounts
 from app.creators import service
@@ -8,6 +10,58 @@ from app.main import app
 from app.models.audit import AuditEvent
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.identity import User
+
+
+@pytest.mark.asyncio
+async def test_creator_application_is_concurrency_safe_and_audited_once(db_session, monkeypatch):
+    initial_lookup_barrier = asyncio.Barrier(2)
+    original_profile_for_user = service.profile_for_user
+
+    async def synchronized_initial_lookup(db, user_id):
+        profile = await original_profile_for_user(db, user_id)
+        if profile is None:
+            await asyncio.wait_for(initial_lookup_barrier.wait(), timeout=5)
+        return profile
+
+    monkeypatch.setattr(service, "profile_for_user", synchronized_initial_lookup)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": "creator-concurrent@example.com",
+                    "password": "strong-password-123",
+                },
+            )
+        ).status_code == 201
+        assert (
+            await client.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": "creator-concurrent@example.com",
+                    "password": "strong-password-123",
+                },
+            )
+        ).status_code == 200
+
+        first, second = await asyncio.gather(
+            client.post("/api/v1/creators/me/application"),
+            client.post("/api/v1/creators/me/application"),
+        )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    assert (await db_session.scalar(select(func.count()).select_from(CreatorProfile))) == 1
+    event = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "creator.application_started")
+    )
+    assert event is not None
+    assert event.actor_user_id == (await db_session.scalar(select(User.id)))
+    assert event.target_type == "creator_profile"
+    assert event.target_id == first.json()["id"]
 
 
 @pytest.mark.asyncio

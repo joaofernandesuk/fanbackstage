@@ -1,0 +1,123 @@
+.dialog {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  height: 100dvh;
+  justify-content: center;
+  margin: 0;
+  max-height: none;
+  max-width: none;
+  padding: 20px;
+  width: 100vw;
+}
+
+.dialog[open] {
+  display: flex;
+}
+
+.dialog::backdrop {
+  background:
+    radial-gradient(circle at 50% 15%, rgb(14 165 255 / 0.14), transparent 34rem),
+    rgb(2 4 11 / 0.91);
+  backdrop-filter: blur(13px) saturate(1.15);
+}
+
+.panel {
+  background:
+    radial-gradient(circle at 100% 0, rgb(236 72 153 / 0.09), transparent 20rem),
+    linear-gradient(150deg, rgb(21 27 49 / 0.99), rgb(8 11 25 / 0.995));
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 26px;
+  box-shadow: 0 36px 130px rgb(0 0 0 / 0.74);
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+  padding: 22px clamp(24px, 5vw, 48px) 38px;
+  width: min(520px, calc(100vw - 40px));
+}
+
+.dialogHeader {
+  align-items: center;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 38px 1fr 38px;
+  margin-bottom: 30px;
+}
+
+.mark {
+  align-items: center;
+  background: var(--brand-gradient);
+  border-radius: 11px;
+  color: var(--brand-midnight);
+  display: flex;
+  font-size: 0.72rem;
+  font-weight: 950;
+  height: 38px;
+  justify-content: center;
+  width: 38px;
+}
+
+.modeSwitch {
+  background: rgb(5 8 20 / 0.65);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  display: grid;
+  gap: 3px;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+}
+
+.modeSwitch button {
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 820;
+  padding: 8px 12px;
+}
+
+.modeSwitch button[aria-pressed="true"] {
+  background: var(--brand-gradient);
+  color: var(--brand-midnight);
+}
+
+.close {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  font-size: 1.35rem;
+  height: 38px;
+  justify-content: center;
+  padding: 0;
+  width: 38px;
+}
+
+@media (max-width: 560px) {
+  .dialog {
+    padding: 0;
+  }
+
+  .panel {
+    border: 0;
+    border-radius: 0;
+    height: 100dvh;
+    max-height: none;
+    padding: calc(18px + env(safe-area-inset-top)) 20px calc(30px + env(safe-area-inset-bottom));
+    width: 100vw;
+  }
+
+  .dialogHeader {
+    margin-bottom: 38px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modeSwitch button {
+    transition: none;
+  }
+}

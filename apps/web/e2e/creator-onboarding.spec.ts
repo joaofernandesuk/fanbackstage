@@ -7,14 +7,14 @@ test("creator can register, verify, and submit an identity application", async (
   const password = "creator-password-123";
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Create account" }).click();
   const verificationLink = await securityLink(email, "/verify-email");
   await page.goto(verificationLink);
   await page.getByRole("button", { name: "Verify email" }).click();
   await page.goto("/login");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("button", { name: "Log in" }).click();
   await page.getByRole("link", { name: "Become a creator" }).click();
   await page.getByLabel("Username").fill(`creator${Date.now()}`);

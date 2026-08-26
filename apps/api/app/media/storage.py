@@ -24,12 +24,25 @@ class S3StorageProvider:
     secret_key: str
     bucket: str
     region: str
+    public_endpoint_url: str | None = None
 
     @property
     def client(self):
         return boto3.client(
             "s3",
             endpoint_url=self.endpoint_url,
+            aws_access_key_id=self.access_key,
+            aws_secret_access_key=self.secret_key,
+            region_name=self.region,
+            config=Config(signature_version="s3v4"),
+        )
+
+    @property
+    def signing_client(self):
+        """Sign browser URLs for a public host while storage I/O stays on the private network."""
+        return boto3.client(
+            "s3",
+            endpoint_url=self.public_endpoint_url or self.endpoint_url,
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             region_name=self.region,
@@ -44,7 +57,7 @@ class S3StorageProvider:
 
     def create_upload_url(self, key: str, content_type: str, expires_in: int) -> str:
         self.ensure_bucket()
-        return self.client.generate_presigned_url(
+        return self.signing_client.generate_presigned_url(
             "put_object",
             Params={"Bucket": self.bucket, "Key": key, "ContentType": content_type},
             ExpiresIn=expires_in,
@@ -52,7 +65,7 @@ class S3StorageProvider:
 
     def create_download_url(self, key: str, expires_in: int) -> str:
         self.ensure_bucket()
-        return self.client.generate_presigned_url(
+        return self.signing_client.generate_presigned_url(
             "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires_in
         )
 
@@ -79,4 +92,5 @@ def storage_provider() -> S3StorageProvider:
         secret_key=settings.storage_secret_key,
         bucket=settings.storage_bucket,
         region=settings.storage_region,
+        public_endpoint_url=settings.storage_public_endpoint_url,
     )

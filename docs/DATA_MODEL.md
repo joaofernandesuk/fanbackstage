@@ -90,6 +90,8 @@ requested -> review/queued -> processing -> paid
 - Story previews/teasers linking to PPV content never expose the original locked media asset.
 - Realtime live filters can be disabled/degraded without interrupting the underlying broadcast or billing session.
 - Story and Live effects operate on derivatives/processing instructions and do not silently overwrite original creator media.
+
+The implemented `stories` table owns lifecycle and publication state while referencing the existing `creator_profiles`, `users`, and `media_assets` tables. A row records creator ownership, publishing user, creator-scoped idempotency key, media asset, caption/alt text, access policy, `published_at`, exact `expires_at = published_at + 24 hours`, and the `active`/`expired`/`deleted`/`removed` state timestamps. It does not duplicate storage keys or create a Story-specific media object. The referenced asset is Story-safe and cannot simultaneously inherit another content/post/message/marketplace delivery contract. Expired, deleted, and moderation-removed rows remain durable; consumer queries include only active, unexpired, eligible records. Highlights are not yet represented by a table or inferred from Story state.
 # Phase 3 financial core
 
 The Phase 3 financial tables are `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `commission_rules`, `payment_attempts`, `purchases`, and `payment_webhook_events`. Purchases snapshot their allocation and point to their payment attempt, entitlement, and original ledger transaction. Ledger entries are currency-specific, positive minor-unit postings and must balance by transaction.

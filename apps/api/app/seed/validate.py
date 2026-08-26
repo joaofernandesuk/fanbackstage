@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import SessionLocal
-from app.models.content import ContentItem, ContentStatus, ContentType, MediaAsset, MediaStatus
+from app.models.content import (
+    ContentItem,
+    ContentStatus,
+    ContentType,
+    DerivativeType,
+    MediaAsset,
+    MediaDerivative,
+    MediaStatus,
+    MediaType,
+)
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.featuring import FeatureBooking, FeatureBookingStatus
 from app.models.finance import LedgerTransaction, Purchase, PurchaseStatus
@@ -25,6 +35,7 @@ from app.models.messaging import Conversation, Message
 from app.models.notification import NotificationIntent
 from app.models.referral import ReferralCommissionAllocation, ReferralProgram, SignupAttribution
 from app.models.social import FeedPost, FeedPostStatus, Follow, PostComment, PostReaction
+from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
 from app.models.subscription import Subscription, SubscriptionStatus
 from app.seed.demo import _assert_development
@@ -33,7 +44,10 @@ from app.seed.manifest import (
     GROUPS,
     PUBLIC_CREATORS,
     RESTRICTED_CREATOR,
+    STORY_CREATORS,
+    TARGET_ACTIVE_STORY_COUNT,
     TARGET_CREATOR_COUNT,
+    TARGET_EXPIRED_STORY_COUNT,
     TARGET_GROUP_COUNT,
     TARGET_PUBLIC_CREATOR_COUNT,
     TARGET_PUBLISHED_CONTENT_COUNT,
@@ -45,8 +59,10 @@ from app.seed.manifest import (
     expected_listing_titles,
     gallery_title,
     post_body,
+    story_caption,
     video_title,
 )
+from app.stories import service as stories
 
 
 @dataclass(frozen=True)
@@ -77,6 +93,42 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     public_ids = [
         by_slug[creator.slug].id for creator in PUBLIC_CREATORS if creator.slug in by_slug
     ]
+    story_creator_ids = [
+        by_slug[creator.slug].id for creator in STORY_CREATORS if creator.slug in by_slug
+    ]
+    now = datetime.now(UTC)
+    eligible_story_rows = (
+        await db.execute(
+            select(Story.id, Story.creator_id, Story.caption)
+            .join(CreatorProfile, CreatorProfile.id == Story.creator_id)
+            .join(MediaAsset, MediaAsset.id == Story.media_asset_id)
+            .join(MediaDerivative, MediaDerivative.media_asset_id == MediaAsset.id)
+            .where(
+                Story.creator_id.in_(story_creator_ids),
+                Story.status == StoryStatus.active,
+                Story.expires_at > now,
+                CreatorProfile.status == CreatorStatus.approved,
+                CreatorProfile.is_public.is_(True),
+                MediaAsset.status == MediaStatus.ready,
+                MediaAsset.deleted_at.is_(None),
+                MediaAsset.moderation_status.notin_(stories.UNSAFE_MODERATION_STATUSES),
+                MediaDerivative.status == MediaStatus.ready,
+                or_(
+                    and_(
+                        MediaAsset.media_type == MediaType.image,
+                        MediaDerivative.derivative_type == DerivativeType.display,
+                    ),
+                    and_(
+                        MediaAsset.media_type == MediaType.video,
+                        MediaDerivative.derivative_type == DerivativeType.preview_clip,
+                    ),
+                ),
+                ~stories.external_asset_reference(Story.media_asset_id),
+            )
+        )
+    ).all()
+    eligible_story_ids = {row.id for row in eligible_story_rows}
+    eligible_story_pairs = {(row.creator_id, row.caption) for row in eligible_story_rows}
     counts = {
         "users": await _count(db, User),
         "manifest_users": await _count(db, User, User.email.in_([item.email for item in USERS])),
@@ -159,6 +211,45 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
             db, FeatureBooking, FeatureBooking.status == FeatureBookingStatus.active
         ),
         "notification_intents": await _count(db, NotificationIntent),
+        "active_stories": await _count(
+            db,
+            Story,
+            Story.creator_id.in_(public_ids),
+            Story.status == StoryStatus.active,
+            Story.expires_at > now,
+        ),
+        "active_story_creators": int(
+            await db.scalar(
+                select(func.count(func.distinct(Story.creator_id))).where(
+                    Story.creator_id.in_(story_creator_ids),
+                    Story.status == StoryStatus.active,
+                    Story.expires_at > now,
+                )
+            )
+            or 0
+        ),
+        "eligible_active_stories": len(eligible_story_ids),
+        "expired_stories": await _count(
+            db,
+            Story,
+            Story.creator_id.in_(public_ids),
+            Story.status == StoryStatus.expired,
+        ),
+        "overdue_active_stories": await _count(
+            db,
+            Story,
+            Story.status == StoryStatus.active,
+            Story.expires_at <= now,
+        ),
+        "story_media_owner_mismatches": int(
+            await db.scalar(
+                select(func.count())
+                .select_from(Story)
+                .join(MediaAsset, MediaAsset.id == Story.media_asset_id)
+                .where(Story.creator_id != MediaAsset.owner_creator_id)
+            )
+            or 0
+        ),
     }
     failures: list[str] = []
 
@@ -202,6 +293,12 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     minimum("feature_bookings", 1)
     minimum("active_feature_bookings", 1)
     minimum("notification_intents", 20)
+    minimum("active_stories", TARGET_ACTIVE_STORY_COUNT)
+    minimum("active_story_creators", len(STORY_CREATORS))
+    minimum("eligible_active_stories", TARGET_ACTIVE_STORY_COUNT)
+    minimum("expired_stories", TARGET_EXPIRED_STORY_COUNT)
+    exact("overdue_active_stories", 0)
+    exact("story_media_owner_mismatches", 0)
 
     for creator in CREATORS:
         profile = by_slug.get(creator.slug)
@@ -260,6 +357,22 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     )
     if not set(expected_listing_titles()) <= actual_listing_titles:
         failures.append("one or more manifest marketplace listings are missing")
+    for creator in STORY_CREATORS:
+        profile = by_slug.get(creator.slug)
+        if not profile:
+            failures.append(f"Story creator is missing: {creator.slug}")
+            continue
+        for position in range(3):
+            expected_pair = (profile.id, story_caption(creator, position))
+            if expected_pair not in eligible_story_pairs:
+                failures.append(
+                    f"eligible active Story is missing: {creator.slug} position {position + 1}"
+                )
+    restricted_story_count = (
+        await _count(db, Story, Story.creator_id == restricted.id) if restricted else 0
+    )
+    if restricted_story_count:
+        failures.append("reya-restricted must not have seeded Stories")
     if {group.slug for group in (await db.scalars(select(Group))).all()} != {
         group[0] for group in GROUPS
     }:
@@ -282,9 +395,7 @@ async def _main() -> None:
         for failure in report.failures:
             print(f"- {failure}")
         raise SystemExit(1)
-    print(
-        "\nDemo validation passed. Stories are intentionally omitted: no backend Stories domain exists."
-    )
+    print("\nDemo validation passed, including authoritative active and expired Stories.")
 
 
 if __name__ == "__main__":

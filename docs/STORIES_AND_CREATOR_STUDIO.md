@@ -6,6 +6,12 @@ Ephemeral Stories, Highlights, filters/effects, interactive stickers, monetisati
 
 Stories are a first-class social and monetisation format, not merely a temporary feed post. The platform should provide a mobile-first Creator Studio for recording, composing, editing, previewing and publishing Stories.
 
+## Implemented authoritative slice (2026-08-26)
+
+The current bounded implementation stores one creator-owned media card per `Story` row and groups those rows by creator in consumer presentation. Publication is immediate and has an exact 24-hour lifecycle. The authoritative states are `active`, `expired`, soft-deleted `deleted`, and moderator-contained `removed`; expiry and removal take a Story out of consumer queries while retaining its row and audit history. Creation accepts only an approved creator's ready image or video asset and reuses the existing media pipeline. A Story asset must not already be referenced by content, posts, messages, or marketplace listings, so Story publication cannot broaden another domain's access contract. Delivery is restricted to the authorised image `display` or video `preview_clip` derivative; originals and full playback derivatives are never projected by the Story API. Public media URL lifetime is capped below the remaining Story lifetime.
+
+The implemented access policies are `free`, `followers`, and `subscription`, resolved server-side against creator eligibility, two-way blocks, follow state, active creator-scoped entitlements, media readiness, and moderation state. `ppv` and `private` are rejected until a Story-specific purchase/direct-share contract exists. Creator creation requires a creator-scoped `Idempotency-Key`; the same key and payload returns the original Story, while key reuse with different input is rejected. Creator listing/deletion, consumer rail/detail/media delivery, reporting/moderator removal, deterministic cursor ordering, and replay-safe scheduled expiry are available through existing API domains. Replies, reactions, view analytics, drafts/scheduling, text-only or multi-card authoring, editor effects, PPV linking, and Highlights remain future work; the consumer viewer does not fabricate those interactions.
+
 ## 14.1 Story formats and lifecycle
 
 - 24-hour ephemeral format by default, with configurable platform policy for expiry.
@@ -51,6 +57,8 @@ Stories can:
 ## 14.4 Story Highlights
 
 Creators may optionally convert archived Stories into persistent Highlights displayed on the profile. Highlights can have a title, cover, ordering and access policy. Removing a Story from its original 24-hour lifecycle must not automatically remove an explicitly saved Highlight unless the underlying content is moderated or deleted.
+
+Highlights are not part of the current bounded Story implementation. They require their own durable selection/order/access contract and must not be inferred from expired Story rows.
 
 ## 14.5 Story engagement and analytics
 

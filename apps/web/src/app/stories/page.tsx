@@ -5,7 +5,7 @@ import styles from "./page.module.css";
 
 export const metadata: Metadata = {
   title: "Stories",
-  description: "Open immersive demo stories from eligible public FanBackstage creators.",
+  description: "Open active creator Stories that FanBackstage authorizes for you.",
 };
 
 export default function StoriesPage() {
@@ -14,7 +14,7 @@ export default function StoriesPage() {
       <header>
         <p>Backstage stories</p>
         <h1>A little closer, one moment at a time.</h1>
-        <span>Immersive creator stories built from public demo media. Creator eligibility always comes from FanBackstage discovery.</span>
+        <span>Fresh photo and video moments from creators you can access right now. Every Story and media response is resolved by FanBackstage.</span>
       </header>
       <StoriesBrowser />
     </div>

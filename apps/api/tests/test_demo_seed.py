@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,7 @@ from app.models.messaging import Conversation, Message
 from app.models.notification import NotificationIntent
 from app.models.referral import ReferralCommissionAllocation, SignupAttribution
 from app.models.social import FeedPost, FeedPostStatus, Follow, PostComment, PostReaction
+from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
 from app.models.subscription import Subscription
 from app.seed import demo
@@ -25,7 +27,10 @@ from app.seed.manifest import (
     CREATORS,
     PUBLIC_CREATORS,
     RESTRICTED_CREATOR,
+    STORY_CREATORS,
+    TARGET_ACTIVE_STORY_COUNT,
     TARGET_CREATOR_COUNT,
+    TARGET_EXPIRED_STORY_COUNT,
     TARGET_GROUP_COUNT,
     TARGET_PUBLIC_CREATOR_COUNT,
     TARGET_PUBLISHED_CONTENT_COUNT,
@@ -38,6 +43,8 @@ from app.seed.manifest import (
     gallery_title,
     listing_count_for_creator,
     post_body,
+    story_caption,
+    story_cohort_idempotency_key,
     video_title,
 )
 from app.seed.media import ASSET_ROOT
@@ -97,6 +104,20 @@ def test_demo_manifest_has_stable_unique_count_invariants():
     assert len({gallery_title(item) for item in PUBLIC_CREATORS}) == 12
     assert len({video_title(item) for item in PUBLIC_CREATORS}) == 12
     assert len({post_body(item, i) for item in PUBLIC_CREATORS for i in range(4)}) == 48
+    assert len(STORY_CREATORS) == 8
+    assert (
+        len({story_caption(item, i) for item in STORY_CREATORS for i in range(3)})
+        == TARGET_ACTIVE_STORY_COUNT
+    )
+    assert (
+        len({story_caption(item, i, historical=True) for i, item in enumerate(STORY_CREATORS[:4])})
+        == TARGET_EXPIRED_STORY_COUNT
+    )
+    first_cohort = datetime(2026, 8, 26, 0, 30, tzinfo=UTC)
+    rollover_cohort = first_cohort.replace(hour=23)
+    assert story_cohort_idempotency_key(STORY_CREATORS[0], 0, first_cohort) != (
+        story_cohort_idempotency_key(STORY_CREATORS[0], 0, rollover_cohort)
+    )
     for creator in PUBLIC_CREATORS:
         assert (ASSET_ROOT / f"{creator.slug}.jpg").is_file()
         assert (ASSET_ROOT / f"{creator.slug}.mp4").is_file()
@@ -110,6 +131,7 @@ async def _snapshot(db_session) -> dict[str, int]:
             await db_session.scalar(select(func.count()).select_from(model).where(*criteria)) or 0
         )
 
+    now = datetime.now(UTC)
     return {
         "users": await count(User),
         "creators": await count(CreatorProfile),
@@ -154,6 +176,13 @@ async def _snapshot(db_session) -> dict[str, int]:
         "referral_allocations": await count(ReferralCommissionAllocation),
         "feature_bookings": await count(FeatureBooking),
         "notification_intents": await count(NotificationIntent),
+        "stories": await count(Story),
+        "active_stories": await count(
+            Story,
+            Story.status == StoryStatus.active,
+            Story.expires_at > now,
+        ),
+        "expired_stories": await count(Story, Story.status == StoryStatus.expired),
     }
 
 
@@ -197,3 +226,6 @@ async def test_demo_seed_is_count_stable_when_run_twice(db_session):
     assert second["referral_allocations"] >= 1
     assert second["feature_bookings"] >= 1
     assert second["notification_intents"] >= 20
+    assert second["active_stories"] == TARGET_ACTIVE_STORY_COUNT
+    assert second["expired_stories"] == TARGET_EXPIRED_STORY_COUNT
+    assert second["stories"] == TARGET_ACTIVE_STORY_COUNT + TARGET_EXPIRED_STORY_COUNT

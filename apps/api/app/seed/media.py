@@ -59,8 +59,10 @@ async def ensure_image_asset(
     slug: str,
     provider: StorageProvider,
     asset_root: Path = ASSET_ROOT,
+    *,
+    variant: str = "studio",
 ) -> MediaAsset:
-    filename = f"demo-{slug}-studio.jpg"
+    filename = f"demo-{slug}-{variant}.jpg"
     asset = await _asset_by_filename(db, creator, filename)
     body = (asset_root / f"{slug}.jpg").read_bytes()
     if not asset:
@@ -124,10 +126,12 @@ async def ensure_video_asset(
     slug: str,
     provider: StorageProvider,
     asset_root: Path = ASSET_ROOT,
+    *,
+    variant: str = "after-hours",
 ) -> MediaAsset:
     """Install an owned, pre-rendered three-second MP4 and its private derivatives."""
 
-    filename = f"demo-{slug}-after-hours.mp4"
+    filename = f"demo-{slug}-{variant}.mp4"
     asset = await _asset_by_filename(db, creator, filename)
     video_body = (asset_root / f"{slug}.mp4").read_bytes()
     poster_body = (asset_root / f"{slug}.jpg").read_bytes()

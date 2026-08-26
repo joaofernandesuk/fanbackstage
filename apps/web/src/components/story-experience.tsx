@@ -1,45 +1,137 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
-import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  KeyboardEvent,
+  MouseEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
-import { mediaForUsername, personaForUsername } from "../lib/demo-personas";
-import { DiscoveryResult, creatorUsernameFor } from "../lib/public-api";
-import { CreatorAvatar, EmptyState } from "./consumer-ui";
+import { ApiError, api } from "../lib/api";
+import {
+  PublicStory,
+  StoryCreatorGroup,
+  StoryRailPage,
+  groupStoriesByCreator,
+  storyAgeLabel,
+  storyMediaUrl,
+  storyProfilePath,
+  storyRailPath,
+  storyReportPath,
+} from "../lib/stories-api";
+import { AccessBadge, CreatorAvatar, EmptyState, VerifiedBadge, useLoginGate } from "./consumer-ui";
 import styles from "./story-experience.module.css";
 
-type StoryCreator = {
-  result: DiscoveryResult;
-  username: string;
-  persona: NonNullable<ReturnType<typeof personaForUsername>>;
-};
+export function StoryRailSource({
+  limit = 12,
+  emptyBody = "Active creator stories will appear here when they are available to you.",
+  creatorUsername,
+}: {
+  limit?: number;
+  emptyBody?: string;
+  creatorUsername?: string;
+}) {
+  const [stories, setStories] = useState<PublicStory[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-export function storyCreatorsFromDiscovery(creators: readonly DiscoveryResult[]): StoryCreator[] {
-  return creators.flatMap((result) => {
-    const username = creatorUsernameFor(result);
-    const persona = personaForUsername(username);
-    return username && persona ? [{ result, username, persona }] : [];
-  });
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    setStories([]);
+    api<StoryRailPage>(storyRailPath({ limit: 50, creatorUsername }))
+      .then((page) => {
+        if (active) setStories(page.items);
+      })
+      .catch((caught: unknown) => {
+        if (active) {
+          setError(caught instanceof ApiError ? caught.message : "Unable to load stories");
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [creatorUsername, limit]);
+
+  if (loading) {
+    return (
+      <div aria-busy="true" aria-label="Loading creator stories" className={styles.railSkeleton} role="status">
+        {Array.from({ length: Math.min(limit, 7) }, (_, index) => <span key={index} />)}
+      </div>
+    );
+  }
+  if (error) return <EmptyState body={error} title="Stories are unavailable" />;
+  return <StoryRail emptyBody={emptyBody} limit={creatorUsername ? 1 : limit} stories={stories} />;
 }
 
-export function StoryRail({ creators, limit }: { creators: readonly DiscoveryResult[]; limit?: number }) {
-  const stories = useMemo(() => storyCreatorsFromDiscovery(creators).slice(0, limit), [creators, limit]);
+export function StoryRail({
+  stories,
+  limit,
+  emptyBody = "Active creator stories will appear here when they are available to you.",
+}: {
+  stories: readonly PublicStory[];
+  limit?: number;
+  emptyBody?: string;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const groups = useMemo(
+    () => groupStoriesByCreator(stories, now).slice(0, limit),
+    [stories, limit, now],
+  );
   const [activeCreator, setActiveCreator] = useState<number | null>(null);
-  const [activeSlide, setActiveSlide] = useState(0);
+  const [activeStory, setActiveStory] = useState(0);
   const openerRef = useRef<HTMLButtonElement | null>(null);
+  const activeCreatorIdRef = useRef<string | null>(null);
 
-  if (!stories.length) {
-    return <EmptyState body="Public creator stories will appear here when discovery has eligible creators." title="No stories available" />;
+  useEffect(() => {
+    setNow(Date.now());
+  }, [stories]);
+
+  useEffect(() => {
+    const nextExpiry = stories
+      .map((story) => Date.parse(story.expires_at))
+      .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > now)
+      .sort((first, second) => first - second)[0];
+    if (!nextExpiry) return;
+    const timer = window.setTimeout(
+      () => setNow(Date.now()),
+      Math.max(25, nextExpiry - now + 25),
+    );
+    return () => window.clearTimeout(timer);
+  }, [now, stories]);
+
+  const resolvedActiveCreator = activeCreator === null
+    ? -1
+    : groups.findIndex((group) => group.creator.id === activeCreatorIdRef.current);
+
+  useEffect(() => {
+    if (activeCreator !== null && resolvedActiveCreator < 0) {
+      activeCreatorIdRef.current = null;
+      setActiveCreator(null);
+      requestAnimationFrame(() => openerRef.current?.focus());
+    }
+  }, [activeCreator, resolvedActiveCreator]);
+
+  if (!groups.length) {
+    return <EmptyState body={emptyBody} title="No active stories" />;
   }
 
   function open(index: number, event: MouseEvent<HTMLButtonElement>) {
     openerRef.current = event.currentTarget;
-    setActiveSlide(0);
+    activeCreatorIdRef.current = groups[index].creator.id;
+    setActiveStory(0);
     setActiveCreator(index);
   }
 
   function close() {
+    activeCreatorIdRef.current = null;
     setActiveCreator(null);
     requestAnimationFrame(() => openerRef.current?.focus());
   }
@@ -47,25 +139,39 @@ export function StoryRail({ creators, limit }: { creators: readonly DiscoveryRes
   return (
     <>
       <div aria-label="Creator stories" className={styles.rail} role="list">
-        {stories.map((story, index) => (
-          <div className={styles.storyItem} key={story.result.id} role="listitem">
-            <button className={styles.storyButton} onClick={(event) => open(index, event)} type="button">
+        {groups.map((group, index) => (
+          <div className={styles.storyItem} key={group.creator.id} role="listitem">
+            <button
+              aria-label={`Open ${group.creator.display_name}'s ${group.stories.length === 1 ? "story" : `${group.stories.length} stories`}`}
+              className={styles.storyButton}
+              onClick={(event) => open(index, event)}
+              type="button"
+            >
               <span className={styles.storyRing}>
-                <CreatorAvatar displayName={story.result.title} size={66} username={story.username} />
+                <CreatorAvatar
+                  displayName={group.creator.display_name}
+                  size={66}
+                  username={group.creator.username}
+                />
+                {group.stories.length > 1 && <span aria-hidden="true" className={styles.storyCount}>{group.stories.length}</span>}
               </span>
-              <span>{story.result.title.split(" ")[0]}</span>
+              <span>{group.creator.display_name.split(" ")[0]}</span>
             </button>
           </div>
         ))}
       </div>
-      {activeCreator !== null && (
+      {resolvedActiveCreator >= 0 && (
         <StoryViewer
-          activeCreator={activeCreator}
-          activeSlide={activeSlide}
+          activeCreator={resolvedActiveCreator}
+          activeStory={Math.min(activeStory, groups[resolvedActiveCreator].stories.length - 1)}
+          groups={groups}
           onClose={close}
-          onCreatorChange={(index) => { setActiveCreator(index); setActiveSlide(0); }}
-          onSlideChange={setActiveSlide}
-          stories={stories}
+          onCreatorChange={(index, storyIndex = 0) => {
+            activeCreatorIdRef.current = groups[index].creator.id;
+            setActiveCreator(index);
+            setActiveStory(storyIndex);
+          }}
+          onStoryChange={setActiveStory}
         />
       )}
     </>
@@ -73,90 +179,238 @@ export function StoryRail({ creators, limit }: { creators: readonly DiscoveryRes
 }
 
 function StoryViewer({
-  stories,
+  groups,
   activeCreator,
-  activeSlide,
+  activeStory,
   onClose,
   onCreatorChange,
-  onSlideChange,
+  onStoryChange,
 }: {
-  stories: StoryCreator[];
+  groups: StoryCreatorGroup[];
   activeCreator: number;
-  activeSlide: number;
+  activeStory: number;
   onClose: () => void;
-  onCreatorChange: (index: number) => void;
-  onSlideChange: (index: number) => void;
+  onCreatorChange: (index: number, storyIndex?: number) => void;
+  onStoryChange: (index: number) => void;
 }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
-  const story = stories[activeCreator];
-  const slide = story.persona.storySlides[activeSlide];
-  const media = mediaForUsername(story.username);
-  const source = media?.[slide.media];
+  const group = groups[activeCreator];
+  const story = group.stories[activeStory];
+  const isFirst = activeCreator === 0 && activeStory === 0;
+  const isLast = activeCreator === groups.length - 1 && activeStory === group.stories.length - 1;
 
   useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
     closeRef.current?.focus();
   }, []);
 
-  useEffect(() => {
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = previous; };
-  }, []);
-
   function previous() {
-    if (activeSlide > 0) onSlideChange(activeSlide - 1);
-    else if (activeCreator > 0) onCreatorChange(activeCreator - 1);
-  }
-
-  function next() {
-    if (activeSlide < story.persona.storySlides.length - 1) onSlideChange(activeSlide + 1);
-    else if (activeCreator < stories.length - 1) onCreatorChange(activeCreator + 1);
-    else onClose();
-  }
-
-  function keyboard(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "Escape") onClose();
-    if (event.key === "ArrowLeft") previous();
-    if (event.key === "ArrowRight") next();
-    if (event.key === "Home") { onCreatorChange(0); onSlideChange(0); }
-    if (event.key === "End") onCreatorChange(stories.length - 1);
-    if (event.key === "Tab") {
-      const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("a[href], button:not(:disabled)"));
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+    if (activeStory > 0) {
+      onStoryChange(activeStory - 1);
+      return;
+    }
+    if (activeCreator > 0) {
+      const previousGroup = groups[activeCreator - 1];
+      onCreatorChange(activeCreator - 1, previousGroup.stories.length - 1);
     }
   }
 
+  function next() {
+    if (activeStory < group.stories.length - 1) {
+      onStoryChange(activeStory + 1);
+      return;
+    }
+    if (activeCreator < groups.length - 1) {
+      onCreatorChange(activeCreator + 1);
+      return;
+    }
+    dialogRef.current?.close();
+  }
+
+  function keyboard(event: KeyboardEvent<HTMLDialogElement>) {
+    if (event.target instanceof HTMLVideoElement) return;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      previous();
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      next();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      onCreatorChange(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      const finalCreator = groups.length - 1;
+      onCreatorChange(finalCreator, groups[finalCreator].stories.length - 1);
+    }
+  }
+
+  function backdrop(event: MouseEvent<HTMLDialogElement>) {
+    if (event.target === event.currentTarget) dialogRef.current?.close();
+  }
+
   return (
-    <div aria-label={`${story.result.title} story`} aria-modal="true" className={styles.overlay} onKeyDown={keyboard} role="dialog">
+    <dialog
+      aria-label={`${group.creator.display_name} story`}
+      className={styles.overlay}
+      onCancel={(event) => {
+        event.preventDefault();
+        dialogRef.current?.close();
+      }}
+      onClick={backdrop}
+      onClose={onClose}
+      onKeyDown={keyboard}
+      ref={dialogRef}
+    >
       <div className={styles.viewer}>
-        {source && <Image alt={`${story.result.title}: ${slide.title}`} fill priority sizes="100vw" src={source} />}
-        <div className={styles.scrim} />
-        <div aria-label={`Story ${activeSlide + 1} of ${story.persona.storySlides.length}`} className={styles.progress}>
-          {story.persona.storySlides.map((_, index) => <span className={index <= activeSlide ? styles.complete : ""} key={index} />)}
+        <StoryMedia key={story.id} story={story} />
+        <div aria-hidden="true" className={styles.scrim} />
+        <div
+          aria-label={`Story ${activeStory + 1} of ${group.stories.length}`}
+          className={styles.progress}
+          role="status"
+        >
+          {group.stories.map((item, index) => (
+            <span
+              aria-current={index === activeStory ? "step" : undefined}
+              className={index < activeStory ? styles.complete : index === activeStory ? styles.current : ""}
+              key={item.id}
+            />
+          ))}
         </div>
         <header className={styles.viewerHeader}>
-          <CreatorAvatar displayName={story.result.title} size={42} username={story.username} />
-          <div><strong>{story.result.title}</strong><span>@{story.username}</span></div>
-          <button aria-label="Close story" className={styles.close} onClick={onClose} ref={closeRef} type="button">×</button>
+          <Link className={styles.creatorIdentity} href={storyProfilePath(group.creator.username)}>
+            <CreatorAvatar
+              displayName={group.creator.display_name}
+              size={42}
+              username={group.creator.username}
+            />
+            <span>
+              <strong>{group.creator.display_name} {group.creator.verified && <VerifiedBadge />}</strong>
+              <small>@{group.creator.username} · {storyAgeLabel(story.published_at)}</small>
+            </span>
+          </Link>
+          <AccessBadge policy={story.access_policy} />
+          <button
+            aria-label="Close story"
+            className={styles.close}
+            onClick={() => dialogRef.current?.close()}
+            ref={closeRef}
+            type="button"
+          >×</button>
         </header>
         <div className={styles.storyCopy}>
-          <p>{slide.eyebrow}</p>
-          <h2>{slide.title}</h2>
-          <span>{slide.body}</span>
-          <Link href={`/creator/${encodeURIComponent(story.username)}`}>View profile</Link>
+          {story.caption && <p>{story.caption}</p>}
+          <div className={styles.storyActions}>
+            <Link href={storyProfilePath(group.creator.username)}>View profile</Link>
+            <div className={styles.storyActionMeta}>
+              <span>Replies and reactions aren’t available yet.</span>
+              <StoryReport key={story.id} storyId={story.id} />
+            </div>
+          </div>
         </div>
-        <button aria-label="Previous story" className={`${styles.nav} ${styles.previous}`} disabled={activeCreator === 0 && activeSlide === 0} onClick={previous} type="button">‹</button>
-        <button aria-label="Next story" className={`${styles.nav} ${styles.next}`} onClick={next} type="button">›</button>
+        <button
+          aria-label="Previous story"
+          className={`${styles.nav} ${styles.previous}`}
+          disabled={isFirst}
+          onClick={previous}
+          type="button"
+        >‹</button>
+        <button
+          aria-label="Next story"
+          className={`${styles.nav} ${styles.next}`}
+          onClick={next}
+          type="button"
+        >{isLast ? "×" : "›"}</button>
       </div>
-    </div>
+    </dialog>
+  );
+}
+
+function StoryReport({ storyId }: { storyId: string }) {
+  const [state, setState] = useState<"idle" | "confirm" | "pending" | "sent">("idle");
+  const [error, setError] = useState("");
+  const { authenticated, loading, requireLogin } = useLoginGate();
+
+  async function submit() {
+    setState("pending");
+    setError("");
+    try {
+      await api<{ reported: boolean }>(storyReportPath(storyId), {
+        method: "POST",
+        body: JSON.stringify({ reason: "story_safety_concern" }),
+      });
+      setState("sent");
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) {
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+        return;
+      }
+      setError(caught instanceof ApiError ? caught.message : "Unable to send report");
+      setState("confirm");
+    }
+  }
+
+  if (state === "sent") return <span role="status">Report received.</span>;
+  if (state === "confirm") {
+    return (
+      <span className={styles.reportConfirm}>
+        <span>Send this Story to the safety team?</span>
+        <button onClick={() => setState("idle")} type="button">Cancel</button>
+        <button onClick={() => void submit()} type="button">Send report</button>
+        {error && <span role="alert">{error}</span>}
+      </span>
+    );
+  }
+  if (state === "pending") return <span role="status">Sending report…</span>;
+  if (!authenticated) {
+    return (
+      <button
+        className={styles.reportButton}
+        disabled={loading}
+        onClick={() => requireLogin()}
+        type="button"
+      >{loading ? "Checking access…" : "Log in to report story"}</button>
+    );
+  }
+  return <button className={styles.reportButton} onClick={() => setState("confirm")} type="button">Report story</button>;
+}
+
+function StoryMedia({ story }: { story: PublicStory }) {
+  const media = storyMediaUrl(story);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState(false);
+
+  if (!media || error) {
+    return <div className={styles.mediaState} role="status"><strong>Story media unavailable</strong><span>You can move to another story or try again later.</span></div>;
+  }
+  return (
+    <>
+      {!loaded && <div aria-label="Loading story media" aria-busy="true" className={styles.mediaLoading} role="status" />}
+      {story.media_type === "video" ? (
+        <video
+          aria-label={story.alt_text ?? `${story.creator.display_name} story video`}
+          className={loaded ? "" : styles.mediaHidden}
+          controls
+          onError={() => setError(true)}
+          onLoadedData={() => setLoaded(true)}
+          playsInline
+          preload="metadata"
+          src={media}
+        />
+      ) : (
+        <img
+          alt={story.alt_text ?? `${story.creator.display_name} story`}
+          className={loaded ? "" : styles.mediaHidden}
+          onError={() => setError(true)}
+          onLoad={() => setLoaded(true)}
+          src={media}
+        />
+      )}
+    </>
   );
 }

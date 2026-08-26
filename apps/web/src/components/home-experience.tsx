@@ -14,7 +14,7 @@ import {
 } from "../lib/public-api";
 import { ContentCard, CreatorCard, MarketplaceCard } from "./consumer-cards";
 import { EmptyState, SectionHeader, Skeleton } from "./consumer-ui";
-import { StoryRail } from "./story-experience";
+import { StoryRailSource } from "./story-experience";
 import styles from "./home-experience.module.css";
 
 type HomeData = {
@@ -128,7 +128,7 @@ export function HomeExperience() {
 
       <section aria-labelledby="stories-heading" className={styles.storySection}>
         <SectionHeader eyebrow="Fresh today" href="/stories" id="stories-heading" linkLabel="Open stories" title="Stories" />
-        {loading ? <div className={styles.shortSkeletons}>{[0, 1, 2, 3, 4].map((value) => <span key={value} />)}</div> : failed.creators ? <EmptyState body="Creator discovery could not be refreshed. Try the stories page again shortly." title="Stories are unavailable" /> : <StoryRail creators={data.creators} limit={10} />}
+        <StoryRailSource emptyBody="New active creator stories will appear here when they are available to you." limit={10} />
       </section>
 
       <HomeSection body="Creator-owned collectibles and limited drops." eyebrow="Creator marketplace" href="/marketplace" id="market-heading" loading={loading} title="Backstage finds" variant="market">

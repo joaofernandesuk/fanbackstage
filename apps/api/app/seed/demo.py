@@ -30,8 +30,9 @@ async def seed() -> None:
     print(
         "Demo seed complete: "
         f"{stats.users} users, {stats.creators} creators, {stats.posts} published posts, "
-        f"{stats.content_items} published content items, and "
-        f"{stats.listings} published marketplace listings."
+        f"{stats.content_items} published content items, "
+        f"{stats.listings} published marketplace listings, and "
+        f"{stats.active_stories} active Stories."
     )
 
 

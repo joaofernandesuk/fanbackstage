@@ -21,6 +21,7 @@ from app.models.marketplace import (
 )
 from app.models.notification import EmailSuppression, NotificationDeliveryAttempt
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
+from app.models.story import Story
 from app.permissions.policies import Permission, authorize
 from app.referrals import service as referral_service
 from app.schemas.auth import MessageResponse
@@ -42,6 +43,7 @@ from app.schemas.referral import (
     ReferralPolicyInput,
     ReferralProgramInput,
 )
+from app.stories import service as story_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -652,7 +654,18 @@ async def social_reports(
     rows = (await db.scalars(query.order_by(SocialReport.created_at))).all()
     result = []
     for row in rows:
-        target = await db.get(FeedPost if row.target_type == "post" else PostComment, row.target_id)
+        target_model = {
+            "post": FeedPost,
+            "comment": PostComment,
+            "story": Story,
+            "marketplace_listing": MarketplaceListing,
+        }.get(row.target_type)
+        target = await db.get(target_model, row.target_id) if target_model else None
+        preview = None
+        if target:
+            preview = getattr(target, "body", None) or getattr(target, "caption", None)
+            if preview is None:
+                preview = getattr(target, "title", None)
         result.append(
             {
                 "id": str(row.id),
@@ -663,7 +676,7 @@ async def social_reports(
                 "status": row.status.value,
                 "created_at": row.created_at,
                 "target_exists": target is not None,
-                "target_preview": (target.body[:240] if target else None),
+                "target_preview": preview[:240] if preview else None,
             }
         )
     return result
@@ -674,9 +687,15 @@ async def dismiss_social_report(
     report_id: str, identity: CurrentIdentity, db: Db
 ) -> MessageResponse:
     authorize(identity[0], Permission.MODERATION_ACCESS)
-    report = await db.get(SocialReport, report_id)
+    report = await db.scalar(
+        select(SocialReport).where(SocialReport.id == report_id).with_for_update()
+    )
     if not report:
         raise HTTPException(404, "Report not found")
+    if report.status is ReportStatus.dismissed:
+        return MessageResponse(message="Report already dismissed")
+    if report.status is ReportStatus.reviewed:
+        raise HTTPException(409, "A reviewed report cannot be dismissed")
     report.status = ReportStatus.dismissed
     await record_event(
         db,
@@ -694,21 +713,34 @@ async def remove_social_target(
     report_id: str, identity: CurrentIdentity, db: Db
 ) -> MessageResponse:
     authorize(identity[0], Permission.MODERATION_ACCESS)
-    report = await db.get(SocialReport, report_id)
+    report = await db.scalar(
+        select(SocialReport).where(SocialReport.id == report_id).with_for_update()
+    )
     if not report:
         raise HTTPException(404, "Report not found")
-    target = await db.get(
-        FeedPost if report.target_type == "post" else PostComment, report.target_id
-    )
+    if report.status is ReportStatus.reviewed:
+        return MessageResponse(message="Reported target already removed")
+    if report.status is ReportStatus.dismissed:
+        raise HTTPException(409, "A dismissed report cannot remove a target")
+    target_model = {
+        "post": FeedPost,
+        "comment": PostComment,
+        "story": Story,
+    }.get(report.target_type)
+    if not target_model:
+        raise HTTPException(400, "Unsupported social report target")
+    target = await db.get(target_model, report.target_id)
     if not target:
         raise HTTPException(404, "Report target not found")
     if report.target_type == "post":
         target.status = FeedPostStatus.removed
         target.moderation_status = ModerationStatus.removed
-    else:
+    elif report.target_type == "comment":
         from datetime import UTC, datetime
 
         target.hidden_at = datetime.now(UTC)
+    else:
+        await story_service.remove_story_for_moderation(db, target.id, identity[0])
     report.status = ReportStatus.reviewed
     await record_event(
         db,

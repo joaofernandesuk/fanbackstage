@@ -30,6 +30,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.finalize_subscription_expirations": {"queue": "scheduled"},
     "app.worker.tasks.retry_subscription_renewals": {"queue": "scheduled"},
     "app.worker.tasks.publish_scheduled_posts": {"queue": "scheduled"},
+    "app.worker.tasks.expire_stories": {"queue": "scheduled"},
     "app.worker.tasks.process_scheduled_mass_messages": {"queue": "scheduled"},
     "app.worker.tasks.reconcile_private_session_grace": {"queue": "scheduled"},
     "app.worker.tasks.release_marketplace_earnings": {"queue": "financial"},
@@ -59,6 +60,10 @@ celery_app.conf.beat_schedule = {
     },
     "scheduled-feed-posts": {
         "task": "app.worker.tasks.publish_scheduled_posts",
+        "schedule": 60.0,
+    },
+    "story-expiry": {
+        "task": "app.worker.tasks.expire_stories",
         "schedule": 60.0,
     },
     "scheduled-mass-messages": {
