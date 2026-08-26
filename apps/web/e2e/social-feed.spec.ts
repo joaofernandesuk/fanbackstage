@@ -61,6 +61,7 @@ test("Phase 5 social access, engagement, and report moderation use the real stac
   );
   await page.getByRole("button", { name: "Save profile" }).click();
   expect((await profileSaved).status()).toBe(200);
+  await expect.poll(async () => (await api(page, "/creators/me")).body, { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   await expect(page.getByRole("link", { name: "View public profile" })).toBeVisible();
   const publicProfile = await api(page, `/creators/${creatorUsername}`);
   expect(publicProfile).toMatchObject({ status: 200, body: { username: creatorUsername } });

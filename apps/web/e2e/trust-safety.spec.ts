@@ -74,6 +74,7 @@ async function createApprovedCreator(page: Page, stamp: string): Promise<Creator
   await login(page, email, password);
   await page.goto("/creator-onboarding");
   await page.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(async () => await apiOk<{ status: string; is_public: boolean }>(page, "/creators/me"), { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   const profile = await apiOk<{ id: string }>(page, "/creators/me");
   return { email, password, username, id: profile.id };
 }

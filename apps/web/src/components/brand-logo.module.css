@@ -1,0 +1,35 @@
+.link {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  line-height: 0;
+  min-width: 188px;
+  text-decoration: none;
+}
+
+.wordmark {
+  display: block;
+  filter: brightness(0) invert(1);
+  height: auto;
+  width: 188px;
+}
+
+.symbol {
+  display: none;
+  height: auto;
+  width: 46px;
+}
+
+@media (max-width: 760px) {
+  .link {
+    min-width: 46px;
+  }
+
+  .wordmark {
+    display: none;
+  }
+
+  .symbol {
+    display: block;
+  }
+}

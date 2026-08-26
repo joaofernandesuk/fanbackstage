@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.creators import service
 from app.models.creator import CreatorProfile, CreatorStatus, CreatorVerification
+from app.models.social import Follow
 from app.schemas.creator import (
     CreatorProfileUpdate,
     CreatorSelfResponse,
@@ -137,6 +138,12 @@ async def public_profile(username: str, db: Db) -> PublicCreatorResponse:
         location=location,
         timezone=profile.timezone,
         verified=True,
+        follower_count=int(
+            await db.scalar(
+                select(func.count()).select_from(Follow).where(Follow.creator_id == profile.id)
+            )
+            or 0
+        ),
         languages=[
             TaxonomyItem(id=row.id, code=row.code, label=row.label) for row in profile.languages
         ],

@@ -60,6 +60,7 @@ async function approvedCreator(page: Page, stamp: number, label: string) {
   await login(page, email, password);
   await page.goto("/creator-onboarding");
   await page.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(async () => (await api(page, "/creators/me")).body, { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   return { email, password, username, creatorId: application.id as string };
 }
 
@@ -109,7 +110,7 @@ test("Phase 14 creator analytics is ledger-derived, currency-separated, and owne
   const refunded = await paidOrder(buyer, eur.public_id, stamp);
   const usdOrder = await paidOrder(buyer, usd.public_id, stamp + 1);
   await buyer.goto(`/creator/${creator.username}`);
-  await buyer.getByRole("button", { name: "Subscribe" }).first().click();
+  await buyer.locator('section[aria-label="Subscriptions"]').getByRole("button", { name: "Subscribe" }).click();
   await expect(buyer.getByText("Subscription is active.")).toBeVisible();
   await login(page, admin.email, admin.password);
   expect((await api(page, `/marketplace/admin/orders/${refunded.id}/refund`, "POST", { reason: "Phase 14 refund" })).status).toBe(200);

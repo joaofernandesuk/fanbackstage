@@ -119,6 +119,7 @@ async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(db_s
             "location": None,
             "timezone": None,
             "verified": True,
+            "follower_count": 0,
             "languages": [],
             "categories": [],
             "social_links": [],

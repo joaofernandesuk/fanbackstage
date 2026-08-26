@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 
 help:
-	@echo "FanBackstage: make deps | dev | dev-status | dev-stop | dev-reset | demo-seed | smoke | dev-backup | test | lint | migrate | e2e"
+	@echo "FanBackstage: make deps | dev | dev-status | dev-stop | dev-reset | demo-seed | demo-validate | smoke | dev-backup | test | lint | migrate | e2e"
 deps:
 	cd apps/api && uv sync --all-groups
 	cd apps/web && pnpm install --frozen-lockfile=false
@@ -15,6 +15,8 @@ dev-reset:
 	./scripts/dev-reset.sh
 demo-seed:
 	docker compose -f docker-compose.dev.yml exec -T api python -m app.seed.demo
+demo-validate:
+	docker compose -f docker-compose.dev.yml exec -T api python -m app.seed.validate
 smoke:
 	./scripts/smoke.sh
 dev-backup:

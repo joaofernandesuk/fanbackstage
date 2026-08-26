@@ -1,0 +1,5 @@
+.page { display: grid; gap: 34px; }
+.intro { max-width: 780px; }
+.intro p { color: var(--brand-cyan); font-size: 0.68rem; font-weight: 900; letter-spacing: 0.15em; margin: 0 0 12px; text-transform: uppercase; }
+.intro h1 { font-size: clamp(2.4rem, 5.5vw, 4.8rem); margin-bottom: 15px; }
+.intro span { color: var(--text-secondary); line-height: 1.6; }

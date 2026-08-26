@@ -56,7 +56,9 @@ test("Phase 7 private 1:1 uses signed LiveKit presence and settles once", async 
   await beginCreatorApplication(page, username, "Private creator");
   await page.goto("/account"); await page.getByRole("button", { name: "Log out" }).click(); await login(page, admin.email, admin.password);
   const applications = await api(page, "/admin/creator-applications"); const application = applications.body.find((row: { username: string }) => row.username === username); expect(application).toBeTruthy(); expect((await api(page, `/admin/creator-applications/${application.id}/approve`, "POST")).status).toBe(200);
-  await page.getByRole("button", { name: "Log out" }).click(); await login(page, creatorEmail, password); await page.goto("/creator-onboarding"); await page.getByRole("button", { name: "Save profile" }).click(); await page.goto("/creator-studio");
+  await page.getByRole("button", { name: "Log out" }).click(); await login(page, creatorEmail, password); await page.goto("/creator-onboarding"); await page.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(async () => (await api(page, "/creators/me")).body, { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
+  await page.goto("/creator-studio");
   await page.getByLabel("1:1 per-minute price (minor units)").fill("321"); await page.getByRole("button", { name: "Save private-session pricing" }).click(); await expect(page.getByText("Private-session pricing saved")).toBeVisible();
   await page.getByLabel("Live title").fill(`Private queue live ${stamp}`); await page.getByRole("button", { name: "Start live" }).click(); await expect(page.getByText("Live room started with audio and video")).toBeVisible();
   const viewerContext = await browser.newContext({ permissions: ["camera", "microphone"] }); const viewer = await viewerContext.newPage(); await register(viewer, viewerEmail, password); await viewer.goto(`/creator/${username}`); await viewer.getByRole("button", { name: "Request 1:1 session" }).click(); await expect(viewer.getByText("Request queued")).toBeVisible();

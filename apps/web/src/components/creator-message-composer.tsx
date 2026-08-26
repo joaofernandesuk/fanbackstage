@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { formatMoney } from "../lib/public-api";
 
 type SendPrice = {
   amount_minor: number | null;
@@ -59,7 +60,7 @@ export function CreatorMessageComposer({ creatorId }: { creatorId: string }) {
       {price && (
         <p>
           {price.requires_confirmation
-            ? `This creator charges ${price.amount_minor} ${price.currency} to send a message.`
+            ? `This creator charges ${formatMoney(price.amount_minor ?? 0, price.currency ?? "EUR")} to send a message.`
             : "This creator accepts messages without a send fee."}
         </p>
       )}
@@ -69,7 +70,7 @@ export function CreatorMessageComposer({ creatorId }: { creatorId: string }) {
           <textarea value={body} onChange={(event) => setBody(event.target.value)} maxLength={4000} required />
         </label>
         {confirming && price?.requires_confirmation && (
-          <p role="alert">Confirm payment of {price.amount_minor} {price.currency} to deliver this message.</p>
+          <p role="alert">Confirm payment of {formatMoney(price.amount_minor ?? 0, price.currency ?? "EUR")} to deliver this message.</p>
         )}
         <button disabled={!price}>{confirming ? "Confirm and pay" : "Send message"}</button>
       </form>

@@ -59,6 +59,7 @@ class PublicCreatorResponse(BaseModel):
     location: str | None
     timezone: str | None
     verified: bool
+    follower_count: int
     languages: list[TaxonomyItem]
     categories: list[TaxonomyItem]
     social_links: list[SocialLinkInput]

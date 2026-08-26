@@ -83,6 +83,10 @@ test("creator media travels through the real private processing stack", async ({
   await login(page, email, password);
   await page.goto("/creator-onboarding");
   await page.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(async () => page.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/creators/me`, { credentials: "include" });
+    return await response.json();
+  }, { apiBase }), { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   await page.goto("/account");
   await page.getByRole("link", { name: "Creator studio" }).click();
   const browserErrors: string[] = [];
@@ -187,12 +191,15 @@ test("creator media travels through the real private processing stack", async ({
   await buyerPage.getByRole("button", { name: "Verify email" }).click();
   await login(buyerPage, buyerEmail, password);
   await buyerPage.goto(`/creator/${username}`);
-  await buyerPage.getByRole("button", { name: "Unlock for 999 EUR" }).click();
-  await expect(buyerPage.getByRole("button", { name: "Unlock for 999 EUR" })).toHaveCount(0);
+  await buyerPage.getByRole("tab", { name: "Premium" }).click();
+  await buyerPage.getByRole("button", { name: "Unlock for €9.99" }).click();
+  await expect(buyerPage.getByRole("button", { name: "Unlock for €9.99" })).toHaveCount(0);
   await expect.poll(async () => buyerPage.evaluate(async ({ apiBase, contentId }) => {
     const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
     return (await response.json()).has_access;
   }, { apiBase, contentId: published[0].id }), { timeout: 10_000 }).toBe(true);
+  await buyerPage.getByRole("tab", { name: "Photos" }).click();
+  await expect(buyerPage.getByRole("img", { name: `${galleryTitle} preview` })).toBeVisible();
   const purchases = await buyerPage.evaluate(async ({ apiBase }) => {
     const response = await fetch(`${apiBase}/api/v1/purchases/mine`, { credentials: "include" });
     return { status: response.status, body: await response.json() };
@@ -228,9 +235,14 @@ test("creator media travels through the real private processing stack", async ({
   await subscriberPage.getByRole("button", { name: "Verify email" }).click();
   await login(subscriberPage, subscriberEmail, password);
   await subscriberPage.goto(`/creator/${username}`);
-  await expect(subscriberPage.getByText("800 EUR")).toBeVisible();
-  await subscriberPage.getByRole("button", { name: "Subscribe" }).first().click();
+  await subscriberPage.getByRole("tab", { name: "Premium" }).click();
+  await expect(subscriberPage.getByText("€8.00", { exact: true })).toBeVisible();
+  await subscriberPage.locator('section[aria-label="Subscriptions"] article').filter({ hasText: "€8.00" }).getByRole("button", { name: "Subscribe" }).click();
   await expect(subscriberPage.getByText("Subscription is active.")).toBeVisible();
+  await subscriberPage.reload();
+  await subscriberPage.getByRole("tab", { name: "Premium" }).click();
+  await expect(subscriberPage.getByText(subscriptionTitle)).toBeVisible();
+  await expect(subscriberPage.getByRole("button", { name: "Unlock for €9.99" })).toBeVisible();
   const subscription = await subscriberPage.evaluate(async ({ apiBase }) => {
     const response = await fetch(`${apiBase}/api/v1/subscriptions/mine`, { credentials: "include" });
     return { status: response.status, body: await response.json() };
@@ -266,9 +278,12 @@ test("creator media travels through the real private processing stack", async ({
   const anonymous = await browser.newContext();
   const anonymousPage = await anonymous.newPage();
   await anonymousPage.goto(`${process.env.E2E_WEB_URL ?? "http://127.0.0.1:38181"}/creator/${username}`);
+  await anonymousPage.getByRole("tab", { name: "Premium" }).click();
   await expect(anonymousPage.getByText(galleryTitle)).toBeVisible();
-  await expect(anonymousPage.locator("img")).toHaveCount(2);
-  for (const previewUrl of await anonymousPage.locator("img").evaluateAll(images =>
+  await expect(anonymousPage.getByText(subscriptionTitle)).toBeVisible();
+  const publicPreviews = anonymousPage.locator('img[alt$=" preview"]');
+  await expect(publicPreviews).toHaveCount(2);
+  for (const previewUrl of await publicPreviews.evaluateAll(images =>
     images.map(image => image.getAttribute("src")),
   )) {
     expect(previewUrl).toContain("/media/previews/");
@@ -283,6 +298,13 @@ test("creator media travels through the real private processing stack", async ({
     const response = await fetch(`${apiBase}/api/v1/media/mine`, { credentials: "include" });
     return (await response.json() as { status: string }[]).filter(asset => asset.status === "ready").length;
   }, { apiBase }), { timeout: 30000 }).toBeGreaterThan(1);
+  const publicVideoContext = await browser.newContext();
+  const publicVideoPage = await publicVideoContext.newPage();
+  await publicVideoPage.goto(`${process.env.E2E_WEB_URL ?? "http://127.0.0.1:38181"}/creator/${username}`);
+  await publicVideoPage.getByRole("tab", { name: "Videos" }).click();
+  await expect(publicVideoPage.getByText("More content is coming")).toBeVisible();
+  await expect(publicVideoPage.locator('img[alt$=" preview"]')).toHaveCount(0);
+  await publicVideoContext.close();
   // A later commission-policy revision is intentionally forward-looking: it
   // cannot rewrite the settled purchase snapshot or its already-rendered receipt.
   await page.goto("/account");

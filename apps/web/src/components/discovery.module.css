@@ -1,0 +1,74 @@
+.discovery { display: grid; gap: 52px; }
+.controls {
+  background: rgb(17 22 42 / 0.72);
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 14px;
+  position: sticky;
+  top: 82px;
+  z-index: 20;
+}
+.searchLabel { align-items: center; display: grid; gap: 8px; grid-template-columns: auto minmax(0, 1fr) auto; }
+.searchIcon { color: var(--text-muted); font-size: 1.35rem; padding-left: 8px; }
+.searchLabel input {
+  background: transparent !important;
+  border: 0 !important;
+  font-size: 0.9rem;
+  min-width: 0;
+  outline: 0;
+  padding: 10px 0 !important;
+}
+.searchLabel button,
+.loadMore button,
+.error button,
+.emptyLink {
+  background: var(--brand-gradient);
+  border: 0;
+  border-radius: 999px;
+  color: var(--brand-midnight);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 850;
+  padding: 10px 16px;
+  text-decoration: none;
+}
+.filters { align-items: center; display: flex; gap: 7px; overflow-x: auto; }
+.filters > button {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 0.67rem;
+  font-weight: 780;
+  padding: 8px 12px;
+}
+.filters > button[aria-pressed="true"] { background: rgb(14 165 255 / 0.13); border-color: rgb(14 165 255 / 0.38); color: #90d9ff; }
+.sortLabel { align-items: center; display: flex; flex: 0 0 auto; font-size: 0.66rem; gap: 7px; margin-left: auto; }
+.sortLabel select { background: var(--surface-soft); border: 1px solid var(--border-subtle); border-radius: 999px; font-size: 0.68rem; padding: 7px 28px 7px 11px; }
+.grid,
+.loadingGrid { display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.contentGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.error { align-items: center; background: rgb(255 98 124 / 0.09); border: 1px solid rgb(255 98 124 / 0.24); border-radius: 15px; display: flex; gap: 16px; justify-content: space-between; padding: 12px 16px; }
+.error p { color: #ffa2b2; margin: 0; }
+.loadMore { display: flex; justify-content: center; }
+@media (max-width: 1100px) {
+  .grid,
+  .loadingGrid,
+  .contentGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 650px) {
+  .discovery { gap: 42px; }
+  .controls { border-radius: 16px; top: 66px; }
+  .searchLabel { grid-template-columns: auto minmax(0, 1fr); }
+  .searchLabel button { grid-column: 1 / -1; }
+  .sortLabel { margin-left: 0; }
+  .grid,
+  .loadingGrid,
+  .contentGrid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { .filters { scroll-behavior: auto; } }

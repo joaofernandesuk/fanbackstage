@@ -1,0 +1,11 @@
+.browser { display: grid; gap: 26px; }
+.controls { align-items: end; background: rgb(17 22 42 / 0.75); border: 1px solid var(--border-subtle); border-radius: 18px; display: flex; gap: 12px; padding: 13px; }
+.controls label { min-width: 190px; }
+.controls select { border-radius: 12px; }
+.controls p { margin: 0 0 8px auto; }
+.controls strong { color: white; }
+.grid { display: grid; gap: 17px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.error { background: rgb(255 98 124 / 0.1); border: 1px solid rgb(255 98 124 / 0.25); border-radius: 14px; color: #ffa2b2; padding: 12px 15px; }
+@media (max-width: 1050px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 800px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 570px) { .controls { align-items: stretch; flex-direction: column; } .controls label { min-width: 0; } .controls p { margin: 4px 0; } .grid { grid-template-columns: 1fr; } }

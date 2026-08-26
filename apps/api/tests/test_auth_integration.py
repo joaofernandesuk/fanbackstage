@@ -54,6 +54,28 @@ async def test_login_logout_and_revoked_session_cannot_authenticate(client):
 
 
 @pytest.mark.asyncio
+async def test_login_and_account_response_support_seeded_local_demo_email(client, db_session):
+    email = "subscriber@demo.fanbackstage.local"
+    user, _ = await service.register(db_session, email, "fanbackstage-demo-local-only", None)
+    user.email_verified_at = service._now()
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "fanbackstage-demo-local-only"},
+    )
+    assert response.status_code == 200
+    assert response.json()["email"] == email
+    assert (await client.get("/api/v1/me")).json()["email"] == email
+
+    rejected = await client.post(
+        "/api/v1/auth/register",
+        json={"email": "another@demo.fanbackstage.local", "password": "strong-password-123"},
+    )
+    assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_invalid_login_is_generic_and_audited(client, db_session):
     await register(client)
     response = await client.post(

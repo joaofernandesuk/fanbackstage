@@ -1,0 +1,13 @@
+.browser { display: grid; gap: 28px; }
+.controls { align-items: center; background: rgb(17 22 42 / 0.75); border: 1px solid var(--border-subtle); border-radius: 17px; display: flex; gap: 16px; justify-content: space-between; padding: 12px; }
+.controls > div { display: flex; gap: 7px; overflow-x: auto; }
+.controls button { background: transparent; border: 1px solid var(--border-subtle); border-radius: 999px; color: var(--text-secondary); cursor: pointer; flex: 0 0 auto; font-size: 0.68rem; font-weight: 800; padding: 8px 12px; }
+.controls button[aria-pressed="true"] { background: rgb(139 92 246 / 0.2); border-color: rgb(139 92 246 / 0.45); color: #d6caff; }
+.controls label { align-items: center; display: flex; flex: 0 0 auto; gap: 8px; }
+.controls select { border-radius: 999px; font-size: 0.68rem; padding: 7px 30px 7px 11px; }
+.grid { display: grid; gap: 17px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.error { background: rgb(255 98 124 / 0.1); border: 1px solid rgb(255 98 124 / 0.25); border-radius: 14px; color: #ffa2b2; padding: 12px 15px; }
+.loadMore { background: var(--brand-gradient); border: 0; border-radius: 999px; color: var(--brand-midnight); cursor: pointer; font-size: 0.74rem; font-weight: 850; justify-self: center; padding: 11px 17px; }
+@media (max-width: 1000px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .controls { align-items: stretch; flex-direction: column; } .controls label { justify-content: space-between; } .grid { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .controls > div { scroll-behavior: auto; } }

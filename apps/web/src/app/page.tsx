@@ -1,2 +1,5 @@
-import Link from "next/link";
-export default function Home() { return <><section className="hero"><div><p className="eyebrow">THE CREATOR NETWORK</p><h1>Get closer.<br />Go backstage.</h1><p>Follow the people and moments you love. Discover premium content, live experiences, and a community built around creators.</p><div className="hero-actions"><Link className="button" href="/register">Join FanBackstage</Link><Link className="link" href="/login">I already have an account</Link></div></div></section><section className="discovery-grid" aria-label="FanBackstage highlights"><article className="card"><p className="eyebrow">DISCOVER</p><h2>Find your next favorite.</h2><p>Creator-led feeds, fresh drops, and a social experience made to explore.</p><Link className="link" href="/discover">Explore creators →</Link></article><article className="card"><p className="eyebrow">LIVE</p><h2>Be there in the moment.</h2><p>Join public broadcasts or connect through private experiences when creators are ready.</p><Link className="link" href="/live">Explore Live →</Link></article><article className="card"><p className="eyebrow">TRUSTED</p><h2>Closer, on your terms.</h2><p>Clear access controls, privacy-first media, and transparent purchase experiences.</p></article></section></>; }
+import { HomeExperience } from "../components/home-experience";
+
+export default function Home() {
+  return <HomeExperience />;
+}

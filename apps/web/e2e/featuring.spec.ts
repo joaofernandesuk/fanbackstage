@@ -58,6 +58,7 @@ test("Phase 12 booking settles, inserts one labelled sponsored card, and expires
   await login(page, email, password);
   await page.goto("/creator-onboarding");
   await page.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(async () => (await api(page, "/creators/me")).body, { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   const targets = await api(page, "/featuring/eligible-targets");
   const target = targets.body.find((row: { target_id: string; target_type: string }) => row.target_type === "creator" && row.target_id === application.id);
   expect(target, JSON.stringify(targets.body)).toBeTruthy();
@@ -70,7 +71,11 @@ test("Phase 12 booking settles, inserts one labelled sponsored card, and expires
   await page.goto("/discover");
   await expect(page.getByLabel("Sponsored placement")).toBeVisible();
   await expect(page.locator("article", { hasText: username })).toHaveCount(1);
-  await expect.poll(async () => (await api(page, "/featuring/admin/reconcile", "POST")).body.deactivated, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+  await expect.poll(async () => {
+    await api(page, "/featuring/admin/reconcile", "POST");
+    const bookings = await api(page, "/featuring/admin/bookings");
+    return bookings.body.find((row: { id: string }) => row.id === booking.body.id)?.status;
+  }, { timeout: 15_000 }).toBe("completed");
   await page.reload();
   await expect(page.getByLabel("Sponsored placement")).toHaveCount(0);
 });

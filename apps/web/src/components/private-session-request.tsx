@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { formatMoney } from "../lib/public-api";
 
 type Request = { id: string; mode: string; per_minute_price_minor: number; minimum_charge_minor: number; currency: string; status: string };
 
@@ -13,7 +14,7 @@ export function PrivateSessionRequest({ creatorId }: { creatorId: string }) {
   async function requestSession() {
     try {
       const started = await api<Request>(`/live/creators/${creatorId}/private-requests`, { method: "POST", body: JSON.stringify({ mode: "one_to_one" }) });
-      setRequest(started); setMessage(`Request queued. Price is ${started.per_minute_price_minor} ${started.currency}/minute; minimum ${started.minimum_charge_minor} ${started.currency}. The creator must accept before payment authorization.`);
+      setRequest(started); setMessage(`Request queued. Price is ${formatMoney(started.per_minute_price_minor, started.currency)}/minute; minimum ${formatMoney(started.minimum_charge_minor, started.currency)}. The creator must accept before payment authorization.`);
     } catch (caught) { setMessage(caught instanceof ApiError ? caught.message : "Unable to request a private session"); }
   }
 

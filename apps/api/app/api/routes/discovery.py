@@ -1,6 +1,7 @@
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
@@ -20,7 +21,7 @@ async def search(
     db: Db,
     identity: OptionalIdentity,
     q: str | None = None,
-    types: list[str] | None = None,
+    types: Annotated[list[str] | None, Query()] = None,
     cursor: str | None = None,
     limit: int = 20,
     category: str | None = None,

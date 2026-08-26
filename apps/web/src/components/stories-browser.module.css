@@ -1,0 +1,16 @@
+.browser { display: grid; gap: 58px; }
+.railSection { background: linear-gradient(135deg, rgb(14 165 255 / 0.08), rgb(139 92 246 / 0.07)); border: 1px solid var(--border-subtle); border-radius: 22px; padding: 22px; }
+.loading,
+.grid { display: grid; gap: 17px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.editorialCard { aspect-ratio: 3 / 4; background: var(--surface-soft); border: 1px solid var(--border-subtle); border-radius: 22px; min-height: 340px; overflow: hidden; position: relative; }
+.editorialCard > img { object-fit: cover; transition: transform 300ms ease; }
+.editorialCard:hover > img { transform: scale(1.025); }
+.scrim { background: linear-gradient(to top, rgb(5 8 20 / 0.92), transparent 60%); inset: 0; position: absolute; }
+.copy { bottom: 0; left: 0; padding: 20px; position: absolute; right: 0; }
+.copy p { color: #94ddff; font-size: 0.62rem; font-weight: 900; letter-spacing: 0.13em; margin: 0 0 8px; text-transform: uppercase; }
+.copy h2 { font-size: 1.35rem; margin: 0; }
+.copy span { color: rgb(255 255 255 / 0.68); display: block; font-size: 0.72rem; margin-top: 4px; }
+.copy a { border: 1px solid rgb(255 255 255 / 0.23); border-radius: 999px; display: inline-flex; font-size: 0.68rem; font-weight: 820; margin-top: 15px; padding: 8px 12px; text-decoration: none; }
+@media (max-width: 1050px) { .loading, .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .loading, .grid { grid-template-columns: 1fr; } .railSection { padding: 17px; } }
+@media (prefers-reduced-motion: reduce) { .editorialCard > img { transition: none; } }

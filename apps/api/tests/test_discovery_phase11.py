@@ -1,10 +1,12 @@
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 
 from app.accounts import service as accounts
 from app.creators import service as creators
 from app.discovery import service
+from app.main import app
 from app.models.content import AccessPolicy, ContentItem, ContentStatus, ContentType
 from app.models.creator import CreatorStatus
 from app.models.messaging import UserBlock
@@ -126,3 +128,27 @@ async def test_locked_post_is_a_safe_discovery_result(db_session):
     await social.publish(db_session, owner, post.id)
     items, _, _ = await service.search(db_session, viewer, query="phrase", entity_types={"post"})
     assert len(items) == 1 and items[0].locked and items[0].id == post.id
+
+
+@pytest.mark.asyncio
+async def test_discovery_route_parses_repeated_entity_type_query_values(db_session):
+    owner, profile = await creator(db_session, "route-filter@example.com")
+    post = await social.create_post(
+        db_session,
+        owner,
+        {"post_type": "text", "body": "route filter post", "access_policy": AccessPolicy.free},
+    )
+    await social.publish(db_session, owner, post.id)
+    await db_session.commit()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/api/v1/discovery/search",
+            params=[("types", "creator"), ("limit", "50")],
+        )
+
+    assert response.status_code == 200
+    assert {item["entity_type"] for item in response.json()["items"]} == {"creator"}
+    assert {item["id"] for item in response.json()["items"]} == {str(profile.id)}
