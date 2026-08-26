@@ -7,6 +7,9 @@ const apiUrl = process.env.E2E_API_URL ?? `http://127.0.0.1:${apiPort}`;
 const webUrl = process.env.E2E_WEB_URL ?? `http://127.0.0.1:${webPort}`;
 const mailpitUrl = process.env.E2E_MAILPIT_URL ?? `http://127.0.0.1:${process.env.E2E_MAILPIT_UI_PORT ?? "8025"}`;
 const mailpitSmtpPort = Number(process.env.E2E_MAILPIT_SMTP_PORT ?? process.env.FANBACKSTAGE_SMTP_PORT ?? "1025");
+const redisUrl =
+  process.env.FANBACKSTAGE_REDIS_URL ??
+  `redis://127.0.0.1:${process.env.FANBACKSTAGE_REDIS_PORT ?? "6379"}/1`;
 const notificationWebhookSecret =
   process.env.FANBACKSTAGE_NOTIFICATION_WEBHOOK_SECRET ??
   "fanbackstage-isolated-e2e-notification-webhook-secret";
@@ -48,6 +51,9 @@ const child = spawn("pnpm", ["exec", "playwright", "test", ...process.argv.slice
     E2E_WEB_PORT: webPort,
     E2E_API_URL: apiUrl,
     E2E_WEB_URL: webUrl,
+    // Playwright passes this broker to its API/worker webServer. Keep it in the
+    // test process too so subprocess release harnesses enqueue onto that worker.
+    FANBACKSTAGE_REDIS_URL: redisUrl,
     FANBACKSTAGE_NOTIFICATION_WEBHOOK_SECRET: notificationWebhookSecret,
   },
 });
