@@ -9,7 +9,7 @@ type Totals = Record<string, {
   available_amount_minor: number;
   reversed_amount_minor: number;
 }>;
-type Allocation = {
+export type Allocation = {
   id: string;
   revenue_type: string;
   currency: string;
@@ -17,6 +17,7 @@ type Allocation = {
   allocated_at: string;
   released_at: string | null;
   reversed_at: string | null;
+  availability_status: "pending" | "available" | "reversed";
 };
 type Link = {
   public_id: string;
@@ -26,6 +27,12 @@ type Link = {
   conversions: number;
 };
 type Dashboard = { totals_by_currency: Totals; allocations: Allocation[]; links: Link[] };
+
+export function referralAllocationStatus(allocation: Allocation) {
+  return ["pending", "available", "reversed"].includes(allocation.availability_status)
+    ? allocation.availability_status
+    : "pending";
+}
 
 export function ReferralDashboard({ heading = "Referral earnings" }: { heading?: string }) {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -54,9 +61,7 @@ export function ReferralDashboard({ heading = "Referral earnings" }: { heading?:
       </li>)}</ul>
       <h3>Allocation history</h3>
       <ul>{dashboard.allocations.map((allocation) => <li key={allocation.id}>
-        {allocation.revenue_type}: {allocation.amount_minor} {allocation.currency} — {
-          allocation.reversed_at ? "reversed" : allocation.released_at ? "available" : "pending"
-        }
+        {allocation.revenue_type}: {allocation.amount_minor} {allocation.currency} — {referralAllocationStatus(allocation)}
       </li>)}</ul>
     </>}
     {error && <p className="error">{error}</p>}

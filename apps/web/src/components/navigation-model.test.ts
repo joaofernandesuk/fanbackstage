@@ -22,6 +22,7 @@ describe("consumer navigation model", () => {
       "Creators",
       "Live",
       "Videos",
+      "Galleries",
       "Stories",
       "Marketplace",
       "Discover",
@@ -39,6 +40,7 @@ describe("consumer navigation model", () => {
       "Creators",
       "Live",
       "Videos",
+      "Galleries",
       "Marketplace",
     ]);
     expect(labels(accountNavigation(fan))).toEqual([

@@ -6,7 +6,16 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useId, useState } from "react";
 
 import { ApiError, api } from "../lib/api";
-import { AuthMode, authSuccessPath } from "../lib/auth-ui";
+import {
+  authEntryPath,
+  authErrorMessage,
+  authSuccessPath,
+  type AuthMode,
+  DEFAULT_LOGIN_DESTINATION,
+  DEFAULT_REGISTRATION_DESTINATION,
+  rememberRegistrationReturn,
+  safeAuthReturnPath,
+} from "../lib/auth-ui";
 import styles from "./auth-form.module.css";
 
 export function AuthForm({
@@ -24,38 +33,90 @@ export function AuthForm({
 }) {
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resendStatus, setResendStatus] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
   const router = useRouter();
   const formId = useId();
   const emailId = `${formId}-email`;
   const passwordId = `${formId}-password`;
+  const passwordHintId = `${formId}-password-hint`;
+  const adultConfirmationId = `${formId}-adult-confirmation`;
+  const errorId = `${formId}-error`;
   const titleId = `${formId}-title`;
   const isLogin = mode === "login";
+  const passwordDescription = [!isLogin ? passwordHintId : null, error ? errorId : null]
+    .filter(Boolean)
+    .join(" ") || undefined;
+  const returnPath = safeAuthReturnPath(
+    nextPath,
+    isLogin ? DEFAULT_LOGIN_DESTINATION : DEFAULT_REGISTRATION_DESTINATION,
+  );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setResendStatus("");
+    setUnverifiedEmail(null);
     setPending(true);
     const data = new FormData(event.currentTarget);
+    const submittedEmail = String(data.get("email") || "").trim();
     try {
       await api(`/auth/${mode}`, {
         method: "POST",
-        body: JSON.stringify({ email: data.get("email"), password: data.get("password") }),
+        body: JSON.stringify({
+          email: data.get("email"),
+          password: data.get("password"),
+          ...(!isLogin && data.get("adult_confirmed") === "true"
+            ? { adult_confirmed: true }
+            : {}),
+        }),
       });
-      const queryNext = typeof window === "undefined"
-        ? undefined
-        : new URLSearchParams(window.location.search).get("next");
-      const destination = authSuccessPath(mode, nextPath ?? queryNext);
+      if (!isLogin && typeof window !== "undefined") {
+        rememberRegistrationReturn(window.localStorage, returnPath);
+      }
+      const destination = authSuccessPath(mode, returnPath);
       if (onSuccess) onSuccess(destination);
       else {
         router.push(destination);
         router.refresh();
       }
     } catch (caught) {
-      const message = caught instanceof ApiError ? caught.message : "Unable to continue";
-      setError(typeof message === "string" ? message : "Please check the form fields and try again.");
+      if (
+        isLogin &&
+        caught instanceof ApiError &&
+        caught.status === 403 &&
+        caught.message === "Verify your email address before logging in."
+      ) {
+        setUnverifiedEmail(submittedEmail);
+      }
+      setError(caught instanceof ApiError
+        ? authErrorMessage(mode, caught.status, caught.message)
+        : "FanBackstage could not complete this request. Try again shortly.");
     } finally {
       setPending(false);
+    }
+  }
+
+  async function resendVerification() {
+    if (!unverifiedEmail) return;
+    setResending(true);
+    setResendStatus("");
+    try {
+      await api("/auth/resend-verification", {
+        method: "POST",
+        body: JSON.stringify({ email: unverifiedEmail }),
+      });
+      setResendStatus("If the account needs verification, a new link has been sent.");
+    } catch (caught) {
+      setResendStatus(
+        caught instanceof ApiError && caught.status === 429
+          ? "Too many attempts. Wait a moment, then try again."
+          : "The verification email could not be requested. Try again shortly.",
+      );
+    } finally {
+      setResending(false);
     }
   }
 
@@ -79,6 +140,8 @@ export function AuthForm({
             autoComplete="email"
             autoFocus={presentation === "dialog"}
             disabled={pending}
+            aria-describedby={error ? errorId : undefined}
+            aria-invalid={Boolean(error)}
             id={emailId}
             inputMode="email"
             name="email"
@@ -88,14 +151,16 @@ export function AuthForm({
             type="email"
           />
         </label>
-        <label htmlFor={passwordId}>
-          <span className={styles.passwordLabel}>
-            Password
+        <div className={styles.passwordControl}>
+          <div className={styles.passwordLabel}>
+            <label htmlFor={passwordId}>Password</label>
             {isLogin && <Link href="/forgot-password">Forgot password?</Link>}
-          </span>
-          <span className={styles.passwordField}>
+          </div>
+          <div className={styles.passwordField}>
             <input
               autoComplete={isLogin ? "current-password" : "new-password"}
+              aria-describedby={passwordDescription}
+              aria-invalid={Boolean(error)}
               disabled={pending}
               id={passwordId}
               minLength={12}
@@ -112,11 +177,40 @@ export function AuthForm({
             >
               {showPassword ? "Hide" : "Show"}
             </button>
-          </span>
-          {!isLogin && <small>Use at least 12 characters.</small>}
-        </label>
+          </div>
+          {!isLogin && <small id={passwordHintId}>Use at least 12 characters.</small>}
+        </div>
 
-        {error && <p className={styles.error} role="alert">{error}</p>}
+        {!isLogin && (
+          <label className={styles.adultConfirmation} htmlFor={adultConfirmationId}>
+            <input
+              aria-describedby={error ? errorId : undefined}
+              aria-invalid={Boolean(error)}
+              disabled={pending}
+              id={adultConfirmationId}
+              name="adult_confirmed"
+              required
+              type="checkbox"
+              value="true"
+            />
+            <span>I confirm I am at least 18 years old and agree to the Terms.</span>
+          </label>
+        )}
+
+        {error && <p className={styles.error} id={errorId} role="alert">{error}</p>}
+        {unverifiedEmail && (
+          <div className={styles.verificationHelp}>
+            <button
+              className={styles.textButton}
+              disabled={resending}
+              onClick={() => void resendVerification()}
+              type="button"
+            >
+              {resending ? "Requesting…" : "Resend verification email"}
+            </button>
+            {resendStatus && <p role="status">{resendStatus}</p>}
+          </div>
+        )}
 
         <button className={styles.submit} disabled={pending} type="submit">
           {pending ? "Please wait…" : isLogin ? "Log in" : "Create account"}
@@ -130,15 +224,11 @@ export function AuthForm({
             {isLogin ? "Join free" : "Log in"}
           </button>
         ) : (
-          <Link href={isLogin ? "/register" : "/login"}>{isLogin ? "Join free" : "Log in"}</Link>
+          <Link href={authEntryPath(isLogin ? "register" : "login", returnPath)}>
+            {isLogin ? "Join free" : "Log in"}
+          </Link>
         )}
       </p>
-
-      {!isLogin && (
-        <p className={styles.terms}>
-          By creating an account, you confirm that you are at least 18 and agree to follow FanBackstage’s platform rules.
-        </p>
-      )}
     </div>
   );
 

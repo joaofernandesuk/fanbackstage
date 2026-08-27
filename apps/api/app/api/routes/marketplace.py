@@ -3,11 +3,16 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException
 from sqlalchemy import select
 
-from app.api.deps import CurrentIdentity, Db
+from app.api.deps import CurrentIdentity, Db, OptionalIdentity
+from app.creators.service import (
+    current_adult_verification_predicate,
+    require_public_creator_access,
+)
 from app.groups.service import has_delegated_permission
 from app.marketplace import service
 from app.media.service import approved_creator
-from app.models.creator import CreatorProfile
+from app.models.content import ModerationStatus
+from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import GroupPermission
 from app.models.marketplace import (
     MarketplaceListing,
@@ -21,9 +26,11 @@ from app.schemas.marketplace import (
     MarketplaceCheckoutInput,
     MarketplaceDisputeResolutionInput,
     MarketplaceListingCreate,
+    MarketplaceListingMediaResponse,
     MarketplaceListingResponse,
     MarketplaceOrderReasonInput,
     MarketplaceOrderResponse,
+    MarketplaceSellerResponse,
     MarketplaceShipmentInput,
     MarketplaceShippingAddressResponse,
     MarketplaceTrackingEventResponse,
@@ -50,6 +57,32 @@ def listing_response(listing: MarketplaceListing) -> MarketplaceListingResponse:
         origin_country_code=listing.origin_country_code,
         shipping_charged_minor=listing.shipping_charged_minor,
     )
+
+
+async def public_listing_response(
+    db: Db, listing: MarketplaceListing
+) -> MarketplaceListingResponse:
+    result = listing_response(listing)
+    creator = await db.get(CreatorProfile, listing.owner_creator_id)
+    if creator and creator.username:
+        result.seller = MarketplaceSellerResponse(
+            creator_id=creator.id,
+            username=creator.username,
+            display_name=creator.display_name or creator.username,
+            avatar_reference=creator.avatar_reference,
+            verified=True,
+        )
+    result.media = [
+        MarketplaceListingMediaResponse(
+            derivative_id=derivative.id,
+            delivery_path=f"/media/previews/{derivative.id}",
+            position=link.position,
+            width=derivative.width,
+            height=derivative.height,
+        )
+        for link, derivative in await service.public_listing_media(db, listing)
+    ]
+    return result
 
 
 def order_response(order: MarketplaceOrder) -> MarketplaceOrderResponse:
@@ -146,28 +179,58 @@ async def submit_listing(
 
 @router.get("/listings", response_model=list[MarketplaceListingResponse])
 async def public_listings(
-    db: Db, creator_id: UUID | None = None
+    db: Db, identity: OptionalIdentity, creator_id: UUID | None = None
 ) -> list[MarketplaceListingResponse]:
-    query = select(MarketplaceListing).where(
-        MarketplaceListing.status == MarketplaceListingStatus.published
+    query = (
+        select(MarketplaceListing)
+        .join(CreatorProfile, CreatorProfile.id == MarketplaceListing.owner_creator_id)
+        .where(
+            MarketplaceListing.status == MarketplaceListingStatus.published,
+            MarketplaceListing.moderation_status == ModerationStatus.approved,
+            CreatorProfile.status == CreatorStatus.approved,
+            CreatorProfile.is_public.is_(True),
+            current_adult_verification_predicate(CreatorProfile.id),
+        )
     )
     if creator_id:
         query = query.where(MarketplaceListing.owner_creator_id == creator_id)
     rows = (await db.scalars(query.order_by(MarketplaceListing.published_at.desc()))).all()
-    return [listing_response(row) for row in rows]
+    viewer_id = identity[0].id if identity else None
+    visible: list[MarketplaceListingResponse] = []
+    for row in rows:
+        try:
+            await require_public_creator_access(db, row.owner_creator_id, viewer_id)
+        except ValueError:
+            continue
+        visible.append(await public_listing_response(db, row))
+    return visible
 
 
 @router.get("/listings/{public_id}", response_model=MarketplaceListingResponse)
-async def public_listing(public_id: str, db: Db) -> MarketplaceListingResponse:
+async def public_listing(
+    public_id: str, db: Db, identity: OptionalIdentity
+) -> MarketplaceListingResponse:
     listing = await db.scalar(
-        select(MarketplaceListing).where(
+        select(MarketplaceListing)
+        .join(CreatorProfile, CreatorProfile.id == MarketplaceListing.owner_creator_id)
+        .where(
             MarketplaceListing.public_id == public_id,
             MarketplaceListing.status == MarketplaceListingStatus.published,
+            MarketplaceListing.moderation_status == ModerationStatus.approved,
+            CreatorProfile.status == CreatorStatus.approved,
+            CreatorProfile.is_public.is_(True),
+            current_adult_verification_predicate(CreatorProfile.id),
         )
     )
     if not listing:
         raise HTTPException(status_code=404, detail="Marketplace listing not found")
-    return listing_response(listing)
+    try:
+        await require_public_creator_access(
+            db, listing.owner_creator_id, identity[0].id if identity else None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Marketplace listing not found") from exc
+    return await public_listing_response(db, listing)
 
 
 @router.post("/listings/{public_id}/report", response_model=dict)
@@ -492,6 +555,17 @@ async def checkout(
         )
         await db.commit()
         return order_response(order)
+    except service.MarketplaceTerminalPaymentError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "marketplace_payment_terminal",
+                "message": str(exc),
+                "order_id": str(exc.order_id),
+                "status": exc.order_status.value,
+            },
+        ) from exc
     except service.MarketplaceError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -47,6 +47,9 @@ class CreatorSelfResponse(BaseModel):
     languages: list[TaxonomyItem]
     categories: list[TaxonomyItem]
     social_links: list[SocialLinkInput]
+    available_languages: list[TaxonomyItem]
+    available_categories: list[TaxonomyItem]
+    development_verification_available: bool
 
 
 class PublicCreatorResponse(BaseModel):

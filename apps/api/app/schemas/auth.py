@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, EmailStr, Field, TypeAdapter, ValidationError
@@ -37,6 +37,19 @@ AccountEmail = Annotated[
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=12, max_length=128)
+    adult_confirmed: Literal[True]
+
+
+class AdultAccessAcknowledgeRequest(BaseModel):
+    adult_confirmed: Literal[True]
+
+
+class AdultAccessStatusResponse(BaseModel):
+    allowed: bool
+    assurance: Literal["none", "self_attested"]
+    source: Literal["none", "account", "cookie"]
+    policy_version: str
+    expires_at: datetime | None = None
 
 
 class LoginRequest(BaseModel):
@@ -52,6 +65,10 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
 
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
 class ResetPasswordRequest(TokenRequest):
     new_password: str = Field(min_length=12, max_length=128)
 
@@ -60,6 +77,7 @@ class UserResponse(BaseModel):
     id: UUID
     email: AccountEmail
     email_verified: bool
+    adult_attested: bool
     roles: list[str]
 
 

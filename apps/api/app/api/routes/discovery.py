@@ -4,7 +4,9 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
+from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
+from app.core.config import get_settings
 from app.core.rate_limit import enforce_discovery_rate_limit
 from app.discovery import service
 from app.featuring import service as featuring_service
@@ -36,6 +38,9 @@ async def search(
         items, next_cursor, version = await service.search(
             db,
             user,
+            adult_decision=adult_access.resolve_adult_access(
+                user, request.cookies.get(get_settings().adult_access_cookie_name)
+            ),
             query=q,
             entity_types=set(types or []) or None,
             cursor=cursor,
@@ -70,6 +75,9 @@ async def discover(
         items, next_cursor, version = await service.search(
             db,
             user,
+            adult_decision=adult_access.resolve_adult_access(
+                user, request.cookies.get(get_settings().adult_access_cookie_name)
+            ),
             query=None,
             cursor=cursor,
             limit=min(max(limit, 1), 50),

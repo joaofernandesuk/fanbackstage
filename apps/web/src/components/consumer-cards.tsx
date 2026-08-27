@@ -5,12 +5,15 @@ import Link from "next/link";
 import { MouseEvent, useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { authEntryPath } from "../lib/auth-ui";
+import { marketplaceListingMediaUrl } from "../lib/content-api";
 import { mediaForUsername } from "../lib/demo-personas";
 import {
   DiscoveryResult,
   MarketplaceListing,
   PublicSubscriptionOption,
   creatorUsernameFor,
+  formatDurationSeconds,
   formatMoney,
   previewUrl,
 } from "../lib/public-api";
@@ -86,7 +89,18 @@ export function CreatorCard({ item, verified = true }: { item: DiscoveryResult; 
           <button aria-pressed={following} className={styles.secondaryButton} disabled={working || gate.loading} onClick={toggleFollow} type="button">
             {working ? "Saving…" : following ? "Following" : gate.authenticated ? "Follow" : "Log in to follow"}
           </button>
-          <Link className={styles.primaryButton} href={href} onClick={(event) => event.stopPropagation()}>
+          <Link
+            aria-haspopup={!gate.authenticated ? "dialog" : undefined}
+            className={styles.primaryButton}
+            href={gate.authenticated ? href : authEntryPath("login", href)}
+            onNavigate={(event) => {
+              if (!gate.authenticated) {
+                event.preventDefault();
+                gate.requireLogin({ nextPath: href });
+              }
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
             Subscribe{option ? ` · ${formatMoney(option.effective_amount_minor, option.currency)}` : ""}
           </Link>
         </div>
@@ -99,30 +113,44 @@ export function CreatorCard({ item, verified = true }: { item: DiscoveryResult; 
 export function ContentCard({ item, compact = false }: { item: DiscoveryResult; compact?: boolean }) {
   const username = creatorUsernameFor(item);
   const localMedia = mediaForUsername(username);
-  const safePreview = previewUrl(item.preview_asset_id);
+  const adultConfirmationRequired = Boolean(
+    item.adult_access_required && !item.adult_access_granted,
+  );
+  const safePreview = adultConfirmationRequired ? undefined : previewUrl(item.preview_asset_id);
   const profileHref = username ? `/creator/${encodeURIComponent(username)}` : "/discover";
+  const detailHref = ["gallery", "video"].includes(item.entity_type)
+    ? `/content/${encodeURIComponent(item.id)}`
+    : profileHref;
   return (
     <article className={`${styles.contentCard} ${compact ? styles.compact : ""}`}>
-      <Link aria-label={`View ${item.title}`} className={styles.cardLink} href={profileHref} />
+      <Link aria-label={`View ${item.title}`} className={styles.cardLink} href={detailHref} />
       <div className={styles.contentMedia}>
         <SafePreviewMedia fallback={localMedia?.content} safePreview={safePreview} title={item.title} />
         <div className={styles.topBadges}>
           {item.sponsored && <span aria-label="Sponsored placement" className={styles.sponsored}>Sponsored</span>}
           <AccessBadge locked={item.locked} policy={item.access_policy} />
+          {adultConfirmationRequired && <span className={styles.adultBadge}>18+ confirmation required</span>}
         </div>
         {item.entity_type === "video" && <span aria-hidden="true" className={styles.play}>▶</span>}
+        {item.entity_type === "gallery" && item.gallery_image_count != null && (
+          <span className={styles.mediaFact}>{item.gallery_image_count} photo{item.gallery_image_count === 1 ? "" : "s"}</span>
+        )}
+        {item.entity_type === "video" && formatDurationSeconds(item.video_duration_seconds) && (
+          <span className={styles.mediaFact}>{formatDurationSeconds(item.video_duration_seconds)}</span>
+        )}
         {item.locked && <span className={styles.locked}>Private preview</span>}
       </div>
       <div className={styles.contentBody}>
-        <div className={styles.contentIdentity}>
+        <Link className={styles.contentIdentity} href={profileHref}>
           <CreatorAvatar displayName={item.subtitle ?? item.title} size={34} username={username} />
           <p>{item.subtitle ?? (username ? `@${username}` : "Creator")}</p>
-        </div>
+        </Link>
         <h3>{item.title}</h3>
         {item.description && !compact && <p className={styles.description}>{item.description}</p>}
         {item.price_amount_minor != null && item.currency && (
           <strong className={styles.price}>{formatMoney(item.price_amount_minor, item.currency)}</strong>
         )}
+        <span className={styles.contentCta}>{adultConfirmationRequired ? "Confirm 18+ to continue" : item.locked ? "Preview and unlock" : `Open ${item.entity_type}`}</span>
       </div>
     </article>
   );
@@ -182,29 +210,28 @@ function SafePreviewMedia({ safePreview, fallback, title }: { safePreview?: stri
 
 export function MarketplaceCard({
   listing,
-  creator,
   sponsored = false,
 }: {
   listing: MarketplaceListing;
-  creator?: DiscoveryResult;
   sponsored?: boolean;
 }) {
-  const username = creator ? creatorUsernameFor(creator) : undefined;
-  const media = mediaForUsername(username);
+  const seller = listing.seller ?? null;
+  const username = seller?.username;
+  const mediaUrl = marketplaceListingMediaUrl(listing.media);
   const soldOut = listing.quantity_available === 0 || listing.status === "sold_out";
   return (
     <article className={styles.marketCard}>
       <Link aria-label={`View ${listing.title}`} className={styles.cardLink} href={`/marketplace/${encodeURIComponent(listing.public_id)}`} />
       <div className={styles.marketMedia}>
-        {media ? <Image alt="" fill sizes="(max-width: 700px) 76vw, 320px" src={media.content} /> : <span className={styles.mediaFallback} />}
+        {mediaUrl ? <img alt={`${listing.title} listing preview`} src={mediaUrl} /> : <span className={styles.mediaFallback} />}
         <span className={styles.marketCategory}>{listing.category.replaceAll("_", " ")}</span>
         {sponsored && <span aria-label="Sponsored placement" className={styles.marketSponsored}>Sponsored</span>}
         {soldOut && <span className={styles.soldOut}>Sold out</span>}
       </div>
       <div className={styles.marketBody}>
         <div className={styles.sellerRow}>
-          <CreatorAvatar displayName={creator?.title ?? "Creator"} size={30} username={username} />
-          <span>{creator?.title ?? "FanBackstage creator"}</span>
+          <CreatorAvatar displayName={seller?.display_name ?? "Creator"} size={30} />
+          <span>{seller?.display_name ?? "FanBackstage creator"}</span>
         </div>
         <h3>{listing.title}</h3>
         <div className={styles.priceRow}>
@@ -218,11 +245,10 @@ export function MarketplaceCard({
 
 export function MarketplaceDiscoveryCard({ item }: { item: DiscoveryResult }) {
   const username = creatorUsernameFor(item);
-  const media = mediaForUsername(username);
   return (
     <article className={styles.marketCard}>
       <div className={styles.marketMedia}>
-        {media ? <Image alt="" fill sizes="(max-width: 700px) 76vw, 320px" src={media.content} /> : <span className={styles.mediaFallback} />}
+        <span className={styles.mediaFallback} />
         <span className={styles.marketCategory}>Creator marketplace</span>
         {item.sponsored && <span aria-label="Sponsored placement" className={styles.marketSponsored}>Sponsored</span>}
         <span className={styles.soldOut}>{item.availability === "sold_out" ? "Sold out" : "Details unavailable"}</span>

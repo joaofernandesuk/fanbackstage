@@ -5,24 +5,29 @@ from calendar import monthrange
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
 from app.core.config import get_settings
+from app.creators.service import require_public_creator_access
 from app.finance.service import (
     _account,
     commission_amount,
     currency_code,
+    lock_payment_idempotency,
     post_entries,
     ppv_commission,
 )
 from app.models.content import ContentEntitlement
 from app.models.finance import (
+    ExcessCaptureSource,
     LedgerAccountKind,
     LedgerDirection,
     LedgerTransactionType,
     PaymentAttempt,
+    PaymentStatus,
 )
 from app.models.identity import User
 from app.models.subscription import (
@@ -178,12 +183,23 @@ async def create_subscription(
     db: AsyncSession, buyer: User, creator_id: UUID, duration_value: str, idempotency_key: str
 ) -> Subscription:
     duration = SubscriptionDuration(duration_value)
-    if not idempotency_key:
+    if not idempotency_key or len(idempotency_key) > 128:
         raise SubscriptionError("A valid Idempotency-Key is required")
+    existing_attempt = await lock_payment_idempotency(db, buyer.id, idempotency_key)
     existing = await db.scalar(
         select(Subscription)
         .join(SubscriptionPeriod)
-        .join(PaymentAttempt)
+        .outerjoin(
+            SubscriptionRenewalAttempt,
+            SubscriptionRenewalAttempt.subscription_period_id == SubscriptionPeriod.id,
+        )
+        .join(
+            PaymentAttempt,
+            or_(
+                PaymentAttempt.id == SubscriptionPeriod.payment_attempt_id,
+                PaymentAttempt.id == SubscriptionRenewalAttempt.payment_attempt_id,
+            ),
+        )
         .where(
             PaymentAttempt.buyer_user_id == buyer.id,
             PaymentAttempt.idempotency_key == idempotency_key,
@@ -191,6 +207,12 @@ async def create_subscription(
     )
     if existing:
         return existing
+    if existing_attempt is not None:
+        raise SubscriptionError("Idempotency-Key is already used by another payment command")
+    try:
+        require_current_self_attestation(buyer)
+    except PermissionError as exc:
+        raise SubscriptionError("Current adult self-attestation is required") from exc
     active = await db.scalar(
         select(Subscription)
         .where(
@@ -207,11 +229,76 @@ async def create_subscription(
         )
         .with_for_update()
     )
+    retry_period = None
     if active:
-        raise SubscriptionError("An existing subscription must be managed instead")
+        if (
+            active.status is SubscriptionStatus.payment_failed
+            and active.current_period_end is None
+            and active.duration is duration
+        ):
+            retry_period = await db.scalar(
+                select(SubscriptionPeriod)
+                .where(
+                    SubscriptionPeriod.subscription_id == active.id,
+                    SubscriptionPeriod.sequence == 1,
+                    SubscriptionPeriod.status == SubscriptionPeriodStatus.failed,
+                )
+                .with_for_update()
+            )
+        if retry_period is None:
+            raise SubscriptionError("An existing subscription must be managed instead")
     plan = await plan_for_creator(db, creator_id)
     if not plan or not plan.enabled:
         raise SubscriptionError("Subscriptions are unavailable")
+    try:
+        creator = await require_public_creator_access(db, creator_id, buyer.id)
+    except ValueError as exc:
+        raise SubscriptionError("Subscriptions are unavailable") from exc
+    if creator.user_id == buyer.id:
+        raise SubscriptionError("Creators cannot subscribe to themselves")
+    if retry_period is not None:
+        attempt = PaymentAttempt(
+            buyer_user_id=buyer.id,
+            provider=get_settings().payment_provider,
+            provider_reference=f"devsub_{secrets.token_urlsafe(18)}",
+            amount_minor=retry_period.charged_amount_minor,
+            currency=retry_period.currency,
+            idempotency_key=idempotency_key,
+        )
+        db.add(attempt)
+        await db.flush()
+        attempt_number = (
+            int(
+                await db.scalar(
+                    select(
+                        func.coalesce(func.max(SubscriptionRenewalAttempt.attempt_number), 0)
+                    ).where(SubscriptionRenewalAttempt.subscription_period_id == retry_period.id)
+                )
+                or 0
+            )
+            + 1
+        )
+        db.add(
+            SubscriptionRenewalAttempt(
+                subscription_period_id=retry_period.id,
+                payment_attempt_id=attempt.id,
+                attempt_number=attempt_number,
+                next_retry_at=None,
+            )
+        )
+        retry_period.payment_attempt_id = attempt.id
+        retry_period.status = SubscriptionPeriodStatus.pending
+        active.status = SubscriptionStatus.pending
+        await record_event(
+            db,
+            "subscription.initial_payment_retried",
+            actor_user_id=buyer.id,
+            target_type="subscription",
+            target_id=str(active.id),
+            metadata={"attempt_number": attempt_number},
+        )
+        await db.flush()
+        return active
     price = await db.scalar(
         select(SubscriptionPlanPrice).where(
             SubscriptionPlanPrice.plan_id == plan.id,
@@ -265,6 +352,15 @@ async def create_subscription(
     )
     db.add(period)
     await db.flush()
+    db.add(
+        SubscriptionRenewalAttempt(
+            subscription_period_id=period.id,
+            payment_attempt_id=attempt.id,
+            attempt_number=1,
+            next_retry_at=None,
+        )
+    )
+    await db.flush()
     return subscription
 
 
@@ -287,6 +383,21 @@ async def settle_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> S
         select(Subscription).where(Subscription.id == period.subscription_id).with_for_update()
     )
     assert subscription
+    if attempt.status is not PaymentStatus.succeeded:
+        return None
+    # A retry deliberately rotates the authoritative pointer. A provider success
+    # for any older attempt is therefore a real excess capture, never authority
+    # to settle or mutate the current period.
+    if period.payment_attempt_id != attempt.id:
+        from app.finance.service import record_excess_capture
+
+        await record_excess_capture(
+            db,
+            attempt,
+            source_type=ExcessCaptureSource.subscription_period,
+            source_reference=period.id,
+        )
+        return None
     if period.status is SubscriptionPeriodStatus.active:
         return subscription
     clearing = await _account(db, LedgerAccountKind.platform_clearing, period.currency)
@@ -435,6 +546,8 @@ async def fail_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> Sub
     )
     if not period:
         return None
+    if period.payment_attempt_id != attempt.id:
+        return None
     subscription = await db.scalar(
         select(Subscription).where(Subscription.id == period.subscription_id).with_for_update()
     )
@@ -531,6 +644,29 @@ async def finalize_expired_subscriptions(db: AsyncSession) -> int:
     return len(rows)
 
 
+async def _suppress_renewal(
+    db: AsyncSession,
+    subscription: Subscription,
+    *,
+    reason: str,
+    now: datetime,
+) -> None:
+    """Stop future charges without rewriting or revoking the accepted term."""
+    if not subscription.auto_renew and subscription.cancel_at_period_end:
+        return
+    subscription.auto_renew = False
+    subscription.cancel_at_period_end = True
+    subscription.cancelled_at = subscription.cancelled_at or now
+    await record_event(
+        db,
+        "subscription.renewal_suppressed",
+        actor_user_id=subscription.subscriber_user_id,
+        target_type="subscription",
+        target_id=str(subscription.id),
+        metadata={"reason": reason},
+    )
+
+
 async def renew_due_subscriptions(db: AsyncSession) -> int:
     now = datetime.now(UTC)
     due = (
@@ -558,6 +694,28 @@ async def renew_due_subscriptions(db: AsyncSession) -> int:
         buyer = await db.get(User, subscription.subscriber_user_id)
         if not plan or not plan.enabled or not price or not buyer:
             subscription.status, subscription.auto_renew = SubscriptionStatus.expired, False
+            continue
+        try:
+            require_current_self_attestation(buyer)
+        except PermissionError:
+            await _suppress_renewal(
+                db,
+                subscription,
+                reason="subscriber_adult_attestation_not_current",
+                now=now,
+            )
+            continue
+        try:
+            await require_public_creator_access(
+                db, subscription.creator_id, subscription.subscriber_user_id
+            )
+        except ValueError:
+            await _suppress_renewal(
+                db,
+                subscription,
+                reason="creator_or_relationship_not_publicly_eligible",
+                now=now,
+            )
             continue
         sequence = (
             int(
@@ -664,6 +822,32 @@ async def retry_failed_subscription_renewals(db: AsyncSession) -> int:
             continue
         subscription = await db.get(Subscription, period.subscription_id)
         assert subscription
+        buyer = await db.get(User, subscription.subscriber_user_id)
+        if not buyer:
+            subscription.auto_renew = False
+            continue
+        try:
+            require_current_self_attestation(buyer)
+        except PermissionError:
+            await _suppress_renewal(
+                db,
+                subscription,
+                reason="subscriber_adult_attestation_not_current",
+                now=now,
+            )
+            continue
+        try:
+            await require_public_creator_access(
+                db, subscription.creator_id, subscription.subscriber_user_id
+            )
+        except ValueError:
+            await _suppress_renewal(
+                db,
+                subscription,
+                reason="creator_or_relationship_not_publicly_eligible",
+                now=now,
+            )
+            continue
         attempt = PaymentAttempt(
             buyer_user_id=subscription.subscriber_user_id,
             provider=settings.payment_provider,
@@ -682,6 +866,7 @@ async def retry_failed_subscription_renewals(db: AsyncSession) -> int:
                 next_retry_at=now + timedelta(seconds=settings.subscription_renewal_retry_seconds),
             )
         )
+        period.payment_attempt_id = attempt.id
         period.status = SubscriptionPeriodStatus.pending
         created += 1
     return created

@@ -5,13 +5,20 @@ from app.media import storage
 from app.seed.demo import _assert_development
 
 
-def test_production_rejects_local_dependencies_and_demo_seed():
-    with pytest.raises(RuntimeError, match="development KYC"):
+def test_production_rejects_unimplemented_payment_provider():
+    with pytest.raises(RuntimeError, match="PAYMENT_PROVIDER is not implemented"):
         Settings(
             environment="production",
             session_secret="safe",
             cookie_secure=True,
             web_origin="https://fanbackstage.com",
+            payment_provider="provider",
+            notification_webhook_secret="safe",
+            livekit_api_secret="safe",
+            smtp_host="smtp.example.com",
+            storage_endpoint_url="https://storage.example.com",
+            storage_access_key="safe",
+            storage_secret_key="safe",
         ).validate_production()
 
 
@@ -22,7 +29,6 @@ def test_production_rejects_enabled_demo_seed():
             session_secret="safe",
             cookie_secure=True,
             web_origin="https://fanbackstage.com",
-            kyc_provider="provider",
             payment_provider="provider",
             notification_webhook_secret="safe",
             livekit_api_secret="safe",
@@ -32,6 +38,24 @@ def test_production_rejects_enabled_demo_seed():
             storage_secret_key="safe",
             demo_seed_enabled=True,
         ).validate_production()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("age_assurance_provider", "fictional-provider", "AGE_ASSURANCE_PROVIDER"),
+        ("kyc_provider", "fictional-provider", "KYC_PROVIDER"),
+        ("payment_provider", "fictional-provider", "PAYMENT_PROVIDER"),
+    ],
+)
+def test_unimplemented_identity_providers_are_rejected(field, value, message):
+    with pytest.raises(RuntimeError, match=message):
+        Settings(environment="test", **{field: value}).validate_production()
+
+
+def test_development_kyc_http_opt_in_is_forbidden_outside_dev_and_test():
+    with pytest.raises(RuntimeError, match="limited to development and test"):
+        Settings(environment="staging", development_kyc_http_enabled=True).validate_production()
 
 
 def test_demo_seed_guard_refuses_when_not_explicitly_enabled(monkeypatch):

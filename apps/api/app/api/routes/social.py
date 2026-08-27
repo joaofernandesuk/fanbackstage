@@ -286,6 +286,10 @@ async def detail(post_id: UUID, identity: OptionalIdentity, db: Db):
     post = await db.get(FeedPost, post_id)
     if not post or post.status is not FeedPostStatus.published:
         raise HTTPException(404, "Post not found")
+    try:
+        await service.public_creator(db, post.creator_id)
+    except PermissionError as exc:
+        raise HTTPException(404, "Post not found") from exc
     return await post_response(db, post, identity[0] if identity else None)
 
 

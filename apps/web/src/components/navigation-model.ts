@@ -28,6 +28,7 @@ export const publicNavigation: readonly NavigationItem[] = [
   { label: "Creators", href: "/creators", icon: "creators" },
   { label: "Live", href: "/live", icon: "live" },
   { label: "Videos", href: "/videos", icon: "videos" },
+  { label: "Galleries", href: "/galleries", icon: "discover" },
   { label: "Stories", href: "/stories", icon: "discover" },
   { label: "Marketplace", href: "/marketplace", icon: "marketplace" },
   { label: "Discover", href: "/discover", icon: "discover" },
@@ -39,6 +40,7 @@ export const authenticatedNavigation: readonly NavigationItem[] = [
   { label: "Creators", href: "/creators", icon: "creators" },
   { label: "Live", href: "/live", icon: "live" },
   { label: "Videos", href: "/videos", icon: "videos" },
+  { label: "Galleries", href: "/galleries", icon: "discover" },
   { label: "Marketplace", href: "/marketplace", icon: "marketplace" },
 ];
 

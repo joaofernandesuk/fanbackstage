@@ -6,22 +6,39 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
+from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
 from app.core.config import get_settings
+from app.creators.service import require_public_creator_access
 from app.finance.service import (
     _account,
     commission_amount,
     commission_for,
     creator_revenue_allocation,
     currency_code,
+    lock_payment_idempotency,
     post_entries,
 )
-from app.models.content import ModerationStatus
+from app.models.audit import AuditEvent
+from app.models.content import (
+    DerivativeType,
+    Gallery,
+    GalleryItem,
+    MediaAsset,
+    MediaAudience,
+    MediaDerivative,
+    MediaStatus,
+    ModerationStatus,
+    VideoContent,
+)
 from app.models.creator import CreatorProfile
 from app.models.finance import (
+    ExcessCaptureSource,
+    LedgerAccount,
     LedgerAccountKind,
     LedgerDirection,
     LedgerEntry,
@@ -51,6 +68,80 @@ from app.notifications.service import emit_transactional
 
 class MarketplaceError(ValueError):
     pass
+
+
+class MarketplaceTerminalPaymentError(MarketplaceError):
+    """The canonical idempotent order reached a terminal payment failure."""
+
+    def __init__(self, order: MarketplaceOrder):
+        super().__init__("Marketplace order payment failed; retry with a new Idempotency-Key")
+        self.order_id = order.id
+        self.order_status = order.status
+
+
+def listing_media_exclusivity_predicates(
+    asset_id: ColumnElement[UUID],
+) -> tuple[ColumnElement[bool], ...]:
+    """Fail closed when marketplace media is also attached to another domain.
+
+    Public marketplace display derivatives are intentionally acquisition-safe.
+    Reusing a content, Story, feed, or message asset would let a public listing
+    become an alternate delivery path around that domain's access policy.
+    """
+    from app.models.messaging import MessageAttachment
+    from app.models.social import FeedPostMedia
+    from app.models.story import Story
+
+    return (
+        ~exists(select(GalleryItem.id).where(GalleryItem.media_asset_id == asset_id)),
+        ~exists(select(Gallery.id).where(Gallery.cover_media_asset_id == asset_id)),
+        ~exists(select(VideoContent.id).where(VideoContent.source_media_asset_id == asset_id)),
+        ~exists(select(Story.id).where(Story.media_asset_id == asset_id)),
+        ~exists(select(FeedPostMedia.id).where(FeedPostMedia.media_asset_id == asset_id)),
+        ~exists(select(MessageAttachment.id).where(MessageAttachment.media_asset_id == asset_id)),
+    )
+
+
+async def listing_media_is_public_exclusive(db: AsyncSession, asset_id: UUID) -> bool:
+    """Return whether an asset is dedicated to marketplace public display."""
+    return bool(
+        await db.scalar(
+            select(MediaAsset.id).where(
+                MediaAsset.id == asset_id,
+                *listing_media_exclusivity_predicates(MediaAsset.id),
+            )
+        )
+    )
+
+
+async def public_listing_media(
+    db: AsyncSession, listing: MarketplaceListing
+) -> list[tuple[MarketplaceListingMedia, MediaDerivative]]:
+    """Return only safe, approved display derivatives for a public listing."""
+
+    if (
+        listing.status is not MarketplaceListingStatus.published
+        or listing.moderation_status is not ModerationStatus.approved
+    ):
+        return []
+    rows = await db.execute(
+        select(MarketplaceListingMedia, MediaDerivative)
+        .join(MediaAsset, MediaAsset.id == MarketplaceListingMedia.media_asset_id)
+        .join(MediaDerivative, MediaDerivative.media_asset_id == MediaAsset.id)
+        .where(
+            MarketplaceListingMedia.listing_id == listing.id,
+            MediaAsset.owner_creator_id == listing.owner_creator_id,
+            MediaAsset.status == MediaStatus.ready,
+            MediaAsset.deleted_at.is_(None),
+            MediaAsset.moderation_status == ModerationStatus.approved,
+            MediaAsset.audience == MediaAudience.safe_public,
+            *listing_media_exclusivity_predicates(MediaAsset.id),
+            MediaDerivative.derivative_type == DerivativeType.display,
+            MediaDerivative.status == MediaStatus.ready,
+        )
+        .order_by(MarketplaceListingMedia.position, MediaDerivative.created_at)
+    )
+    return list(rows.all())
 
 
 async def seller_risk_profile(db: AsyncSession, creator_id: UUID) -> MarketplaceSellerRiskProfile:
@@ -257,18 +348,29 @@ async def create_listing(
         raise MarketplaceError("Listing condition or shipping mode is invalid") from exc
     assets = []
     if media_asset_ids:
-        assets = (
-            await db.scalars(
-                select(MediaAsset).where(
-                    MediaAsset.id.in_(media_asset_ids),
-                    MediaAsset.owner_creator_id == creator_id,
-                    MediaAsset.status == MediaStatus.ready,
-                    MediaAsset.moderation_status == ModerationStatus.approved,
-                )
+        asset_result = await db.scalars(
+            select(MediaAsset)
+            .join(
+                MediaDerivative,
+                MediaDerivative.media_asset_id == MediaAsset.id,
             )
-        ).all()
+            .where(
+                MediaAsset.id.in_(media_asset_ids),
+                MediaAsset.owner_creator_id == creator_id,
+                MediaAsset.status == MediaStatus.ready,
+                MediaAsset.deleted_at.is_(None),
+                MediaAsset.moderation_status == ModerationStatus.approved,
+                MediaAsset.audience == MediaAudience.safe_public,
+                MediaDerivative.derivative_type == DerivativeType.display,
+                MediaDerivative.status == MediaStatus.ready,
+                *listing_media_exclusivity_predicates(MediaAsset.id),
+            )
+        )
+        assets = asset_result.unique().all()
         if len(assets) != len(media_asset_ids):
-            raise MarketplaceError("Listing media must be approved creator-owned media")
+            raise MarketplaceError(
+                "Listing media must be approved, safe-public, creator-owned, and dedicated to marketplace display"
+            )
     listing = MarketplaceListing(
         public_id=f"ml_{secrets.token_urlsafe(12)}",
         owner_creator_id=creator_id,
@@ -572,40 +674,42 @@ async def initiate_order(
         raise MarketplaceError("A valid Idempotency-Key is required")
     if quantity <= 0:
         raise MarketplaceError("Quantity must be positive")
-    listing = await db.scalar(
-        select(MarketplaceListing).where(MarketplaceListing.id == listing_id).with_for_update()
-    )
-    if not listing or listing.status is not MarketplaceListingStatus.published:
-        raise MarketplaceError("Marketplace listing is not available")
-    if (await seller_risk_profile(db, listing.owner_creator_id)).marketplace_suspended:
-        raise MarketplaceError("Marketplace listing is not available")
-    if listing.moderation_status is not ModerationStatus.approved:
-        raise MarketplaceError("Marketplace listing is not approved")
-    if listing.quantity_available < quantity:
-        raise MarketplaceError("Marketplace listing is sold out")
-    seller = await db.scalar(
-        select(CreatorProfile).where(CreatorProfile.id == listing.owner_creator_id)
-    )
-    if not seller:
-        raise MarketplaceError("Marketplace listing owner is unavailable")
-    if await db.scalar(
+    existing_attempt = await lock_payment_idempotency(db, buyer.id, idempotency_key)
+    existing = await db.scalar(
         select(MarketplaceOrder)
         .join(PaymentAttempt)
         .where(
             PaymentAttempt.buyer_user_id == buyer.id,
             PaymentAttempt.idempotency_key == idempotency_key,
         )
-    ):
-        return await db.scalar(
-            select(MarketplaceOrder)
-            .join(PaymentAttempt)
-            .where(
-                PaymentAttempt.buyer_user_id == buyer.id,
-                PaymentAttempt.idempotency_key == idempotency_key,
-            )
-        )  # type: ignore[return-value]
+    )
+    if existing:
+        if existing.status is MarketplaceOrderStatus.cancelled:
+            raise MarketplaceTerminalPaymentError(existing)
+        return existing
+    if existing_attempt is not None:
+        raise MarketplaceError("Idempotency-Key is already used by another payment command")
+    listing = await db.scalar(
+        select(MarketplaceListing).where(MarketplaceListing.id == listing_id).with_for_update()
+    )
+    if not listing or listing.status is not MarketplaceListingStatus.published:
+        raise MarketplaceError("Marketplace listing is not available")
+    try:
+        seller = await require_public_creator_access(db, listing.owner_creator_id, buyer.id)
+    except ValueError as exc:
+        raise MarketplaceError("Marketplace listing is not available") from exc
     if seller.user_id == buyer.id:
         raise MarketplaceError("Creators cannot purchase their own listing")
+    try:
+        require_current_self_attestation(buyer)
+    except PermissionError as exc:
+        raise MarketplaceError("Current adult self-attestation is required") from exc
+    if (await seller_risk_profile(db, listing.owner_creator_id)).marketplace_suspended:
+        raise MarketplaceError("Marketplace listing is not available")
+    if listing.moderation_status is not ModerationStatus.approved:
+        raise MarketplaceError("Marketplace listing is not approved")
+    if listing.quantity_available < quantity:
+        raise MarketplaceError("Marketplace listing is sold out")
     currency = currency_code(listing.currency)
     allowance = await shipping_allowance_for(
         db, destination_country_code, currency, destination_region_code
@@ -693,28 +797,6 @@ async def initiate_order(
             "commissionable_base_minor": str(order.commissionable_base_minor),
         },
     )
-    seller = await db.get(CreatorProfile, order.seller_creator_id)
-    if seller:
-        await emit_transactional(
-            db,
-            recipient_user_id=order.buyer_user_id,
-            notification_type="MARKETPLACE_ORDER_PLACED",
-            source_domain="marketplace",
-            source_id=str(order.id),
-            title="Order confirmed",
-            body=f"Your order total is {order.total_paid_minor} {order.currency}.",
-            target_path="/marketplace/orders",
-        )
-        await emit_transactional(
-            db,
-            recipient_user_id=seller.user_id,
-            notification_type="MARKETPLACE_ORDER_PLACED",
-            source_domain="marketplace",
-            source_id=f"seller:{order.id}",
-            title="You have a new paid order",
-            body="Open FanBackstage to fulfil the order.",
-            target_path="/marketplace/orders",
-        )
     return order
 
 
@@ -763,11 +845,7 @@ async def release_order_reservation(
     db: AsyncSession, order_id: UUID, reason: str
 ) -> MarketplaceOrder:
     """Restore reserved stock once for an unconfirmed marketplace payment."""
-    order = await db.scalar(
-        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
-    )
-    if not order:
-        raise MarketplaceError("Marketplace order not found")
+    order, attempt = await _lock_order_payment_attempt(db, order_id)
     if order.status is not MarketplaceOrderStatus.awaiting_payment:
         return order
     listing = await db.scalar(
@@ -779,8 +857,7 @@ async def release_order_reservation(
         raise MarketplaceError("Marketplace listing is unavailable")
     listing.quantity_available += order.quantity
     order.status = MarketplaceOrderStatus.cancelled
-    attempt = await db.get(PaymentAttempt, order.payment_attempt_id)
-    if attempt and attempt.status is PaymentStatus.pending:
+    if attempt.status is PaymentStatus.pending:
         attempt.status = PaymentStatus.failed
     await record_event(
         db,
@@ -805,22 +882,21 @@ async def release_order_reservation(
 
 async def expire_marketplace_reservations(db: AsyncSession, limit: int = 100) -> int:
     """Durably cancel expired unconfirmed orders and restore stock under row locks."""
-    rows = (
+    order_ids = (
         await db.scalars(
-            select(MarketplaceOrder)
+            select(MarketplaceOrder.id)
             .where(
                 MarketplaceOrder.status == MarketplaceOrderStatus.awaiting_payment,
                 MarketplaceOrder.reservation_expires_at <= datetime.now(UTC),
             )
             .order_by(MarketplaceOrder.reservation_expires_at)
             .limit(limit)
-            .with_for_update(skip_locked=True)
         )
     ).all()
     released = 0
-    for order in rows:
+    for order_id in order_ids:
         if (
-            await release_order_reservation(db, order.id, "payment_reservation_expired")
+            await release_order_reservation(db, order_id, "payment_reservation_expired")
         ).status is (MarketplaceOrderStatus.cancelled):
             released += 1
     return released
@@ -907,6 +983,55 @@ async def settle_order(db: AsyncSession, order: MarketplaceOrder) -> Marketplace
         target_id=str(order.id),
         metadata={"ledger_transaction_id": str(ledger.id)},
     )
+    seller = await db.get(CreatorProfile, order.seller_creator_id)
+    if seller:
+        await emit_transactional(
+            db,
+            recipient_user_id=order.buyer_user_id,
+            notification_type="MARKETPLACE_ORDER_PLACED",
+            source_domain="marketplace",
+            source_id=str(order.id),
+            title="Order confirmed",
+            body=f"Your paid order total is {order.total_paid_minor} {order.currency}.",
+            target_path="/marketplace/orders",
+        )
+        await emit_transactional(
+            db,
+            recipient_user_id=seller.user_id,
+            notification_type="MARKETPLACE_ORDER_PLACED",
+            source_domain="marketplace",
+            source_id=f"seller:{order.id}",
+            title="You have a new paid order",
+            body="Open FanBackstage to fulfil the order.",
+            target_path="/marketplace/orders",
+        )
+    return order
+
+
+async def settle_or_contain_payment_attempt(
+    db: AsyncSession, attempt: PaymentAttempt
+) -> MarketplaceOrder | None:
+    """Settle a live reservation or freeze a capture after stock was restored."""
+    order = await db.scalar(
+        select(MarketplaceOrder)
+        .where(MarketplaceOrder.payment_attempt_id == attempt.id)
+        .with_for_update()
+    )
+    if order is None:
+        return None
+    if attempt.status is not PaymentStatus.succeeded:
+        return order
+    if order.status is MarketplaceOrderStatus.awaiting_payment:
+        return await settle_order(db, order)
+    if order.status is MarketplaceOrderStatus.cancelled:
+        from app.finance.service import record_excess_capture
+
+        await record_excess_capture(
+            db,
+            attempt,
+            source_type=ExcessCaptureSource.marketplace_order,
+            source_reference=order.id,
+        )
     return order
 
 
@@ -1164,6 +1289,202 @@ async def _account_balance(db: AsyncSession, account_id: UUID) -> int:
     return int(value or 0)
 
 
+async def _marketplace_dispute_ledger_state(
+    db: AsyncSession, order: MarketplaceOrder
+) -> tuple[LedgerTransaction, LedgerTransaction | None, LedgerTransaction | None, int]:
+    """Lock one order's settlement/release chain and return its active hold.
+
+    Callers already hold the payment attempt and order, preserving the shared
+    provider/admin lock order before ledger rows and their accounts are locked.
+    A release, temporary hold, and seller-favour restoration remain separate
+    immutable transactions linked through ``reversal_of_transaction_id``.
+    """
+    if not order.ledger_transaction_id:
+        raise MarketplaceError("Order settlement ledger is missing")
+    original = await db.scalar(
+        select(LedgerTransaction)
+        .where(LedgerTransaction.id == order.ledger_transaction_id)
+        .with_for_update()
+    )
+    if original is None:
+        raise MarketplaceError("Order settlement ledger is missing")
+    release = await db.scalar(
+        select(LedgerTransaction)
+        .where(LedgerTransaction.idempotency_key == f"marketplace-release:{order.id}")
+        .with_for_update()
+    )
+    holds = (
+        await db.scalars(
+            select(LedgerTransaction)
+            .where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.payment_dispute_hold,
+                LedgerTransaction.metadata_json["marketplace_order_id"].astext == str(order.id),
+            )
+            .order_by(LedgerTransaction.created_at, LedgerTransaction.id)
+            .with_for_update()
+        )
+    ).all()
+    restored_hold_ids: set[UUID] = set()
+    if holds:
+        restored_hold_ids = set(
+            await db.scalars(
+                select(LedgerTransaction.reversal_of_transaction_id)
+                .where(
+                    LedgerTransaction.transaction_type == LedgerTransactionType.earnings_release,
+                    LedgerTransaction.reversal_of_transaction_id.in_([row.id for row in holds]),
+                    LedgerTransaction.metadata_json["marketplace_dispute_operation"].astext
+                    == "restore",
+                )
+                .with_for_update()
+            )
+        )
+    active_hold = next(
+        (row for row in reversed(holds) if row.id not in restored_hold_ids),
+        None,
+    )
+    if order.earnings_released_at and release is None:
+        raise MarketplaceError("Order earnings release ledger is missing")
+    return original, release, active_hold, len(holds)
+
+
+async def _inverse_locked_ledger_entries(
+    db: AsyncSession, transaction: LedgerTransaction
+) -> list[tuple[LedgerAccount, LedgerDirection, int]]:
+    """Lock source accounts in stable order and invert one immutable movement."""
+    source_entries = (
+        await db.scalars(
+            select(LedgerEntry)
+            .where(LedgerEntry.transaction_id == transaction.id)
+            .order_by(LedgerEntry.ledger_account_id, LedgerEntry.id)
+        )
+    ).all()
+    if not source_entries:
+        raise MarketplaceError("Marketplace allocation ledger entries are missing")
+    accounts = (
+        await db.scalars(
+            select(LedgerAccount)
+            .where(
+                LedgerAccount.id.in_(
+                    sorted({entry.ledger_account_id for entry in source_entries}, key=str)
+                )
+            )
+            .order_by(LedgerAccount.id)
+            .with_for_update()
+        )
+    ).all()
+    account_by_id = {account.id: account for account in accounts}
+    if len(account_by_id) != len({entry.ledger_account_id for entry in source_entries}):
+        raise MarketplaceError("Marketplace allocation ledger account is missing")
+    return [
+        (
+            account_by_id[entry.ledger_account_id],
+            LedgerDirection.credit
+            if entry.direction is LedgerDirection.debit
+            else LedgerDirection.debit,
+            entry.amount_minor,
+        )
+        for entry in source_entries
+    ]
+
+
+def _marketplace_dispute_metadata(
+    order: MarketplaceOrder,
+    original: LedgerTransaction,
+    release: LedgerTransaction,
+) -> dict[str, str]:
+    original_metadata = original.metadata_json or {}
+    release_metadata = release.metadata_json or {}
+    keys = {
+        "creator_id",
+        "creator_amount_minor",
+        "creator_pool_minor",
+        "group_id",
+        "group_amount_minor",
+        "group_contract_id",
+        "group_contract_version",
+        "creator_basis_points",
+        "group_basis_points",
+        "referral_amount_minor",
+        "shipping_pass_through_minor",
+    }
+    frozen = {
+        key: str(release_metadata.get(key, original_metadata.get(key, "")))
+        for key in keys
+        if key in original_metadata or key in release_metadata
+    }
+    return {
+        **frozen,
+        "marketplace_order_id": str(order.id),
+        "payment_attempt_id": str(order.payment_attempt_id),
+        "original_ledger_transaction_id": str(original.id),
+        "earnings_release_ledger_transaction_id": str(release.id),
+        "reverses_exact_frozen_allocation": "true",
+    }
+
+
+async def _hold_released_order_allocation(
+    db: AsyncSession,
+    order: MarketplaceOrder,
+    *,
+    actor_user_id: UUID | None,
+    reason: str,
+    provider_event_id: str | None,
+) -> LedgerTransaction | None:
+    """Move this order's exact released allocation back to pending once."""
+    original, release, active_hold, hold_count = await _marketplace_dispute_ledger_state(db, order)
+    if active_hold:
+        return active_hold
+    if release is None:
+        return None
+    entries = await _inverse_locked_ledger_entries(db, release)
+    cycle = hold_count + 1
+    return await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.payment_dispute_hold,
+        currency=order.currency,
+        idempotency_key=f"marketplace-dispute-hold:{order.id}:{cycle}",
+        reference=f"marketplace_dispute_hold:{order.id}:{cycle}",
+        reversal_of_transaction_id=release.id,
+        entries=entries,
+        metadata={
+            **_marketplace_dispute_metadata(order, original, release),
+            "marketplace_dispute_operation": "hold",
+            "dispute_cycle": str(cycle),
+            "actor_user_id": str(actor_user_id) if actor_user_id else "",
+            "provider_event_id": provider_event_id or "",
+            "reason": reason,
+        },
+    )
+
+
+async def _restore_held_order_allocation(
+    db: AsyncSession, order: MarketplaceOrder, *, reason: str
+) -> LedgerTransaction | None:
+    """Restore one active released-allocation hold after seller-favour resolution."""
+    original, release, active_hold, _hold_count = await _marketplace_dispute_ledger_state(db, order)
+    if active_hold is None:
+        return None
+    assert release is not None
+    entries = await _inverse_locked_ledger_entries(db, active_hold)
+    cycle = str((active_hold.metadata_json or {}).get("dispute_cycle", "1"))
+    return await post_entries(
+        db,
+        transaction_type=LedgerTransactionType.earnings_release,
+        currency=order.currency,
+        idempotency_key=f"marketplace-dispute-restore:{active_hold.id}",
+        reference=f"marketplace_dispute_restore:{active_hold.id}",
+        reversal_of_transaction_id=active_hold.id,
+        entries=entries,
+        metadata={
+            **_marketplace_dispute_metadata(order, original, release),
+            "marketplace_dispute_operation": "restore",
+            "dispute_cycle": cycle,
+            "restores_dispute_hold_transaction_id": str(active_hold.id),
+            "reason": reason,
+        },
+    )
+
+
 async def _reverse_order_allocation(
     db: AsyncSession,
     order: MarketplaceOrder,
@@ -1171,13 +1492,29 @@ async def _reverse_order_allocation(
     transaction_type: LedgerTransactionType,
     reason: str,
 ) -> None:
-    if not order.ledger_transaction_id:
-        raise MarketplaceError("Only settled marketplace orders can be reversed")
-    original = await db.get(LedgerTransaction, order.ledger_transaction_id)
-    assert original
+    original, _release, active_hold, _hold_count = await _marketplace_dispute_ledger_state(
+        db, order
+    )
+    existing = await db.scalar(
+        select(LedgerTransaction)
+        .where(
+            LedgerTransaction.reversal_of_transaction_id == original.id,
+            LedgerTransaction.transaction_type.in_(
+                [LedgerTransactionType.refund, LedgerTransactionType.chargeback]
+            ),
+        )
+        .order_by(LedgerTransaction.created_at, LedgerTransaction.id)
+        .with_for_update()
+    )
+    if existing:
+        return
     from app.referrals.service import reversal_entries
 
-    referral_reversal_entries, referral_allocation = await reversal_entries(db, original.id)
+    referral_reversal_entries, referral_allocation = await reversal_entries(
+        db,
+        original.id,
+        released_allocation_held=active_hold is not None,
+    )
     referral_amount = referral_allocation.amount_minor if referral_allocation else 0
     creator_amount = int(original.metadata_json["creator_amount_minor"]) + int(
         original.metadata_json.get("shipping_pass_through_minor", 0)
@@ -1185,43 +1522,37 @@ async def _reverse_order_allocation(
     group_amount = int(original.metadata_json.get("group_amount_minor", 0))
     clearing = await _account(db, LedgerAccountKind.platform_clearing, order.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, order.currency)
-    creator_pending = await _account(
-        db, LedgerAccountKind.creator_pending, order.currency, order.seller_creator_id
+    creator_account = await _account(
+        db,
+        (
+            LedgerAccountKind.creator_available
+            if order.earnings_released_at and active_hold is None
+            else LedgerAccountKind.creator_pending
+        ),
+        order.currency,
+        order.seller_creator_id,
     )
-    creator_available = await _account(
-        db, LedgerAccountKind.creator_available, order.currency, order.seller_creator_id
-    )
-    pending_reversal = min(max(await _account_balance(db, creator_pending.id), 0), creator_amount)
     entries = [
         (clearing, LedgerDirection.credit, order.total_paid_minor),
         (revenue, LedgerDirection.debit, order.platform_fee_minor - referral_amount),
         *referral_reversal_entries,
     ]
-    if pending_reversal:
-        entries.append((creator_pending, LedgerDirection.debit, pending_reversal))
-    if creator_amount - pending_reversal:
-        entries.append(
-            (creator_available, LedgerDirection.debit, creator_amount - pending_reversal)
-        )
+    entries.append((creator_account, LedgerDirection.debit, creator_amount))
     if group_amount:
         group_id = original.metadata_json.get("group_id")
         if not group_id:
             raise MarketplaceError("Marketplace group allocation snapshot is incomplete")
-        group_pending = await _account(
-            db, LedgerAccountKind.group_pending, order.currency, owner_group_id=UUID(group_id)
+        group_account = await _account(
+            db,
+            (
+                LedgerAccountKind.group_available
+                if order.earnings_released_at and active_hold is None
+                else LedgerAccountKind.group_pending
+            ),
+            order.currency,
+            owner_group_id=UUID(group_id),
         )
-        group_available = await _account(
-            db, LedgerAccountKind.group_available, order.currency, owner_group_id=UUID(group_id)
-        )
-        group_pending_reversal = min(
-            max(await _account_balance(db, group_pending.id), 0), group_amount
-        )
-        if group_pending_reversal:
-            entries.append((group_pending, LedgerDirection.debit, group_pending_reversal))
-        if group_amount - group_pending_reversal:
-            entries.append(
-                (group_available, LedgerDirection.debit, group_amount - group_pending_reversal)
-            )
+        entries.append((group_account, LedgerDirection.debit, group_amount))
     await post_entries(
         db,
         transaction_type=transaction_type,
@@ -1234,6 +1565,7 @@ async def _reverse_order_allocation(
             "marketplace_order_id": str(order.id),
             "reason": reason,
             "original_ledger_transaction_id": str(original.id),
+            "dispute_hold_ledger_transaction_id": str(active_hold.id) if active_hold else "",
             "original_group_contract_id": original.metadata_json.get("group_contract_id", ""),
             "creator_amount_minor": str(creator_amount),
             "group_amount_minor": str(group_amount),
@@ -1244,14 +1576,40 @@ async def _reverse_order_allocation(
         referral_allocation.reversed_at = datetime.now(UTC)
 
 
+async def _lock_order_payment_attempt(
+    db: AsyncSession, order_id: UUID
+) -> tuple[MarketplaceOrder, PaymentAttempt]:
+    """Use the provider callback's attempt-before-domain lock order."""
+    payment_attempt_id = await db.scalar(
+        select(MarketplaceOrder.payment_attempt_id).where(MarketplaceOrder.id == order_id)
+    )
+    if payment_attempt_id is None:
+        raise MarketplaceError("Marketplace order not found")
+    attempt = await db.scalar(
+        select(PaymentAttempt)
+        .where(PaymentAttempt.id == payment_attempt_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if attempt is None:
+        raise MarketplaceError("Marketplace payment attempt is missing")
+    order = await db.scalar(
+        select(MarketplaceOrder)
+        .where(MarketplaceOrder.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if order is None:
+        raise MarketplaceError("Marketplace order not found")
+    if order.payment_attempt_id != attempt.id:
+        raise MarketplaceError("Marketplace payment attempt changed; retry the command")
+    return order, attempt
+
+
 async def refund_order(
     db: AsyncSession, order_id: UUID, actor: User | None, reason: str
 ) -> MarketplaceOrder:
-    order = await db.scalar(
-        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
-    )
-    if not order:
-        raise MarketplaceError("Marketplace order not found")
+    order, attempt = await _lock_order_payment_attempt(db, order_id)
     if order.status is MarketplaceOrderStatus.refunded:
         return order
     if order.status in {MarketplaceOrderStatus.awaiting_payment, MarketplaceOrderStatus.cancelled}:
@@ -1276,9 +1634,7 @@ async def refund_order(
     order.status = MarketplaceOrderStatus.refunded
     order.earnings_release_status = MarketplaceEarningsReleaseStatus.blocked
     order.release_block_reason = "refunded"
-    attempt = await db.get(PaymentAttempt, order.payment_attempt_id)
-    if attempt:
-        attempt.status = PaymentStatus.refunded
+    attempt.status = PaymentStatus.refunded
     await record_event(
         db,
         "marketplace.order_refunded",
@@ -1304,18 +1660,16 @@ async def cancel_order(
     db: AsyncSession, order_id: UUID, actor: User, creator_id: UUID, reason: str
 ) -> MarketplaceOrder:
     """Seller cancellation is permitted only before the immutable shipment event."""
-    order = await db.scalar(
-        select(MarketplaceOrder)
-        .where(
-            MarketplaceOrder.id == order_id,
-            MarketplaceOrder.seller_creator_id == creator_id,
-        )
-        .with_for_update()
-    )
-    if not order or order.status not in {
-        MarketplaceOrderStatus.paid,
-        MarketplaceOrderStatus.processing,
-    }:
+    order, _attempt = await _lock_order_payment_attempt(db, order_id)
+    if (
+        not order
+        or order.status
+        not in {
+            MarketplaceOrderStatus.paid,
+            MarketplaceOrderStatus.processing,
+        }
+        or order.seller_creator_id != creator_id
+    ):
         raise MarketplaceError("Only an unshipped paid order can be cancelled")
     return await refund_order(db, order.id, actor, reason)
 
@@ -1323,28 +1677,96 @@ async def cancel_order(
 async def open_order_dispute(
     db: AsyncSession, order_id: UUID, buyer: User, reason: str
 ) -> MarketplaceOrder:
-    order = await db.scalar(
-        select(MarketplaceOrder)
-        .where(MarketplaceOrder.id == order_id, MarketplaceOrder.buyer_user_id == buyer.id)
-        .with_for_update()
-    )
-    if not order or order.status not in {
+    order, attempt = await _lock_order_payment_attempt(db, order_id)
+    if order.buyer_user_id != buyer.id or order.status not in {
+        MarketplaceOrderStatus.paid,
+        MarketplaceOrderStatus.processing,
+        MarketplaceOrderStatus.shipped,
+        MarketplaceOrderStatus.delivered,
+        MarketplaceOrderStatus.disputed,
+    }:
+        raise MarketplaceError("Marketplace order cannot be disputed")
+    return await block_order_for_dispute(db, order, attempt, buyer.id, reason)
+
+
+async def _prior_status_for_active_dispute(
+    db: AsyncSession, order: MarketplaceOrder
+) -> tuple[MarketplaceOrderStatus, AuditEvent]:
+    """Resolve exact lifecycle provenance from the append-only dispute event."""
+    dispute_events = (
+        await db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "marketplace.order_disputed",
+                AuditEvent.target_type == "marketplace_order",
+                AuditEvent.target_id == str(order.id),
+            )
+        )
+    ).all()
+    resolution_events = (
+        await db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "marketplace.dispute_resolved",
+                AuditEvent.target_type == "marketplace_order",
+                AuditEvent.target_id == str(order.id),
+            )
+        )
+    ).all()
+    resolved_dispute_event_ids: set[UUID] = set()
+    for resolution_event in resolution_events:
+        raw_identifier = (resolution_event.metadata_json or {}).get("dispute_audit_event_id")
+        if raw_identifier is None:
+            continue
+        try:
+            resolved_dispute_event_ids.add(UUID(raw_identifier))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise MarketplaceError("Marketplace dispute lifecycle provenance is invalid") from exc
+    active_events = [
+        event for event in dispute_events if event.id not in resolved_dispute_event_ids
+    ]
+    if len(active_events) != 1:
+        raise MarketplaceError("Marketplace dispute lifecycle provenance is missing")
+    event = active_events[0]
+    raw_status = (event.metadata_json or {}).get("prior_order_status")
+    try:
+        prior_status = MarketplaceOrderStatus(raw_status)
+    except (TypeError, ValueError) as exc:
+        raise MarketplaceError("Marketplace dispute lifecycle provenance is missing") from exc
+    if prior_status not in {
         MarketplaceOrderStatus.paid,
         MarketplaceOrderStatus.processing,
         MarketplaceOrderStatus.shipped,
         MarketplaceOrderStatus.delivered,
     }:
-        raise MarketplaceError("Marketplace order cannot be disputed")
-    return await block_order_for_dispute(db, order, buyer.id, reason)
+        raise MarketplaceError("Marketplace dispute lifecycle provenance is invalid")
+    if order.paid_at is None:
+        raise MarketplaceError("Marketplace dispute lifecycle provenance is invalid")
+    if prior_status in {MarketplaceOrderStatus.paid, MarketplaceOrderStatus.processing} and (
+        order.shipped_at is not None or order.delivered_at is not None
+    ):
+        raise MarketplaceError("Marketplace dispute lifecycle provenance is inconsistent")
+    if prior_status is MarketplaceOrderStatus.shipped and (
+        order.shipped_at is None or order.delivered_at is not None
+    ):
+        raise MarketplaceError("Marketplace dispute lifecycle provenance is inconsistent")
+    if prior_status is MarketplaceOrderStatus.delivered and (
+        order.shipped_at is None or order.delivered_at is None
+    ):
+        raise MarketplaceError("Marketplace dispute lifecycle provenance is inconsistent")
+    return prior_status, event
 
 
 async def block_order_for_dispute(
     db: AsyncSession,
     order: MarketplaceOrder,
+    attempt: PaymentAttempt,
     actor_user_id: UUID | None,
     reason: str,
+    *,
+    provider_event_id: str | None = None,
 ) -> MarketplaceOrder:
     """Persist a provider or buyer dispute as an earnings-release blocker."""
+    if order.payment_attempt_id != attempt.id:
+        raise MarketplaceError("Marketplace payment attempt changed; retry the command")
     if order.status in {MarketplaceOrderStatus.refunded, MarketplaceOrderStatus.chargeback}:
         return order
     if order.status is MarketplaceOrderStatus.disputed:
@@ -1356,6 +1778,14 @@ async def block_order_for_dispute(
         MarketplaceOrderStatus.delivered,
     }:
         raise MarketplaceError("Marketplace order cannot be disputed")
+    prior_order_status = order.status
+    hold = await _hold_released_order_allocation(
+        db,
+        order,
+        actor_user_id=actor_user_id,
+        reason=reason,
+        provider_event_id=provider_event_id,
+    )
     order.status = MarketplaceOrderStatus.disputed
     order.earnings_release_status = MarketplaceEarningsReleaseStatus.blocked
     order.release_block_reason = "unresolved_dispute"
@@ -1365,7 +1795,11 @@ async def block_order_for_dispute(
         actor_user_id=actor_user_id,
         target_type="marketplace_order",
         target_id=str(order.id),
-        metadata={"reason": reason},
+        metadata={
+            "reason": reason,
+            "prior_order_status": prior_order_status.value,
+            "dispute_hold_ledger_transaction_id": str(hold.id) if hold else "",
+        },
     )
     return order
 
@@ -1373,27 +1807,51 @@ async def block_order_for_dispute(
 async def resolve_order_dispute(
     db: AsyncSession, order_id: UUID, actor: User | None, refund: bool, reason: str
 ) -> MarketplaceOrder:
-    order = await db.scalar(
-        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
-    )
-    if not order or order.status is not MarketplaceOrderStatus.disputed:
-        raise MarketplaceError("Marketplace dispute is not open")
     if refund:
+        order, _attempt = await _lock_order_payment_attempt(db, order_id)
+        if order.status is not MarketplaceOrderStatus.disputed:
+            raise MarketplaceError("Marketplace dispute is not open")
         return await refund_order(db, order.id, actor, reason)
-    # The timestamps are append-only fulfilment facts, so they safely restore
-    # the eligible operational state without trusting a caller-supplied state.
-    order.status = (
-        MarketplaceOrderStatus.delivered if order.delivered_at else MarketplaceOrderStatus.shipped
+    order, attempt = await _lock_order_payment_attempt(db, order_id)
+    if order.status is not MarketplaceOrderStatus.disputed:
+        _original, _release, active_hold, hold_count = await _marketplace_dispute_ledger_state(
+            db, order
+        )
+        if (
+            hold_count
+            and active_hold is None
+            and order.status
+            in {
+                MarketplaceOrderStatus.shipped,
+                MarketplaceOrderStatus.delivered,
+            }
+        ):
+            return order
+        raise MarketplaceError("Marketplace dispute is not open")
+    prior_order_status, dispute_event = await _prior_status_for_active_dispute(db, order)
+    restored = await _restore_held_order_allocation(db, order, reason=reason)
+    order.status = prior_order_status
+    order.earnings_release_status = (
+        MarketplaceEarningsReleaseStatus.released
+        if order.earnings_released_at
+        else MarketplaceEarningsReleaseStatus.pending
     )
-    order.earnings_release_status = MarketplaceEarningsReleaseStatus.pending
     order.release_block_reason = None
+    if attempt.status is PaymentStatus.disputed:
+        attempt.status = PaymentStatus.succeeded
     await record_event(
         db,
         "marketplace.dispute_resolved",
         actor_user_id=actor.id if actor else None,
         target_type="marketplace_order",
         target_id=str(order.id),
-        metadata={"resolution": "seller_favour", "reason": reason},
+        metadata={
+            "resolution": "seller_favour",
+            "reason": reason,
+            "dispute_audit_event_id": str(dispute_event.id),
+            "restored_order_status": prior_order_status.value,
+            "restoration_ledger_transaction_id": str(restored.id) if restored else "",
+        },
     )
     return order
 
@@ -1401,24 +1859,16 @@ async def resolve_order_dispute(
 async def chargeback_order(
     db: AsyncSession, order_id: UUID, actor: User | None, reason: str
 ) -> MarketplaceOrder:
-    order = await db.scalar(
-        select(MarketplaceOrder).where(MarketplaceOrder.id == order_id).with_for_update()
-    )
-    if not order:
-        raise MarketplaceError("Marketplace order not found")
+    order, attempt = await _lock_order_payment_attempt(db, order_id)
     if order.status is MarketplaceOrderStatus.chargeback:
         return order
-    if order.status is MarketplaceOrderStatus.refunded:
-        raise MarketplaceError("Refunded marketplace order cannot be charged back")
     await _reverse_order_allocation(
         db, order, transaction_type=LedgerTransactionType.chargeback, reason=reason
     )
     order.status = MarketplaceOrderStatus.chargeback
     order.earnings_release_status = MarketplaceEarningsReleaseStatus.blocked
     order.release_block_reason = "chargeback"
-    attempt = await db.get(PaymentAttempt, order.payment_attempt_id)
-    if attempt:
-        attempt.status = PaymentStatus.chargeback
+    attempt.status = PaymentStatus.chargeback
     await record_event(
         db,
         "marketplace.order_chargeback",

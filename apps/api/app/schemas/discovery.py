@@ -15,6 +15,10 @@ class DiscoveryResult(BaseModel):
     access_policy: str | None = None
     locked: bool = False
     preview_asset_id: UUID | None = None
+    gallery_image_count: int | None = None
+    video_duration_seconds: int | None = None
+    adult_access_required: bool = False
+    adult_access_granted: bool = True
     price_amount_minor: int | None = None
     currency: str | None = None
     availability: str | None = None

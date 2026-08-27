@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from conftest import trusted_self_attested_accounts as accounts
 from sqlalchemy import func, select
 
-from app.accounts import service as accounts
 from app.content.access import can_access_content
 from app.creators import service as creators
 from app.finance import service as finance
@@ -44,6 +44,8 @@ async def approved_creator(db, email: str):
     await creators.submit(db, profile, user.id)
     await creators.development_verify(db, profile, True, user.id)
     await creators.set_status(db, profile, CreatorStatus.approved, user.id)
+    profile.is_public = True
+    await db.flush()
     return user, profile
 
 

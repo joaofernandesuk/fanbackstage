@@ -9,6 +9,7 @@ import {
   AccessBadge,
   CreatorAvatar,
   EmptyState,
+  LoginGate,
   Skeleton,
   useLoginGate,
   VerifiedBadge,
@@ -19,6 +20,7 @@ import { StoryRailSource } from "../../../components/story-experience";
 import styles from "../../../components/social-surface.module.css";
 import { SubscriptionOptions } from "../../../components/subscription-options";
 import { api, ApiError } from "../../../lib/api";
+import { marketplaceListingMediaUrl } from "../../../lib/content-api";
 import { mediaForUsername } from "../../../lib/demo-personas";
 import { formatMoney, type MarketplaceListing } from "../../../lib/public-api";
 
@@ -61,15 +63,9 @@ function compactNumber(value: number) {
 
 function ContentGallery({
   content,
-  creator,
-  purchasing,
-  onPurchase,
   fallback,
 }: {
   content: Content[];
-  creator: Creator;
-  purchasing: string | null;
-  onPurchase: (item: Content) => void;
   fallback: string;
 }) {
   if (!content.length) {
@@ -82,7 +78,7 @@ function ContentGallery({
         const preview = item.previews[0];
         const imageSource = preview ? `${apiBase}/api/v1${preview.delivery_path}` : fallback;
         return (
-          <article className={styles.contentTile} key={item.id}>
+          <Link className={styles.contentTile} href={`/content/${encodeURIComponent(item.id)}`} key={item.id}>
             <div className={`${styles.contentTileMedia} ${item.locked ? styles.contentTileLocked : ""}`}>
               <Image
                 alt={`${item.title} preview`}
@@ -99,19 +95,14 @@ function ContentGallery({
               {item.description && <p>{item.description}</p>}
               <div className={styles.contentTileActions}>
                 <span>{item.content_type.replaceAll("_", " ")}</span>
-                {item.locked && item.access_policy === "ppv" && item.price_amount_minor !== null && item.price_currency && (
-                  <button
-                    aria-label={`Unlock for ${formatMoney(item.price_amount_minor, item.price_currency)}`}
-                    disabled={purchasing === item.id}
-                    onClick={() => onPurchase(item)}
-                    type="button"
-                  >
-                    {purchasing === item.id ? "Unlocking…" : `Unlock ${formatMoney(item.price_amount_minor, item.price_currency)}`}
-                  </button>
-                )}
+                <strong>
+                  {item.locked && item.access_policy === "ppv" && item.price_amount_minor !== null && item.price_currency
+                    ? `Preview · ${formatMoney(item.price_amount_minor, item.price_currency)}`
+                    : "View details"}
+                </strong>
               </div>
             </div>
-          </article>
+          </Link>
         );
       })}
     </div>
@@ -127,7 +118,6 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   const [following, setFollowing] = useState(false);
   const [messageOpen, setMessageOpen] = useState(false);
   const [error, setError] = useState("");
-  const [purchasing, setPurchasing] = useState<string | null>(null);
   const subscribeRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -155,7 +145,7 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   const visual = mediaForUsername(creator?.username);
   const fallbackContent = visual?.content || "/images/fanbackstage-hero.png";
   const selectedContent = useMemo(() => {
-    if (tab === "photos") return content.filter((item) => item.content_type !== "video" && !item.locked);
+    if (tab === "photos") return content.filter((item) => item.content_type !== "video");
     if (tab === "videos") return content.filter((item) => item.content_type === "video");
     if (tab === "premium") return content.filter((item) => item.locked || ["subscription", "ppv"].includes(item.access_policy));
     return content;
@@ -173,24 +163,6 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
       } : current);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "Unable to update follow status");
-    }
-  }
-
-  async function purchase(item: Content) {
-    if (!creator || !requireLogin()) return;
-    setPurchasing(item.id);
-    setError("");
-    try {
-      const started = await api<{ payment_attempt_id: string }>(`/purchases/content/${item.id}`, {
-        method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-      });
-      await api(`/payments/development/${started.payment_attempt_id}/complete`, { method: "POST" });
-      setContent(await api<Content[]>(`/content/public/by-creator/${encodeURIComponent(creator.username)}`));
-    } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : "Purchase could not be completed");
-    } finally {
-      setPurchasing(null);
     }
   }
 
@@ -260,7 +232,7 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
         <section aria-label="Creator content">
           {tab === "feed" && <Feed creatorId={creator.id} />}
           {(["photos", "videos", "premium"] as ProfileTab[]).includes(tab) && (
-            <ContentGallery content={selectedContent} creator={creator} fallback={fallbackContent} onPurchase={(item) => void purchase(item)} purchasing={purchasing} />
+            <ContentGallery content={selectedContent} fallback={fallbackContent} />
           )}
           {tab === "stories" && (
             <StoryRailSource
@@ -272,12 +244,13 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
           {tab === "marketplace" && (
             listings.length ? (
               <div className={styles.contentGrid}>
-                {listings.map((listing) => (
-                  <Link className={styles.contentTile} href={`/marketplace/${listing.public_id}`} key={listing.id}>
-                    <div className={styles.contentTileMedia}><Image alt={listing.title} fill sizes="350px" src={fallbackContent} /></div>
+                {listings.map((listing) => {
+                  const mediaUrl = marketplaceListingMediaUrl(listing.media);
+                  return <Link className={styles.contentTile} href={`/marketplace/${listing.public_id}`} key={listing.id}>
+                    <div className={styles.contentTileMedia}>{mediaUrl ? <img alt={`${listing.title} listing preview`} src={mediaUrl} /> : <span />}</div>
                     <div className={styles.contentTileInfo}><h3>{listing.title}</h3><p>{listing.description}</p><div className={styles.contentTileActions}><span>{listing.quantity_available} available</span><strong>{formatMoney(listing.price_amount_minor, listing.currency)}</strong></div></div>
-                  </Link>
-                ))}
+                  </Link>;
+                })}
               </div>
             ) : <EmptyState action={<Link className={styles.secondaryLink} href="/marketplace">Explore marketplace</Link>} body="No public products from this creator right now." title="The shop is between drops" />
           )}
@@ -291,7 +264,13 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
           <div className={styles.profileSideCard}>
             <h2>Private live</h2>
             <p>Request one-to-one time when this creator has private sessions enabled. Pricing and authorization are confirmed before a session begins.</p>
-            {authenticated ? <PrivateSessionRequest creatorId={creator.id} /> : <Link className={styles.secondaryLink} href={`/login?next=${encodeURIComponent(`/creator/${creator.username}`)}`}>Log in to request</Link>}
+            <LoginGate
+              className={styles.secondaryLink}
+              label="Log in to request"
+              nextPath={`/creator/${creator.username}`}
+            >
+              <PrivateSessionRequest creatorId={creator.id} />
+            </LoginGate>
           </div>
           <div className={styles.profileSideCard}>
             <h2>Explore safely</h2>

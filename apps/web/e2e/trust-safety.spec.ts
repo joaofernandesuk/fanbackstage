@@ -13,20 +13,23 @@ type ApiResult<T> = { status: number; body: T };
 type Creator = { email: string; password: string; username: string; id: string };
 type Content = { id: string; title: string; status: string };
 
-async function api<T>(page: Page, path: string, method = "GET", body?: unknown): Promise<ApiResult<T>> {
-  return page.evaluate(async ({ apiBase, path, method, body }) => {
+async function api<T>(page: Page, path: string, method = "GET", body?: unknown, key?: string): Promise<ApiResult<T>> {
+  return page.evaluate(async ({ apiBase, path, method, body, key }) => {
     const response = await fetch(`${apiBase}/api/v1${path}`, {
       method,
       credentials: "include",
-      headers: body ? { "Content-Type": "application/json", ...(path === "/featuring/bookings" ? { "Idempotency-Key": `phase13-${Date.now()}` } : {}) } : undefined,
+      headers: {
+        ...(body ? { "Content-Type": "application/json" } : {}),
+        ...(key ? { "Idempotency-Key": key } : {}),
+      },
       body: body ? JSON.stringify(body) : undefined,
     });
     return { status: response.status, body: await response.json().catch(() => null) };
-  }, { apiBase, path, method, body });
+  }, { apiBase, path, method, body, key });
 }
 
-async function apiOk<T>(page: Page, path: string, method = "GET", body?: unknown): Promise<T> {
-  const result = await api<T>(page, path, method, body);
+async function apiOk<T>(page: Page, path: string, method = "GET", body?: unknown, key?: string): Promise<T> {
+  const result = await api<T>(page, path, method, body, key);
   expect(result.status, `${method} ${path}: ${JSON.stringify(result.body)}`).toBe(200);
   return result.body;
 }
@@ -48,6 +51,7 @@ async function register(page: Page, email: string, password: string) {
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
@@ -74,6 +78,7 @@ async function createApprovedCreator(page: Page, stamp: string): Promise<Creator
   await logout(page);
   await login(page, email, password);
   await page.goto("/creator-onboarding");
+  await page.getByRole("checkbox", { name: "Make my approved creator profile public" }).check();
   await page.getByRole("button", { name: "Save profile" }).click();
   await expect.poll(async () => await apiOk<{ status: string; is_public: boolean }>(page, "/creators/me"), { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   const profile = await apiOk<{ id: string }>(page, "/creators/me");
@@ -123,8 +128,8 @@ test("Phase 13 real-stack report, appeal, consent, and critical-containment jour
   await apiOk(page, "/featuring/admin/prices", "POST", { slot_id: slot.id, target_type: "gallery", duration_seconds: 120, amount_minor: 900, currency: "EUR" });
   await logout(page);
   await login(page, creator.email, creator.password);
-  const booking = await apiOk<{ id: string }>(page, "/featuring/bookings", "POST", { slot_id: slot.id, target_type: "gallery", target_id: reportable.id, starts_at: new Date(Date.now() + 1000).toISOString(), duration_seconds: 120 });
-  const payment = await apiOk<{ payment_attempt_id: string }>(page, `/featuring/bookings/${booking.id}/payment`, "POST");
+  const booking = await apiOk<{ id: string }>(page, "/featuring/bookings", "POST", { slot_id: slot.id, target_type: "gallery", target_id: reportable.id, starts_at: new Date(Date.now() + 1000).toISOString(), duration_seconds: 120 }, `phase13-booking-${stamp}`);
+  const payment = await apiOk<{ payment_attempt_id: string }>(page, `/featuring/bookings/${booking.id}/payment`, "POST", undefined, `phase13-booking-payment-${stamp}`);
   await apiOk(page, `/payments/development/${payment.payment_attempt_id}/complete`, "POST");
   await logout(page);
   await login(page, admin.email, admin.password);
@@ -214,8 +219,8 @@ test("Phase 13 real-stack report, appeal, consent, and critical-containment jour
   await expect.poll(async () => (await api(page, `/content/public/${separatelyConsented.id}`)).status).toBe(200);
   await logout(page);
   await login(page, creator.email, creator.password);
-  const consentBooking = await apiOk<{ id: string }>(page, "/featuring/bookings", "POST", { slot_id: slot.id, target_type: "gallery", target_id: consented.id, starts_at: new Date(Date.now() + 1000).toISOString(), duration_seconds: 120 });
-  const consentPayment = await apiOk<{ payment_attempt_id: string }>(page, `/featuring/bookings/${consentBooking.id}/payment`, "POST");
+  const consentBooking = await apiOk<{ id: string }>(page, "/featuring/bookings", "POST", { slot_id: slot.id, target_type: "gallery", target_id: consented.id, starts_at: new Date(Date.now() + 1000).toISOString(), duration_seconds: 120 }, `phase13-consent-booking-${stamp}`);
+  const consentPayment = await apiOk<{ payment_attempt_id: string }>(page, `/featuring/bookings/${consentBooking.id}/payment`, "POST", undefined, `phase13-consent-booking-payment-${stamp}`);
   await apiOk(page, `/payments/development/${consentPayment.payment_attempt_id}/complete`, "POST");
   await logout(page);
   await login(page, admin.email, admin.password);

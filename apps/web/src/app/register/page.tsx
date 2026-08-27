@@ -7,4 +7,11 @@ export const metadata: Metadata = {
   description: "Create a free FanBackstage account.",
 };
 
-export default function RegisterPage() { return <AuthForm mode="register" />; }
+export default async function RegisterPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ next?: string | string[] }>;
+}) {
+  const requested = (await searchParams).next;
+  return <AuthForm mode="register" nextPath={Array.isArray(requested) ? requested[0] : requested} />;
+}

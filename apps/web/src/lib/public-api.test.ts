@@ -4,6 +4,7 @@ import {
   accessLabel,
   creatorUsernameFor,
   discoverySearchPath,
+  formatDurationSeconds,
   formatMoney,
   groupDiscovery,
   previewUrl,
@@ -39,6 +40,12 @@ describe("public consumer API helpers", () => {
     expect(formatMoney(999, "EUR")).toBe("€9.99");
     expect(formatMoney(1250, "JPY")).toBe("JP¥1,250");
     expect(formatMoney(-99, "EUR")).toBe("-€0.99");
+  });
+
+  it("formats authoritative video durations without inventing unknown values", () => {
+    expect(formatDurationSeconds(95)).toBe("1:35");
+    expect(formatDurationSeconds(3_725)).toBe("1:02:05");
+    expect(formatDurationSeconds(null)).toBeNull();
   });
 
   it("uses explicit consumer access labels", () => {

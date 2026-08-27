@@ -66,6 +66,22 @@ class MarketplaceListingCreate(BaseModel):
     media_asset_ids: list[UUID] = Field(default_factory=list, max_length=12)
 
 
+class MarketplaceListingMediaResponse(BaseModel):
+    derivative_id: UUID
+    delivery_path: str
+    position: int
+    width: int | None = None
+    height: int | None = None
+
+
+class MarketplaceSellerResponse(BaseModel):
+    creator_id: UUID
+    username: str
+    display_name: str
+    avatar_reference: str | None = None
+    verified: bool = False
+
+
 class MarketplaceListingResponse(BaseModel):
     id: UUID
     public_id: str
@@ -81,6 +97,8 @@ class MarketplaceListingResponse(BaseModel):
     shipping_mode: str
     origin_country_code: str
     shipping_charged_minor: int
+    media: list[MarketplaceListingMediaResponse] = Field(default_factory=list)
+    seller: MarketplaceSellerResponse | None = None
 
 
 class MarketplaceCheckoutInput(BaseModel):

@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../lib/api";
 import {
@@ -64,10 +64,6 @@ export function HomeExperience() {
     return () => { active = false; };
   }, []);
 
-  const creatorById = useMemo(
-    () => new Map(data.creators.map((creator) => [creator.creator_id ?? creator.id, creator])),
-    [data.creators],
-  );
   const sponsored = data.discovery.filter((item) => item.sponsored);
   const featured = [...sponsored.filter((item) => item.entity_type === "creator"), ...data.creators]
     .filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index)
@@ -132,7 +128,7 @@ export function HomeExperience() {
       </section>
 
       <HomeSection body="Creator-owned collectibles and limited drops." eyebrow="Creator marketplace" href="/marketplace" id="market-heading" loading={loading} title="Backstage finds" variant="market">
-        {data.listings.slice(0, 4).map((listing) => <MarketplaceCard creator={creatorById.get(listing.owner_creator_id)} key={listing.id} listing={listing} />)}
+        {data.listings.slice(0, 4).map((listing) => <MarketplaceCard key={listing.id} listing={listing} />)}
         {!loading && !data.listings.length && <EmptyState body={failed.listings ? "Marketplace listings could not be refreshed." : "Published listings will appear here after marketplace review."} title={failed.listings ? "Marketplace is unavailable" : "No marketplace finds yet"} />}
       </HomeSection>
     </div>

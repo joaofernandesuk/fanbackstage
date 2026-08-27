@@ -7,8 +7,10 @@ from uuid import UUID
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
 from app.core.config import get_settings
+from app.creators.service import require_public_creator_access
 from app.finance.service import (
     _account,
     commission_amount,
@@ -206,9 +208,10 @@ async def send_message(
     body: str | None,
     reply_to_message_id: UUID | None = None,
 ) -> Message:
-    creator = await db.get(CreatorProfile, creator_id)
-    if not creator or creator.status is not CreatorStatus.approved:
-        raise MessagingError("Creator not found")
+    try:
+        creator = await require_public_creator_access(db, creator_id, sender.id)
+    except ValueError as exc:
+        raise PermissionError("Messaging is not permitted") from exc
     if not body or not body.strip():
         raise MessagingError("Message text is required")
     if len(body) > 4000:
@@ -380,6 +383,7 @@ async def attach_media(
     )
     db.add(attachment)
     message.message_type = MessageType.media
+    await db.flush()
     await record_event(
         db,
         "message.attachment_created",
@@ -419,7 +423,6 @@ async def create_unlock_purchase(
     conversation = await db.get(Conversation, message.conversation_id) if message else None
     if not message or not conversation or buyer.id != conversation.viewer_user_id:
         raise PermissionError("Locked attachment not found")
-    creator = await db.get(CreatorProfile, conversation.creator_id)
     existing = await db.scalar(
         select(MessageUnlockPurchase)
         .join(PaymentAttempt)
@@ -438,6 +441,11 @@ async def create_unlock_purchase(
     )
     if existing:
         return existing
+    try:
+        creator = await require_public_creator_access(db, conversation.creator_id, buyer.id)
+    except ValueError as exc:
+        raise PermissionError("Locked attachment not found") from exc
+    require_current_self_attestation(buyer)
     currency = currency_code(attachment.unlock_currency)
     bps = await messaging_commission(db)
     fee, creator_amount = commission_amount(attachment.unlock_price_minor, bps)
@@ -541,12 +549,6 @@ async def initiate_paid_send(
 ) -> PendingMessageSend:
     if not idempotency_key or len(idempotency_key) > 128:
         raise MessagingError("A valid Idempotency-Key is required")
-    creator = await db.get(CreatorProfile, creator_id)
-    if not creator or not await can_message(db, buyer, creator):
-        raise PermissionError("Messaging is not permitted")
-    amount, currency = await resolve_send_price(db, buyer, creator)
-    if not amount or not currency:
-        raise MessagingError("This message does not require payment")
     existing = await db.scalar(
         select(PendingMessageSend)
         .join(PaymentAttempt)
@@ -557,6 +559,16 @@ async def initiate_paid_send(
     )
     if existing:
         return existing
+    try:
+        creator = await require_public_creator_access(db, creator_id, buyer.id)
+    except ValueError as exc:
+        raise PermissionError("Messaging is not permitted") from exc
+    if not creator or not await can_message(db, buyer, creator):
+        raise PermissionError("Messaging is not permitted")
+    amount, currency = await resolve_send_price(db, buyer, creator)
+    if not amount or not currency:
+        raise MessagingError("This message does not require payment")
+    require_current_self_attestation(buyer)
     bps = await messaging_commission(db)
     fee, creator_amount = commission_amount(amount, bps)
     attempt = PaymentAttempt(

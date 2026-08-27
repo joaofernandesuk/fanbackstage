@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.accounts import adult_access
 from app.accounts import service as accounts
 from app.content import service as content_service
 from app.creators import service as creators
@@ -30,6 +31,7 @@ from app.models.content import (
     ContentStatus,
     Gallery,
     MediaAsset,
+    MediaAudience,
 )
 from app.models.creator import (
     CreatorCategory,
@@ -59,6 +61,7 @@ from app.models.identity import User
 from app.models.marketplace import (
     MarketplaceEarningsHoldPolicy,
     MarketplaceListing,
+    MarketplaceListingMedia,
     MarketplaceListingStatus,
     MarketplaceOrderStatus,
     MarketplaceSellerTier,
@@ -66,6 +69,7 @@ from app.models.marketplace import (
     ShippingAllowanceScope,
 )
 from app.models.messaging import Conversation, Message
+from app.models.notification import NotificationPreference
 from app.models.referral import (
     ReferralActorType,
     ReferralCommissionPolicy,
@@ -85,11 +89,13 @@ from app.models.social import (
 from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveAccessMode, LiveRoom
 from app.models.subscription import SubscriptionPeriod
+from app.notifications import service as notifications
 from app.referrals import service as referrals
 from app.seed.manifest import (
     CORE_USERS,
     CREATORS,
     FAN_USERS,
+    GALLERY_SHOWCASES,
     GROUPS,
     PASSWORD,
     PUBLIC_CREATORS,
@@ -107,6 +113,7 @@ from app.seed.manifest import (
 )
 from app.seed.media import (
     ASSET_ROOT,
+    VIDEO_PREVIEW_DURATION_SECONDS,
     ensure_image_asset,
     ensure_video_asset,
     restore_video_preview_ready,
@@ -142,9 +149,10 @@ def _email(local_part: str) -> str:
 async def _ensure_user(db: AsyncSession, email: str, role_names: tuple[str, ...]) -> User:
     user = await db.scalar(select(User).where(User.email == email))
     if not user:
-        user, _ = await accounts.register(db, email, PASSWORD, None)
+        user, _ = await accounts.register(db, email, PASSWORD, None, adult_confirmed=True)
     if user.email_verified_at is None:
         user.email_verified_at = datetime.now(UTC)
+    adult_access.attest_account(user)
     for role_name in role_names:
         if role_name not in {role.name for role in user.roles}:
             await accounts.assign_role(db, user, role_name, user.id, None)
@@ -236,6 +244,44 @@ async def _ensure_creator(
             "the seed will not override an existing moderation decision"
         )
     return profile
+
+
+async def _ensure_marketing_preferences(db: AsyncSession, users: dict[str, User]) -> None:
+    """Converge the marketing QA personas through the notification domain service."""
+
+    fixtures = (
+        (users[_email("marketing-in")], True, True, True),
+        (users[_email("marketing-out")], False, True, False),
+    )
+    for user, email_enabled, in_app_enabled, consent in fixtures:
+        preference = await db.scalar(
+            select(NotificationPreference).where(
+                NotificationPreference.user_id == user.id,
+                NotificationPreference.category == "marketing",
+            )
+        )
+        is_converged = bool(
+            preference
+            and preference.email_enabled is email_enabled
+            and preference.in_app_enabled is in_app_enabled
+            and (
+                (
+                    preference.consented_at is not None
+                    and preference.consent_source == "account_settings"
+                )
+                if consent
+                else preference.consented_at is None and preference.consent_source is None
+            )
+        )
+        if not is_converged:
+            await notifications.update_preference(
+                db,
+                user,
+                "marketing",
+                email_enabled,
+                in_app_enabled,
+                consent=consent,
+            )
 
 
 async def _ensure_referral(db: AsyncSession, users: dict[str, User]) -> None:
@@ -387,10 +433,27 @@ async def _ensure_creator_content(
     asset_root: Path,
 ) -> CreatorContent:
     image_asset = await ensure_image_asset(
-        db, creator_user, profile, seed.slug, provider, asset_root
+        db,
+        creator_user,
+        profile,
+        seed.slug,
+        provider,
+        asset_root,
+        classification_actor=admin,
     )
     video_asset = await ensure_video_asset(
-        db, creator_user, profile, seed.slug, provider, asset_root
+        db,
+        creator_user,
+        profile,
+        seed.slug,
+        provider,
+        asset_root,
+        audience=(
+            MediaAudience.adult_restricted
+            if seed.slug == "zara-pulse"
+            else MediaAudience.safe_public
+        ),
+        classification_actor=admin,
     )
     feed_settings = await social.settings_for_creator(db, profile.id)
     feed_settings.auto_post_galleries = False
@@ -432,15 +495,21 @@ async def _ensure_creator_content(
             db,
             creator_user,
             video_title(seed),
-            "A three-second fictional studio reel for exercising protected video delivery.",
+            "An eight-second fictional studio reel with a distinct two-second acquisition trailer.",
             video_asset.id,
             video_policy,
             preview_start_seconds=0,
-            preview_duration_seconds=3,
+            preview_duration_seconds=VIDEO_PREVIEW_DURATION_SECONDS,
             price_amount_minor=599 + position * 25 if video_policy is AccessPolicy.ppv else None,
             price_currency="EUR" if video_policy is AccessPolicy.ppv else None,
         )
         await restore_video_preview_ready(db, video_asset.id)
+    assert video.video
+    video.description = (
+        "An eight-second fictional studio reel with a distinct two-second acquisition trailer."
+    )
+    video.video.preview_start_seconds = 0
+    video.video.preview_duration_seconds = VIDEO_PREVIEW_DURATION_SECONDS
     if video.status is ContentStatus.processing:
         await restore_video_preview_ready(db, video_asset.id)
         await content_service.submit_for_review(db, creator_user, video.id)
@@ -449,6 +518,84 @@ async def _ensure_creator_content(
     if gallery.status is not ContentStatus.published or video.status is not ContentStatus.published:
         raise RuntimeError(f"Demo content did not publish for {seed.slug}")
     return CreatorContent(gallery, video, image_asset, video_asset)
+
+
+async def _ensure_showcase_galleries(
+    db: AsyncSession,
+    admin: User,
+    users: dict[str, User],
+    profiles: dict[str, CreatorProfile],
+    provider,
+    asset_root: Path,
+) -> None:
+    """Create real multi-image free, subscriber, and PPV gallery fixtures."""
+    for showcase in GALLERY_SHOWCASES:
+        creator = profiles[showcase.creator_slug]
+        creator_user = users[_email(showcase.creator_slug)]
+        assets = [
+            await ensure_image_asset(
+                db,
+                creator_user,
+                creator,
+                showcase.creator_slug,
+                provider,
+                asset_root,
+                variant=f"gallery-showcase-{position}",
+                audience=(
+                    MediaAudience.adult_restricted
+                    if showcase.creator_slug == "zara-pulse" and position > 1
+                    else MediaAudience.safe_public
+                ),
+                classification_actor=admin,
+            )
+            for position in range(1, 5)
+        ]
+        gallery = await _content_by_title(db, creator.id, showcase.title)
+        policy = AccessPolicy(showcase.access_policy)
+        if not gallery:
+            gallery = await content_service.create_gallery(
+                db,
+                creator_user,
+                showcase.title,
+                showcase.description,
+                policy,
+                showcase.price_amount_minor,
+                "EUR" if showcase.price_amount_minor is not None else None,
+            )
+        # Demo gallery approval must never change the separately asserted feed
+        # post manifest, even if creator defaults are changed in a later run.
+        gallery.feed_announcement_override = False
+        assert gallery.gallery
+        await db.refresh(gallery.gallery, ["items"])
+        existing_asset_ids = {item.media_asset_id for item in gallery.gallery.items}
+        if existing_asset_ids != {asset.id for asset in assets}:
+            if gallery.status not in {ContentStatus.draft, ContentStatus.processing}:
+                raise RuntimeError(f"Published demo gallery is incomplete: {showcase.title}")
+            for position, asset in enumerate(assets):
+                if asset.id not in existing_asset_ids:
+                    await content_service.add_gallery_item(
+                        db,
+                        creator_user,
+                        gallery.id,
+                        asset.id,
+                        preview=policy is not AccessPolicy.free and position == 0,
+                    )
+            await content_service.configure_gallery_cover(
+                db, creator_user, gallery.id, assets[0].id
+            )
+            await content_service.configure_gallery_preview(
+                db,
+                creator_user,
+                gallery.id,
+                0 if policy is AccessPolicy.free else 1,
+                set() if policy is AccessPolicy.free else {assets[0].id},
+            )
+        if gallery.status is ContentStatus.processing:
+            await content_service.submit_for_review(db, creator_user, gallery.id)
+        if gallery.status is ContentStatus.pending_review:
+            await content_service.approve(db, gallery, admin)
+        if gallery.status is not ContentStatus.published:
+            raise RuntimeError(f"Demo gallery did not publish: {showcase.title}")
 
 
 async def _ensure_posts(
@@ -498,6 +645,7 @@ async def _ensure_posts(
 
 async def _ensure_stories(
     db: AsyncSession,
+    admin: User,
     users: dict[str, User],
     profiles: dict[str, CreatorProfile],
     provider,
@@ -518,6 +666,7 @@ async def _ensure_stories(
             provider,
             asset_root,
             variant="story",
+            classification_actor=admin,
         )
         story_video = await ensure_video_asset(
             db,
@@ -527,6 +676,7 @@ async def _ensure_stories(
             provider,
             asset_root,
             variant="story",
+            classification_actor=admin,
         )
         for position in range(3):
             caption = story_caption(seed, position)
@@ -740,6 +890,16 @@ async def _ensure_subscription_plans(db: AsyncSession, profiles: dict[str, Creat
                     "amount_minor": 2_699 + position * 100,
                     "enabled": True,
                 },
+                {
+                    "duration": "month_6",
+                    "amount_minor": 4_999 + position * 150,
+                    "enabled": True,
+                },
+                {
+                    "duration": "month_12",
+                    "amount_minor": 8_999 + position * 250,
+                    "enabled": True,
+                },
             ],
         )
 
@@ -749,12 +909,24 @@ async def _ensure_listings(
     admin: User,
     users: dict[str, User],
     profiles: dict[str, CreatorProfile],
-    content: dict[str, CreatorContent],
+    provider,
+    asset_root: Path,
 ) -> list[MarketplaceListing]:
     rows: list[MarketplaceListing] = []
     for creator_position, seed in enumerate(PUBLIC_CREATORS):
         creator = profiles[seed.slug]
         creator_user = users[seed.email]
+        marketplace_asset = await ensure_image_asset(
+            db,
+            creator_user,
+            creator,
+            seed.slug,
+            provider,
+            asset_root,
+            variant="marketplace",
+            audience=MediaAudience.safe_public,
+            classification_actor=admin,
+        )
         for item_position in range(listing_count_for_creator(creator_position)):
             title = listing_title(seed, item_position)
             listing = await db.scalar(
@@ -778,8 +950,29 @@ async def _ensure_listings(
                     shipping_mode="worldwide",
                     origin_country_code="PT",
                     shipping_charged_minor=350,
-                    media_asset_ids=[content[seed.slug].image_asset.id],
+                    media_asset_ids=[marketplace_asset.id],
                 )
+            else:
+                links = (
+                    await db.scalars(
+                        select(MarketplaceListingMedia)
+                        .where(MarketplaceListingMedia.listing_id == listing.id)
+                        .order_by(MarketplaceListingMedia.position)
+                    )
+                ).all()
+                if links:
+                    links[0].media_asset_id = marketplace_asset.id
+                    links[0].position = 0
+                    for extra in links[1:]:
+                        await db.delete(extra)
+                else:
+                    db.add(
+                        MarketplaceListingMedia(
+                            listing_id=listing.id,
+                            media_asset_id=marketplace_asset.id,
+                            position=0,
+                        )
+                    )
             if listing.status in {
                 MarketplaceListingStatus.draft,
                 MarketplaceListingStatus.paused,
@@ -1080,6 +1273,7 @@ async def seed_database(
 
     users = {seed.email: await _ensure_user(db, seed.email, seed.roles) for seed in USERS}
     admin = users[_email("admin")]
+    await _ensure_marketing_preferences(db, users)
     profiles = {
         seed.slug: await _ensure_creator(db, admin, users[seed.email], seed) for seed in CREATORS
     }
@@ -1106,12 +1300,13 @@ async def seed_database(
             seed,
             content[seed.slug],
         )
-    await _ensure_stories(db, users, profiles, provider, asset_root)
+    await _ensure_showcase_galleries(db, admin, users, profiles, provider, asset_root)
+    await _ensure_stories(db, admin, users, profiles, provider, asset_root)
     await _ensure_social_graph(db, users, profiles, posts)
     await _ensure_conversations(db, users, profiles)
     await _ensure_live_history(db, users, profiles)
     await _ensure_subscription_plans(db, profiles)
-    listings = await _ensure_listings(db, admin, users, profiles, content)
+    listings = await _ensure_listings(db, admin, users, profiles, provider, asset_root)
     await _ensure_financial_examples(db, admin, users, profiles, content, listings)
     await _ensure_featuring(db, admin, users, profiles)
     await db.flush()

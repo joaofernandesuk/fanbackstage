@@ -17,6 +17,7 @@ from app.models.finance import (
     LedgerDirection,
     LedgerEntry,
     LedgerTransaction,
+    LedgerTransactionType,
     Purchase,
     PurchaseStatus,
 )
@@ -113,10 +114,19 @@ async def creator_overview(
             bucket["pending_earnings_minor"] += value
         else:
             bucket["available_earnings_minor"] += value
+        if transaction.transaction_type in {
+            LedgerTransactionType.earnings_release,
+            LedgerTransactionType.payment_dispute_hold,
+        }:
+            # Internal account reclassifications only move an already counted
+            # allocation between pending and available. They are neither a
+            # sale nor a reversal and must not create synthetic revenue
+            # sources.
+            continue
         source = _source(transaction.transaction_type.value)
         source_bucket = sources[(transaction.currency, source)]
         source_bucket["creator_net_minor"] += value
-        if value > 0 and transaction.transaction_type.value != "earnings_release":
+        if value > 0:
             bucket["gross_sales_minor"] += value
             source_bucket["gross_sales_minor"] += value
         if value < 0:
@@ -665,6 +675,14 @@ async def creator_referral_metrics(
             )
         )
     ).all()
+    from app.referrals.service import (
+        active_marketplace_dispute_hold_source_ids,
+        allocation_projection_status,
+    )
+
+    active_hold_source_ids = await active_marketplace_dispute_hold_source_ids(
+        db, [row.source_ledger_transaction_id for row in rows]
+    )
     totals: dict[str, dict] = defaultdict(
         lambda: {
             "referral_earnings_minor": 0,
@@ -678,9 +696,10 @@ async def creator_referral_metrics(
         bucket = totals[item.currency]
         bucket["referral_earnings_minor"] += item.amount_minor
         bucket["attributed_volume_minor"] += item.platform_fee_minor
-        if item.reversed_at:
+        projection_status = allocation_projection_status(item, active_hold_source_ids)
+        if projection_status == "reversed":
             bucket["reversed_minor"] += item.amount_minor
-        elif item.released_at:
+        elif projection_status == "available":
             bucket["available_minor"] += item.amount_minor
         else:
             bucket["pending_minor"] += item.amount_minor
@@ -793,6 +812,8 @@ async def platform_overview(db: AsyncSession, starts_at: datetime, ends_at: date
             "refund",
             "chargeback",
             "earnings_release",
+            "excess_capture_liability",
+            "payment_dispute_hold",
         }:
             gross = sum(
                 item.amount_minor
@@ -815,14 +836,18 @@ async def platform_overview(db: AsyncSession, starts_at: datetime, ends_at: date
             data["creator_distributable_minor"] += _signed(entry)
         elif account.kind in {LedgerAccountKind.group_pending, LedgerAccountKind.group_available}:
             data["group_distributable_minor"] += _signed(entry)
-        if transaction.transaction_type.value == "refund":
+        if transaction.transaction_type.value == "refund" and not transaction.metadata_json.get(
+            "payment_refund_requirement_id"
+        ):
             data["refunds_minor"] += (
                 entry.amount_minor
                 if entry.direction is LedgerDirection.credit
                 and account.kind is LedgerAccountKind.platform_clearing
                 else 0
             )
-        if transaction.transaction_type.value == "chargeback":
+        if transaction.transaction_type.value == "chargeback" and not transaction.metadata_json.get(
+            "payment_refund_requirement_id"
+        ):
             data["chargebacks_minor"] += (
                 entry.amount_minor
                 if entry.direction is LedgerDirection.credit
@@ -1252,6 +1277,13 @@ async def group_overview(
             if account.kind is LedgerAccountKind.group_pending
             else "available_minor"
         ] += value
+        if transaction.transaction_type in {
+            LedgerTransactionType.earnings_release,
+            LedgerTransactionType.payment_dispute_hold,
+        }:
+            # Preserve pending/available balance movement without counting an
+            # internal reclassification as revenue or a reversal.
+            continue
         if value < 0:
             bucket["reversed_minor"] += -value
         source = sources[(transaction.currency, _source(transaction.transaction_type.value))]

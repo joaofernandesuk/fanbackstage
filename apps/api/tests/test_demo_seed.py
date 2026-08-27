@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
+from app.accounts import adult_access
+from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ContentType, MediaAsset
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.featuring import FeatureBooking
@@ -15,12 +17,13 @@ from app.models.groups import Group, GroupContract, GroupContractStatus
 from app.models.identity import User
 from app.models.marketplace import MarketplaceListing, MarketplaceListingStatus, MarketplaceOrder
 from app.models.messaging import Conversation, Message
-from app.models.notification import NotificationIntent
+from app.models.notification import NotificationClass, NotificationIntent, NotificationPreference
 from app.models.referral import ReferralCommissionAllocation, SignupAttribution
 from app.models.social import FeedPost, FeedPostStatus, Follow, PostComment, PostReaction
 from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
 from app.models.subscription import Subscription
+from app.notifications import service as notifications
 from app.seed import demo
 from app.seed.build import seed_database
 from app.seed.manifest import (
@@ -121,6 +124,7 @@ def test_demo_manifest_has_stable_unique_count_invariants():
     for creator in PUBLIC_CREATORS:
         assert (ASSET_ROOT / f"{creator.slug}.jpg").is_file()
         assert (ASSET_ROOT / f"{creator.slug}.mp4").is_file()
+        assert (ASSET_ROOT / f"{creator.slug}-preview.mp4").is_file()
         assert creator.avatar_reference == f"/demo/creators/{creator.slug}/avatar.jpg"
         assert creator.cover_reference == f"/demo/creators/{creator.slug}/cover.jpg"
 
@@ -134,6 +138,11 @@ async def _snapshot(db_session) -> dict[str, int]:
     now = datetime.now(UTC)
     return {
         "users": await count(User),
+        "current_adult_attested_users": await count(
+            User,
+            User.adult_attested_at.is_not(None),
+            User.adult_attestation_version == adult_access.current_policy_version(),
+        ),
         "creators": await count(CreatorProfile),
         "public_creators": await count(
             CreatorProfile,
@@ -176,6 +185,12 @@ async def _snapshot(db_session) -> dict[str, int]:
         "referral_allocations": await count(ReferralCommissionAllocation),
         "feature_bookings": await count(FeatureBooking),
         "notification_intents": await count(NotificationIntent),
+        "marketing_preferences": await count(
+            NotificationPreference, NotificationPreference.category == "marketing"
+        ),
+        "marketing_preference_audits": await count(
+            AuditEvent, AuditEvent.event_type == "notification.preference_changed"
+        ),
         "stories": await count(Story),
         "active_stories": await count(
             Story,
@@ -193,6 +208,17 @@ async def test_demo_seed_is_count_stable_when_run_twice(db_session):
     await db_session.commit()
     first = await _snapshot(db_session)
     first_storage_count = len(storage.objects)
+    marketing_in_user = await db_session.scalar(
+        select(User).where(User.email == "marketing-in@demo.fanbackstage.local")
+    )
+    assert marketing_in_user
+    first_marketing_consent_at = await db_session.scalar(
+        select(NotificationPreference.consented_at).where(
+            NotificationPreference.user_id == marketing_in_user.id,
+            NotificationPreference.category == "marketing",
+        )
+    )
+    assert first_marketing_consent_at is not None
 
     second_stats = await seed_database(db_session, storage)
     await db_session.commit()
@@ -204,6 +230,7 @@ async def test_demo_seed_is_count_stable_when_run_twice(db_session):
     assert len(storage.objects) == first_storage_count
     assert validation.ok, validation.failures
     assert second["users"] == TARGET_USER_COUNT
+    assert second["current_adult_attested_users"] == TARGET_USER_COUNT
     assert second["creators"] == TARGET_CREATOR_COUNT
     assert second["public_creators"] == TARGET_PUBLIC_CREATOR_COUNT
     assert second["suspended_creators"] == 1
@@ -226,6 +253,72 @@ async def test_demo_seed_is_count_stable_when_run_twice(db_session):
     assert second["referral_allocations"] >= 1
     assert second["feature_bookings"] >= 1
     assert second["notification_intents"] >= 20
+    assert second["marketing_preferences"] == 2
+    assert second["marketing_preference_audits"] == 2
+    marketing_users = (
+        await db_session.scalars(
+            select(User).where(
+                User.email.in_(
+                    [
+                        "marketing-in@demo.fanbackstage.local",
+                        "marketing-out@demo.fanbackstage.local",
+                    ]
+                )
+            )
+        )
+    ).all()
+    users_by_email = {user.email: user for user in marketing_users}
+    preferences = (
+        await db_session.scalars(
+            select(NotificationPreference).where(
+                NotificationPreference.user_id.in_([user.id for user in marketing_users]),
+                NotificationPreference.category == "marketing",
+            )
+        )
+    ).all()
+    preferences_by_user_id = {preference.user_id: preference for preference in preferences}
+    opted_in = preferences_by_user_id[users_by_email["marketing-in@demo.fanbackstage.local"].id]
+    opted_out = preferences_by_user_id[users_by_email["marketing-out@demo.fanbackstage.local"].id]
+    assert opted_in.email_enabled
+    assert opted_in.in_app_enabled
+    assert opted_in.consented_at is not None
+    assert opted_in.consented_at == first_marketing_consent_at
+    assert opted_in.consent_source == "account_settings"
+    assert not opted_out.email_enabled
+    assert opted_out.in_app_enabled
+    assert opted_out.consented_at is None
+    assert opted_out.consent_source is None
+    marketing_intent = SimpleNamespace(classification=NotificationClass.marketing)
+    assert await notifications._eligible(
+        db_session,
+        marketing_intent,
+        users_by_email["marketing-in@demo.fanbackstage.local"],
+    )
+    assert not await notifications._eligible(
+        db_session,
+        marketing_intent,
+        users_by_email["marketing-out@demo.fanbackstage.local"],
+    )
+    preference_events = (
+        await db_session.scalars(
+            select(AuditEvent).where(AuditEvent.event_type == "notification.preference_changed")
+        )
+    ).all()
+    events_by_actor_id = {event.actor_user_id: event for event in preference_events}
+    assert events_by_actor_id[
+        users_by_email["marketing-in@demo.fanbackstage.local"].id
+    ].metadata_json == {
+        "category": "marketing",
+        "email_enabled": True,
+        "in_app_enabled": True,
+    }
+    assert events_by_actor_id[
+        users_by_email["marketing-out@demo.fanbackstage.local"].id
+    ].metadata_json == {
+        "category": "marketing",
+        "email_enabled": False,
+        "in_app_enabled": True,
+    }
     assert second["active_stories"] == TARGET_ACTIVE_STORY_COUNT
     assert second["expired_stories"] == TARGET_EXPIRED_STORY_COUNT
     assert second["stories"] == TARGET_ACTIVE_STORY_COUNT + TARGET_EXPIRED_STORY_COUNT

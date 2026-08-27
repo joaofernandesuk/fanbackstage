@@ -1,0 +1,135 @@
+.dashboard {
+  display: grid;
+  gap: 1rem;
+}
+
+.bookingForm {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.bookingForm label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.bookingForm button {
+  align-self: end;
+}
+
+.bookingList {
+  display: grid;
+  gap: 0.75rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bookingList li {
+  align-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 1rem;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 0.9rem 1rem;
+}
+
+.bookingList div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.bookingList strong {
+  text-transform: capitalize;
+}
+
+.bookingList small {
+  opacity: 0.72;
+}
+
+.inlineStatus {
+  border-left: 3px solid #ec4899;
+  margin: 0;
+  padding: 0.65rem 0.8rem;
+}
+
+.paymentDialog {
+  background: transparent;
+  border: 0;
+  max-width: min(92vw, 560px);
+  padding: 0;
+}
+
+.paymentDialog::backdrop {
+  backdrop-filter: blur(5px);
+  background: rgb(2 6 23 / 72%);
+}
+
+.paymentPanel {
+  background: #0b1022;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 1.25rem;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 52%);
+  color: #f8fafc;
+  display: grid;
+  gap: 1rem;
+  padding: 1.4rem;
+}
+
+.paymentPanel > button:first-child {
+  font-size: 1.5rem;
+  justify-self: end;
+  line-height: 1;
+}
+
+.paymentPanel dl {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+}
+
+.paymentPanel dl div {
+  align-items: baseline;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.paymentPanel dt {
+  color: #a5b4fc;
+}
+
+.paymentPanel dd {
+  font-weight: 700;
+  margin: 0;
+  text-align: right;
+}
+
+.dialogError {
+  background: rgb(190 24 93 / 18%);
+  border: 1px solid rgb(244 114 182 / 45%);
+  border-radius: 0.75rem;
+  color: #fbcfe8;
+  margin: 0;
+  padding: 0.75rem;
+}
+
+.dialogActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .bookingList li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dialogActions button {
+    flex: 1 1 100%;
+  }
+}

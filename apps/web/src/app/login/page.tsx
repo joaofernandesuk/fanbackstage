@@ -7,4 +7,11 @@ export const metadata: Metadata = {
   description: "Log in to your FanBackstage account.",
 };
 
-export default function LoginPage() { return <AuthForm mode="login" />; }
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ next?: string | string[] }>;
+}) {
+  const requested = (await searchParams).next;
+  return <AuthForm mode="login" nextPath={Array.isArray(requested) ? requested[0] : requested} />;
+}

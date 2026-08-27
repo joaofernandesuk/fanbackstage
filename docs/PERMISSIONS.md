@@ -29,6 +29,17 @@ User
 
 Authentication should be account-centric. Role checks must be enforced server-side. Front-end hiding is never sufficient authorisation.
 
+Registration requires an explicit 18+ self-attestation. Legacy accounts may authenticate
+to acknowledge the current policy, but cannot start a paid action, receive a live token,
+or access adult-restricted media until they do. This baseline attestation never creates an
+entitlement and must not be described as legal age or identity verification.
+
+Only `moderation.access` may classify a media asset as `safe_public` or
+`adult_restricted`; the domain service enforces the capability, row-locks the asset, and
+audits only an actual state change. Creator KYC state is not editable by creators or group
+managers. Public serving uses the latest verification outcome and fails closed when it is
+not currently verified and adult-confirming.
+
 # 21. Group / Agency Management
 
 Group management is a core contract and permission system, not a simple foreign key from creator to agency.

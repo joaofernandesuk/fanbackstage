@@ -1,13 +1,16 @@
 from datetime import timedelta
+from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from app.accounts import service
+from app.accounts import adult_access, service
+from app.core.config import get_settings
 from app.main import app
 from app.models.audit import AuditEvent
-from app.models.identity import SecurityToken, TokenPurpose, User
+from app.models.identity import SecurityToken, TokenPurpose, User, UserSession
+from app.models.notification import NotificationIntent
 
 
 @pytest.fixture
@@ -20,7 +23,12 @@ async def client():
 
 async def register(client: httpx.AsyncClient, email: str = "fan@example.com") -> httpx.Response:
     return await client.post(
-        "/api/v1/auth/register", json={"email": email, "password": "strong-password-123"}
+        "/api/v1/auth/register",
+        json={
+            "email": email,
+            "password": "strong-password-123",
+            "adult_confirmed": True,
+        },
     )
 
 
@@ -28,6 +36,14 @@ async def login(client: httpx.AsyncClient, email: str = "fan@example.com") -> ht
     return await client.post(
         "/api/v1/auth/login", json={"email": email, "password": "strong-password-123"}
     )
+
+
+async def mark_email_verified(db_session, email: str = "fan@example.com") -> User:
+    user = await db_session.scalar(select(User).where(User.email == email))
+    assert user
+    user.email_verified_at = service._now()
+    await db_session.commit()
+    return user
 
 
 @pytest.mark.asyncio
@@ -45,8 +61,41 @@ async def test_registration_normalizes_email_rejects_duplicates_and_hides_passwo
 
 
 @pytest.mark.asyncio
-async def test_login_logout_and_revoked_session_cannot_authenticate(client):
+async def test_registration_requires_explicit_adult_self_attestation(client):
+    missing = await client.post(
+        "/api/v1/auth/register",
+        json={"email": "missing@example.com", "password": "strong-password-123"},
+    )
+    declined = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "declined@example.com",
+            "password": "strong-password-123",
+            "adult_confirmed": False,
+        },
+    )
+    assert missing.status_code == declined.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_low_level_registration_omission_cannot_grant_adult_attestation(db_session):
+    user, _ = await service.register(
+        db_session, "internal-unattested@example.com", "strong-password-123", None
+    )
+    await db_session.flush()
+
+    assert not adult_access.has_current_self_attestation(user)
+    event = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "account.registered")
+    )
+    assert event and event.metadata_json["adult_assurance"] == "none"
+    assert "adult_attestation_version" not in event.metadata_json
+
+
+@pytest.mark.asyncio
+async def test_login_logout_and_revoked_session_cannot_authenticate(client, db_session):
     await register(client)
+    await mark_email_verified(db_session)
     assert (await login(client)).status_code == 200
     assert (await client.get("/api/v1/me")).status_code == 200
     assert (await client.post("/api/v1/auth/logout")).status_code == 200
@@ -56,7 +105,13 @@ async def test_login_logout_and_revoked_session_cannot_authenticate(client):
 @pytest.mark.asyncio
 async def test_login_and_account_response_support_seeded_local_demo_email(client, db_session):
     email = "subscriber@demo.fanbackstage.local"
-    user, _ = await service.register(db_session, email, "fanbackstage-demo-local-only", None)
+    user, _ = await service.register(
+        db_session,
+        email,
+        "fanbackstage-demo-local-only",
+        None,
+        adult_confirmed=True,
+    )
     user.email_verified_at = service._now()
     await db_session.commit()
 
@@ -70,7 +125,11 @@ async def test_login_and_account_response_support_seeded_local_demo_email(client
 
     rejected = await client.post(
         "/api/v1/auth/register",
-        json={"email": "another@demo.fanbackstage.local", "password": "strong-password-123"},
+        json={
+            "email": "another@demo.fanbackstage.local",
+            "password": "strong-password-123",
+            "adult_confirmed": True,
+        },
     )
     assert rejected.status_code == 422
 
@@ -90,8 +149,149 @@ async def test_invalid_login_is_generic_and_audited(client, db_session):
 
 
 @pytest.mark.asyncio
-async def test_session_listing_single_revoke_and_revoke_others(client):
+async def test_inactive_account_login_is_rejected_before_session_creation(client, db_session):
+    user, _ = await service.register(
+        db_session,
+        "inactive@example.com",
+        "strong-password-123",
+        None,
+        adult_confirmed=True,
+    )
+    user.is_active = False
+    await db_session.commit()
+
+    response = await login(client, "inactive@example.com")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "This account is not active"
+    assert (await db_session.scalar(select(func.count()).select_from(UserSession))) == 0
+    event = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "auth.login_blocked_inactive")
+    )
+    assert event and event.actor_user_id == user.id
+
+
+@pytest.mark.asyncio
+async def test_unverified_email_login_is_rejected_before_session_creation(client, db_session):
+    await register(client, "unverified@example.com")
+
+    response = await login(client, "unverified@example.com")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Verify your email address before logging in."
+    assert (await db_session.scalar(select(func.count()).select_from(UserSession))) == 0
+    event = await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "auth.login_blocked_unverified")
+    )
+    assert event and event.target_id
+
+
+@pytest.mark.asyncio
+async def test_stale_unverified_session_cannot_authenticate_or_start_paid_action(
+    client, db_session
+):
+    await register(client, "stale-session@example.com")
+    user = await db_session.scalar(select(User).where(User.email == "stale-session@example.com"))
+    assert user and user.email_verified_at is None
+    raw = await service.create_session(db_session, user, None, "pre-gate-test")
+    await db_session.commit()
+    client.cookies.set(get_settings().session_cookie_name, raw)
+
+    assert (await client.get("/api/v1/me")).status_code == 401
+    purchase = await client.post(
+        f"/api/v1/purchases/content/{uuid4()}",
+        headers={"Idempotency-Key": "stale-unverified-session"},
+    )
+    assert purchase.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_resend_verification_is_non_enumerating_and_only_issues_when_needed(
+    client, db_session
+):
+    await register(client, "resend@example.com")
+    baseline_tokens = await db_session.scalar(select(func.count()).select_from(SecurityToken))
+    baseline_intents = await db_session.scalar(select(func.count()).select_from(NotificationIntent))
+
+    expected = {"message": "If the account needs verification, a new link has been sent."}
+    existing = await client.post(
+        "/api/v1/auth/resend-verification", json={"email": "resend@example.com"}
+    )
+    unknown = await client.post(
+        "/api/v1/auth/resend-verification", json={"email": "unknown@example.com"}
+    )
+    assert existing.status_code == unknown.status_code == 200
+    assert existing.json() == unknown.json() == expected
+    assert (
+        await db_session.scalar(select(func.count()).select_from(SecurityToken))
+        == baseline_tokens + 1
+    )
+    assert (
+        await db_session.scalar(select(func.count()).select_from(NotificationIntent))
+        == baseline_intents + 1
+    )
+    assert await db_session.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "auth.email_verification_resent")
+    )
+
+    user = await mark_email_verified(db_session, "resend@example.com")
+    assert user.email_verified_at
+    verified = await client.post(
+        "/api/v1/auth/resend-verification", json={"email": "resend@example.com"}
+    )
+    assert verified.status_code == 200 and verified.json() == expected
+    assert (
+        await db_session.scalar(select(func.count()).select_from(SecurityToken))
+        == baseline_tokens + 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_adult_access_cookie_is_signed_and_account_state_is_authoritative(client, db_session):
+    anonymous = await client.post("/api/v1/auth/adult-access", json={"adult_confirmed": True})
+    assert anonymous.status_code == 200
+    assert anonymous.json()["source"] == "cookie"
+    assert anonymous.json()["assurance"] == "self_attested"
+    cookie_name = get_settings().adult_access_cookie_name
+    signed = client.cookies.get(cookie_name)
+    assert signed
+    assert (await client.get("/api/v1/auth/adult-access/status")).json()["allowed"] is True
+
+    client.cookies.set(cookie_name, f"{signed[:-1]}{'A' if signed[-1] != 'A' else 'B'}")
+    tampered = await client.get("/api/v1/auth/adult-access/status")
+    assert tampered.json() == {
+        "allowed": False,
+        "assurance": "none",
+        "source": "none",
+        "policy_version": adult_access.current_policy_version(),
+        "expires_at": None,
+    }
+
+    user, _ = await service.register(
+        db_session,
+        "legacy@example.com",
+        "strong-password-123",
+        None,
+        adult_confirmed=False,
+    )
+    user.email_verified_at = service._now()
+    user.adult_attested_at = None
+    user.adult_attestation_version = None
+    await db_session.commit()
+    assert (await login(client, "legacy@example.com")).status_code == 200
+    client.cookies.set(cookie_name, signed)
+    denied = await client.get("/api/v1/auth/adult-access/status")
+    assert denied.json()["allowed"] is False
+    acknowledged = await client.post("/api/v1/auth/adult-access", json={"adult_confirmed": True})
+    assert acknowledged.json()["source"] == "account"
+    await db_session.refresh(user)
+    assert adult_access.has_current_self_attestation(user)
+
+
+@pytest.mark.asyncio
+async def test_session_listing_single_revoke_and_revoke_others(client, db_session):
     await register(client)
+    await mark_email_verified(db_session)
     assert (await login(client)).status_code == 200
     second = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
     assert (await login(second)).status_code == 200
@@ -134,6 +334,7 @@ async def test_verification_token_is_hashed_single_use_and_expires(client, db_se
 @pytest.mark.asyncio
 async def test_password_reset_is_single_use_expiring_and_revokes_sessions(client, db_session):
     await register(client)
+    await mark_email_verified(db_session)
     await login(client)
     user = await db_session.scalar(select(User).where(User.email == "fan@example.com"))
     raw = await service.issue_security_token(db_session, user.id, TokenPurpose.password_reset)

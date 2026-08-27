@@ -13,7 +13,7 @@ from app.discovery import service as discovery
 from app.groups import service as groups
 from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ContentType, ModerationStatus
-from app.models.creator import CreatorStatus
+from app.models.creator import CreatorStatus, CreatorVerification, VerificationStatus
 from app.models.groups import GroupPermission
 from app.models.social import FeedPost, FeedPostStatus, FeedPostType
 from app.models.trust_safety import (
@@ -26,6 +26,19 @@ from app.models.trust_safety import (
     TrustSafetyReport,
 )
 from app.trust_safety import service
+
+
+async def add_current_creator_kyc(db_session, creator_id, provider_reference: str) -> None:
+    db_session.add(
+        CreatorVerification(
+            creator_profile_id=creator_id,
+            provider="test-fixture",
+            provider_reference=provider_reference,
+            status=VerificationStatus.verified,
+            adult_verified=True,
+        )
+    )
+    await db_session.flush()
 
 
 @pytest.mark.asyncio
@@ -317,6 +330,7 @@ async def test_revoked_or_expired_required_consent_disappears_from_discovery(db_
         db_session, "ts-discovery-reviewer@example.com", "strong-password-123", None
     )
     profile = await creators.get_or_create_profile(db_session, owner)
+    await add_current_creator_kyc(db_session, profile.id, "test-consent-discovery-current-kyc")
     profile.status, profile.is_public = CreatorStatus.approved, True
     content = ContentItem(
         owner_creator_id=profile.id,
@@ -585,6 +599,7 @@ async def test_creator_suspension_uses_creator_lifecycle_and_preserves_action_hi
         db_session, "ts-suspend-moderator@example.com", "strong-password-123", None
     )
     creator = await creators.get_or_create_profile(db_session, owner)
+    await add_current_creator_kyc(db_session, creator.id, "test-creator-suspension-current-kyc")
     creator.status, creator.is_public = CreatorStatus.approved, True
     case = ModerationCase(
         public_id="TS-CREATOR-SUSPEND",

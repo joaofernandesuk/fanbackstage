@@ -5,8 +5,10 @@ import Link from "next/link";
 import { ReactNode, useCallback, useEffect, useState } from "react";
 
 import { CurrentUser, api } from "../lib/api";
+import { authEntryPath, AuthMode } from "../lib/auth-ui";
 import { accessLabel } from "../lib/public-api";
 import { mediaForUsername } from "../lib/demo-personas";
+import { useAuthExperience } from "./auth-experience";
 import styles from "./consumer-ui.module.css";
 
 export { mediaForUsername } from "../lib/demo-personas";
@@ -27,6 +29,7 @@ function loadCurrentUser() {
 export function useLoginGate() {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const { openAuth } = useAuthExperience();
 
   useEffect(() => {
     let active = true;
@@ -42,12 +45,11 @@ export function useLoginGate() {
     };
   }, []);
 
-  const requireLogin = useCallback(() => {
+  const requireLogin = useCallback((request?: { mode?: AuthMode; nextPath?: string }) => {
     if (user) return true;
-    const next = `${window.location.pathname}${window.location.search}`;
-    window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+    openAuth(request?.mode ?? "login", request?.nextPath);
     return false;
-  }, [user]);
+  }, [openAuth, user]);
 
   return { authenticated: Boolean(user), loading, requireLogin, user } as const;
 }
@@ -56,15 +58,29 @@ export function LoginGate({
   children,
   className,
   label = "Log in to continue",
+  nextPath,
 }: {
   children: ReactNode;
   className?: string;
   label?: string;
+  nextPath?: string;
 }) {
-  const { authenticated, loading } = useLoginGate();
+  const { authenticated, loading, requireLogin } = useLoginGate();
   if (loading) return <span className={className} aria-busy="true">Checking access…</span>;
   if (!authenticated) {
-    return <Link className={className} href="/login">{label}</Link>;
+    return (
+      <Link
+        aria-haspopup="dialog"
+        className={className}
+        href={authEntryPath("login", nextPath)}
+        onNavigate={(event) => {
+          event.preventDefault();
+          requireLogin({ nextPath });
+        }}
+      >
+        {label}
+      </Link>
+    );
   }
   return <>{children}</>;
 }

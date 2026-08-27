@@ -5,20 +5,35 @@ from hashlib import sha256
 from hmac import new as hmac_new
 
 import pytest
+from conftest import trusted_self_attested_accounts as accounts
 from sqlalchemy import select
 
-from app.accounts import service as accounts
+from app.core.config import get_settings
 from app.creators import service as creators
+from app.finance import service as finance
 from app.integrations.streaming import LiveKitStreamingProvider
+from app.models.audit import AuditEvent
 from app.models.creator import CreatorStatus
-from app.models.finance import LedgerTransaction, PaymentAttempt, PaymentStatus
+from app.models.finance import (
+    LedgerDirection,
+    LedgerEntry,
+    LedgerTransaction,
+    LedgerTransactionType,
+    PaymentAttempt,
+    PaymentRefundRequirement,
+    PaymentStatus,
+)
+from app.models.messaging import UserBlock
 from app.models.streaming import (
     LiveAccessMode,
     LiveRecording,
     LiveRecordingStatus,
     LiveReport,
+    PrivateRequestStatus,
     PrivateSession,
     PrivateSessionMode,
+    PrivateSessionRequest,
+    PrivateSessionSettlement,
     PrivateSessionStatus,
     SessionParticipant,
 )
@@ -65,6 +80,23 @@ def signed_livekit_webhook(body: bytes) -> str:
     return f"{header}.{payload}.{signature}"
 
 
+def signed_payment_event(
+    attempt: PaymentAttempt, event_type: str, event_id: str
+) -> tuple[bytes, str]:
+    payload = json.dumps(
+        {
+            "id": event_id,
+            "type": event_type,
+            "payment_reference": attempt.provider_reference,
+        },
+        separators=(",", ":"),
+    ).encode()
+    signature = hmac_new(
+        get_settings().payment_webhook_secret.encode(), payload, sha256
+    ).hexdigest()
+    return payload, signature
+
+
 def test_livekit_webhook_requires_valid_signature_and_raw_body_hash():
     body = b'{"id":"event-1","event":"participant_joined"}'
     provider = LiveKitStreamingProvider()
@@ -88,6 +120,7 @@ async def creator(db, email):
     await creators.submit(db, profile, user.id)
     await creators.development_verify(db, profile, True, user.id)
     await creators.set_status(db, profile, CreatorStatus.approved, user.id)
+    profile.is_public = True
     return user, profile
 
 
@@ -120,6 +153,70 @@ async def test_private_requests_queue_during_live_but_cannot_be_accepted_until_l
     assert session.status is PrivateSessionStatus.awaiting_payment_authorization
     assert session.payment_attempt_id is not None
     assert session.provider_room_name
+
+
+@pytest.mark.parametrize("containment", ["private", "requester_blocks", "creator_blocks"])
+@pytest.mark.asyncio
+async def test_stale_private_request_rechecks_creator_and_relationship_before_payment(
+    db_session, containment
+):
+    slug = {"private": "p", "requester_blocks": "rb", "creator_blocks": "cb"}[containment]
+    owner, profile = await creator(db_session, f"sp-{slug}@example.com")
+    requester, _ = await accounts.register(
+        db_session,
+        f"sv-{slug}@example.com",
+        "strong-password-123",
+        None,
+    )
+    request = await streaming.request_private_session(
+        db_session, requester, profile.id, PrivateSessionMode.one_to_one
+    )
+    if containment == "private":
+        profile.is_public = False
+    else:
+        db_session.add(
+            UserBlock(
+                blocker_user_id=(requester.id if containment == "requester_blocks" else owner.id),
+                blocked_user_id=(owner.id if containment == "requester_blocks" else requester.id),
+            )
+        )
+    await db_session.flush()
+
+    with pytest.raises(PermissionError, match="Private session request not found"):
+        await streaming.accept_private_request(db_session, owner, request.id)
+    assert request.status is PrivateRequestStatus.pending
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
+    assert await db_session.scalar(select(PrivateSession.id)) is None
+
+
+@pytest.mark.parametrize("containment", ["private", "requester_blocks", "creator_blocks"])
+@pytest.mark.asyncio
+async def test_private_request_requires_public_unblocked_creator(db_session, containment):
+    slug = {"private": "p", "requester_blocks": "rb", "creator_blocks": "cb"}[containment]
+    owner, profile = await creator(db_session, f"np-{slug}@example.com")
+    requester, _ = await accounts.register(
+        db_session,
+        f"nv-{slug}@example.com",
+        "strong-password-123",
+        None,
+    )
+    if containment == "private":
+        profile.is_public = False
+    else:
+        db_session.add(
+            UserBlock(
+                blocker_user_id=(requester.id if containment == "requester_blocks" else owner.id),
+                blocked_user_id=(owner.id if containment == "requester_blocks" else requester.id),
+            )
+        )
+    await db_session.flush()
+
+    with pytest.raises(PermissionError, match="Private session is unavailable"):
+        await streaming.request_private_session(
+            db_session, requester, profile.id, PrivateSessionMode.one_to_one
+        )
+    assert await db_session.scalar(select(PrivateSessionRequest.id)) is None
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
 
 
 @pytest.mark.asyncio
@@ -155,7 +252,9 @@ async def test_private_presence_reconciliation_uses_livekit_membership_for_delay
             select(SessionParticipant).where(SessionParticipant.private_session_id == session.id)
         )
     ).all()
-    assert all(participant.joined_at and participant.left_at is None for participant in participants)
+    assert all(
+        participant.joined_at and participant.left_at is None for participant in participants
+    )
 
     provider.identities = {str(owner.id)}
     assert await streaming.reconcile_private_provider_presence(db_session) == 1
@@ -490,6 +589,339 @@ async def test_private_settlement_uses_seconds_minimum_cap_and_is_idempotent(db_
             )
         )
     ).all().__len__() == 1
+
+
+@pytest.mark.parametrize(
+    ("resolution_type", "expected_session_status", "expected_payment_status"),
+    [
+        (
+            LedgerTransactionType.refund,
+            PrivateSessionStatus.cancelled,
+            PaymentStatus.refunded,
+        ),
+        (
+            LedgerTransactionType.chargeback,
+            PrivateSessionStatus.disputed,
+            PaymentStatus.chargeback,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_private_provider_reversal_is_exact_terminal_and_idempotent(
+    db_session, resolution_type, expected_session_status, expected_payment_status
+):
+    owner, profile = await creator(db_session, f"reverse-{resolution_type.value}@example.com")
+    payer, _ = await accounts.register(
+        db_session,
+        f"reverse-payer-{resolution_type.value}@example.com",
+        "strong-password-123",
+        None,
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    attempt = await db_session.get(PaymentAttempt, session.payment_attempt_id)
+    assert attempt is not None
+    attempt.status = PaymentStatus.succeeded
+    session.status, session.billable_seconds = PrivateSessionStatus.ended, 95
+    await streaming.settle_private_session(db_session, session)
+    settlement = await db_session.scalar(
+        select(PrivateSessionSettlement).where(
+            PrivateSessionSettlement.private_session_id == session.id
+        )
+    )
+    assert settlement is not None
+    original = await db_session.get(LedgerTransaction, settlement.ledger_transaction_id)
+    assert original is not None
+    original_entries = (
+        await db_session.scalars(
+            select(LedgerEntry).where(LedgerEntry.transaction_id == original.id)
+        )
+    ).all()
+
+    reversed_session = await streaming.reverse_private_session_payment(
+        db_session,
+        attempt,
+        resolution_type=resolution_type,
+        reason=f"provider_{resolution_type.value}",
+    )
+    assert reversed_session is session
+    assert session.status is expected_session_status
+    assert attempt.status is expected_payment_status
+    with pytest.raises(PermissionError, match="unavailable"):
+        await streaming.issue_private_token(db_session, payer, session.id)
+    assert (
+        await streaming.end_private_session(
+            db_session, None, session.id, "late_provider_room_finished"
+        )
+    ).status is expected_session_status
+
+    reversals = (
+        await db_session.scalars(
+            select(LedgerTransaction).where(
+                LedgerTransaction.reversal_of_transaction_id == original.id
+            )
+        )
+    ).all()
+    assert len(reversals) == 1
+    reversal = reversals[0]
+    assert reversal.transaction_type is resolution_type
+    reversal_entries = (
+        await db_session.scalars(
+            select(LedgerEntry).where(LedgerEntry.transaction_id == reversal.id)
+        )
+    ).all()
+    assert sorted(
+        (entry.ledger_account_id, entry.direction.value, entry.amount_minor)
+        for entry in reversal_entries
+    ) == sorted(
+        (
+            entry.ledger_account_id,
+            (
+                LedgerDirection.credit.value
+                if entry.direction is LedgerDirection.debit
+                else LedgerDirection.debit.value
+            ),
+            entry.amount_minor,
+        )
+        for entry in original_entries
+    )
+
+    await streaming.reverse_private_session_payment(
+        db_session,
+        attempt,
+        resolution_type=resolution_type,
+        reason=f"provider_{resolution_type.value}_replay",
+    )
+    assert (
+        len(
+            (
+                await db_session.scalars(
+                    select(LedgerTransaction).where(
+                        LedgerTransaction.reversal_of_transaction_id == original.id
+                    )
+                )
+            ).all()
+        )
+        == 1
+    )
+    assert (
+        len(
+            (
+                await db_session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.event_type == "private_session.payment_reversed",
+                        AuditEvent.target_id == str(session.id),
+                    )
+                )
+            ).all()
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_private_provider_reversal_before_settlement_cancels_and_chargeback_dominates(
+    db_session,
+):
+    owner, profile = await creator(db_session, "early-reversal-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "early-reversal-payer@example.com", "strong-password-123", None
+    )
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    session = await streaming.accept_private_request(db_session, owner, request.id)
+    attempt = await db_session.get(PaymentAttempt, session.payment_attempt_id)
+    assert attempt is not None
+
+    await streaming.reverse_private_session_payment(
+        db_session,
+        attempt,
+        resolution_type=LedgerTransactionType.refund,
+        reason="provider_refund_before_authorization",
+    )
+    assert session.status is PrivateSessionStatus.cancelled
+    assert attempt.status is PaymentStatus.refunded
+    assert (
+        await db_session.scalar(
+            select(PrivateSessionSettlement).where(
+                PrivateSessionSettlement.private_session_id == session.id
+            )
+        )
+        is None
+    )
+
+    await streaming.reverse_private_session_payment(
+        db_session,
+        attempt,
+        resolution_type=LedgerTransactionType.chargeback,
+        reason="provider_chargeback_after_refund",
+    )
+    assert session.status is PrivateSessionStatus.disputed
+    assert attempt.status is PaymentStatus.chargeback
+    await streaming.reverse_private_session_payment(
+        db_session,
+        attempt,
+        resolution_type=LedgerTransactionType.refund,
+        reason="late_refund_must_not_downgrade_chargeback",
+    )
+    assert session.status is PrivateSessionStatus.disputed
+    assert attempt.status is PaymentStatus.chargeback
+    assert (
+        await streaming.end_private_session(
+            db_session, None, session.id, "late_provider_room_finished"
+        )
+    ).status is PrivateSessionStatus.disputed
+    assert await streaming.authorize_private_session(db_session, session) is session
+    with pytest.raises(streaming.StreamingError, match="Only ended"):
+        await streaming.settle_private_session(db_session, session)
+    with pytest.raises(PermissionError, match="unavailable"):
+        await streaming.issue_private_token(db_session, payer, session.id)
+    assert (
+        await db_session.scalar(
+            select(LedgerTransaction).where(
+                LedgerTransaction.reference == f"private_session_reversal:{session.id}"
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_signed_private_disputes_deny_access_and_reverse_exact_settlement_once(db_session):
+    owner, profile = await creator(db_session, "signed-live-dispute-owner@example.com")
+    pending_payer, _ = await accounts.register(
+        db_session, "signed-live-pending@example.com", "strong-password-123", None
+    )
+    pending_request = await streaming.request_private_session(
+        db_session, pending_payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    pending_session = await streaming.accept_private_request(db_session, owner, pending_request.id)
+    pending_attempt = await db_session.get(PaymentAttempt, pending_session.payment_attempt_id)
+    assert pending_attempt
+    pending_dispute, pending_dispute_signature = signed_payment_event(
+        pending_attempt,
+        "payment.disputed",
+        f"private-pending-dispute-{pending_attempt.id}",
+    )
+    await finance.process_development_webhook(
+        db_session, pending_dispute, pending_dispute_signature
+    )
+    assert pending_attempt.status is PaymentStatus.disputed
+    assert pending_session.status is PrivateSessionStatus.disputed
+    pending_success, pending_success_signature = signed_payment_event(
+        pending_attempt,
+        "payment.succeeded",
+        f"private-pending-late-success-{pending_attempt.id}",
+    )
+    await finance.process_development_webhook(
+        db_session, pending_success, pending_success_signature
+    )
+    assert pending_attempt.status is PaymentStatus.disputed
+    assert pending_session.status is PrivateSessionStatus.disputed
+    with pytest.raises(PermissionError, match="unavailable"):
+        await streaming.issue_private_token(db_session, pending_payer, pending_session.id)
+    assert (
+        await db_session.scalar(
+            select(PrivateSessionSettlement.id).where(
+                PrivateSessionSettlement.private_session_id == pending_session.id
+            )
+        )
+        is None
+    )
+    pending_chargeback, pending_chargeback_signature = signed_payment_event(
+        pending_attempt,
+        "payment.chargeback",
+        f"private-pending-chargeback-{pending_attempt.id}",
+    )
+    await finance.process_development_webhook(
+        db_session, pending_chargeback, pending_chargeback_signature
+    )
+    requirement = await db_session.scalar(
+        select(PaymentRefundRequirement).where(
+            PaymentRefundRequirement.payment_attempt_id == pending_attempt.id
+        )
+    )
+    assert requirement and requirement.status.value == "completed"
+    assert pending_attempt.status is PaymentStatus.chargeback
+    assert pending_session.status is PrivateSessionStatus.failed
+
+    settled_payer, _ = await accounts.register(
+        db_session, "signed-live-settled@example.com", "strong-password-123", None
+    )
+    settled_request = await streaming.request_private_session(
+        db_session, settled_payer, profile.id, PrivateSessionMode.one_to_one
+    )
+    settled_session = await streaming.accept_private_request(db_session, owner, settled_request.id)
+    settled_attempt = await db_session.get(PaymentAttempt, settled_session.payment_attempt_id)
+    assert settled_attempt
+    success_payload, success_signature = finance.development_webhook_payload(settled_attempt)
+    await finance.process_development_webhook(db_session, success_payload, success_signature)
+    assert settled_session.status is PrivateSessionStatus.ready
+    settled_session.status = PrivateSessionStatus.ended
+    settled_session.billable_seconds = 60
+    await streaming.settle_private_session(db_session, settled_session)
+    settlement = await db_session.scalar(
+        select(PrivateSessionSettlement).where(
+            PrivateSessionSettlement.private_session_id == settled_session.id
+        )
+    )
+    assert settlement
+
+    settled_dispute, settled_dispute_signature = signed_payment_event(
+        settled_attempt,
+        "payment.disputed",
+        f"private-settled-dispute-{settled_attempt.id}",
+    )
+    await finance.process_development_webhook(
+        db_session, settled_dispute, settled_dispute_signature
+    )
+    assert settled_attempt.status is PaymentStatus.disputed
+    assert settled_session.status is PrivateSessionStatus.disputed
+    assert (
+        await db_session.scalar(
+            select(LedgerTransaction.id).where(
+                LedgerTransaction.reversal_of_transaction_id == settlement.ledger_transaction_id
+            )
+        )
+        is None
+    )
+    with pytest.raises(PermissionError, match="unavailable"):
+        await streaming.issue_private_token(db_session, settled_payer, settled_session.id)
+
+    settled_refund, settled_refund_signature = signed_payment_event(
+        settled_attempt,
+        "payment.refunded",
+        f"private-settled-refund-{settled_attempt.id}",
+    )
+    await finance.process_development_webhook(db_session, settled_refund, settled_refund_signature)
+    assert settled_attempt.status is PaymentStatus.refunded
+    assert settled_session.status is PrivateSessionStatus.cancelled
+    settled_chargeback, settled_chargeback_signature = signed_payment_event(
+        settled_attempt,
+        "payment.chargeback",
+        f"private-settled-chargeback-{settled_attempt.id}",
+    )
+    await finance.process_development_webhook(
+        db_session, settled_chargeback, settled_chargeback_signature
+    )
+    assert settled_attempt.status is PaymentStatus.chargeback
+    assert settled_session.status is PrivateSessionStatus.disputed
+    assert (
+        len(
+            (
+                await db_session.scalars(
+                    select(LedgerTransaction).where(
+                        LedgerTransaction.reversal_of_transaction_id
+                        == settlement.ledger_transaction_id
+                    )
+                )
+            ).all()
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio

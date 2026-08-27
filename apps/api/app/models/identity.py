@@ -29,10 +29,19 @@ class TokenPurpose(str, enum.Enum):
 
 class User(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("email = lower(email)", name="ck_users_email_normalized"),)
+    __table_args__ = (
+        CheckConstraint("email = lower(email)", name="ck_users_email_normalized"),
+        CheckConstraint(
+            "(adult_attested_at IS NULL AND adult_attestation_version IS NULL) OR "
+            "(adult_attested_at IS NOT NULL AND adult_attestation_version IS NOT NULL)",
+            name="ck_users_adult_attestation_complete",
+        ),
+    )
     email: Mapped[str] = mapped_column(String(320), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    adult_attested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    adult_attestation_version: Mapped[str | None] = mapped_column(String(64))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     roles: Mapped[list["Role"]] = relationship(secondary="user_roles", lazy="selectin")
     creator_profile: Mapped["CreatorProfile | None"] = relationship(

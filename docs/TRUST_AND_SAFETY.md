@@ -47,6 +47,20 @@ Phase 5 provides stable post/comment report targets and append-oriented report r
 
 Exact legal and payments requirements vary by jurisdiction and provider and must be validated before production launch. The architecture should make those obligations enforceable without rebuilding the content model.
 
+## 29.3 Implemented baseline adult-access boundary
+
+The current implementation provides only a versioned 18+ self-attestation. Anonymous
+acknowledgement is stored in an HMAC-signed, HttpOnly, SameSite cookie with a bounded
+expiry; client flags and tampered or expired cookies fail closed. Authenticated account
+state is authoritative, so a guest cookie cannot elevate a legacy account. Restricted
+guest media URLs are capped to the remaining signed-attestation lifetime.
+
+This is deliberately not called age verification. No jurisdiction rules, date of birth,
+document result, or assurance level is inferred. Production remains blocked until real
+age-assurance and creator-KYC adapters, signed replay-safe callbacks, evidence retention,
+and jurisdiction/provider policy have been selected and implemented. Creator public
+serving separately requires the latest verified adult KYC result.
+
 # 31. Admin Backoffice
 
 - Global overview dashboard

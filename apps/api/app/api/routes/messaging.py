@@ -5,13 +5,21 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 
+from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db
 from app.content.access import can_access_asset
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_messaging_rate_limit
+from app.creators.service import require_public_creator_access
 from app.media.storage import storage_provider
 from app.messaging import service
-from app.models.content import DerivativeType, MediaAsset, MediaDerivative, MediaStatus
+from app.models.content import (
+    DerivativeType,
+    MediaAsset,
+    MediaAudience,
+    MediaDerivative,
+    MediaStatus,
+)
 from app.models.creator import CreatorProfile
 from app.models.messaging import (
     AudienceSegment,
@@ -79,8 +87,11 @@ async def update_settings(
 
 @router.get("/creator/{creator_id}/send-price")
 async def send_price(creator_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
-    creator = await db.get(CreatorProfile, creator_id)
-    if not creator or not await service.can_message(db, identity[0], creator):
+    try:
+        creator = await require_public_creator_access(db, creator_id, identity[0].id)
+    except ValueError as exc:
+        raise HTTPException(403, "Messaging is not permitted") from exc
+    if not await service.can_message(db, identity[0], creator):
         raise HTTPException(403, "Messaging is not permitted")
     amount, currency = await service.resolve_send_price(db, identity[0], creator)
     return {
@@ -96,8 +107,11 @@ async def start(
 ) -> MessageResponse:
     try:
         await enforce_messaging_rate_limit(request, str(identity[0].id), "send")
-        creator = await db.get(CreatorProfile, creator_id)
-        if not creator or identity[0].id == creator.user_id:
+        try:
+            creator = await require_public_creator_access(db, creator_id, identity[0].id)
+        except ValueError as exc:
+            raise PermissionError("Messaging is not permitted") from exc
+        if identity[0].id == creator.user_id:
             raise ValueError("Use a conversation to send creator messages")
         # A priced initiation is intentionally not persisted until its existing payment attempt settles.
         amount, _ = await service.resolve_send_price(db, identity[0], creator)
@@ -227,6 +241,11 @@ async def messages(
         await service.assert_participant(db, conversation, identity[0])
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
+    if identity[0].id == conversation.viewer_user_id:
+        try:
+            await require_public_creator_access(db, conversation.creator_id, identity[0].id)
+        except ValueError as exc:
+            raise HTTPException(404, "Attachment not found") from exc
     rows = (
         await db.scalars(
             select(Message)
@@ -381,14 +400,20 @@ async def attachment_access(
             MediaDerivative.status == MediaStatus.ready,
         )
     )
-    allowed = await can_access_asset(db, asset.id, identity[0])
+    decision = adult_access.resolve_adult_access(identity[0], None)
+    allowed = await can_access_asset(db, asset.id, identity[0], decision)
+    preview_allowed = asset.audience is MediaAudience.safe_public or decision.allowed
     return AttachmentAccessResponse(
         id=attachment.id,
         media_type=asset.media_type.value,
         locked=attachment.unlock_price_minor is not None and not allowed,
         amount_minor=attachment.unlock_price_minor,
         currency=attachment.unlock_currency,
-        preview_delivery_path=f"/messages/attachments/{attachment.id}/preview" if preview else None,
+        preview_delivery_path=(
+            f"/messages/attachments/{attachment.id}/preview"
+            if preview and preview_allowed
+            else None
+        ),
         full_delivery_path=f"/media/derivatives/{full}" if allowed and full else None,
     )
 
@@ -412,10 +437,20 @@ async def attachment_preview(
     )
     if not derivative:
         raise HTTPException(404, "Attachment preview not found")
-    return RedirectResponse(
-        storage_provider().create_download_url(
-            derivative.storage_key, get_settings().media_url_ttl_seconds
+    decision = adult_access.resolve_adult_access(identity[0], None)
+    if asset.audience is MediaAudience.adult_restricted and not decision.allowed:
+        raise HTTPException(404, "Attachment preview not found")
+    try:
+        ttl = (
+            adult_access.restricted_delivery_ttl(decision, get_settings().media_url_ttl_seconds)
+            if asset.audience is MediaAudience.adult_restricted
+            else get_settings().media_url_ttl_seconds
         )
+    except ValueError as exc:
+        raise HTTPException(404, "Attachment preview not found") from exc
+    return RedirectResponse(
+        storage_provider().create_download_url(derivative.storage_key, ttl),
+        headers={"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"},
     )
 
 

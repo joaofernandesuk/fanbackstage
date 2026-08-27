@@ -1,12 +1,16 @@
+import hashlib
+import hmac
+import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from conftest import trusted_self_attested_accounts as accounts
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from starlette.requests import Request
 
-from app.accounts import service as accounts
+from app.accounts import adult_access
 from app.content.access import can_access_asset
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_messaging_rate_limit
@@ -28,8 +32,15 @@ from app.models.content import (
     MediaType,
     ModerationStatus,
 )
-from app.models.creator import CreatorStatus
-from app.models.finance import LedgerEntry, PaymentAttempt
+from app.models.creator import CreatorStatus, CreatorVerification, VerificationStatus
+from app.models.finance import (
+    LedgerEntry,
+    LedgerTransaction,
+    LedgerTransactionType,
+    PaymentAttempt,
+    PaymentRefundRequirement,
+    PaymentStatus,
+)
 from app.models.messaging import (
     AudienceSegment,
     CampaignStatus,
@@ -38,7 +49,9 @@ from app.models.messaging import (
     MassMessageRecipient,
     Message,
     MessageReport,
+    MessageUnlockPurchase,
     MessagingPermission,
+    PendingMessageSend,
     UserBlock,
 )
 from app.models.social import Follow
@@ -59,7 +72,26 @@ async def creator(db, email):
     await creators.submit(db, profile, user.id)
     await creators.development_verify(db, profile, True, user.id)
     await creators.set_status(db, profile, CreatorStatus.approved, user.id)
+    profile.is_public = True
+    await db.flush()
     return user, profile
+
+
+def signed_payment_event(
+    attempt: PaymentAttempt, event_type: str, event_id: str
+) -> tuple[bytes, str]:
+    payload = json.dumps(
+        {
+            "id": event_id,
+            "type": event_type,
+            "payment_reference": attempt.provider_reference,
+        },
+        separators=(",", ":"),
+    ).encode()
+    signature = hmac.new(
+        get_settings().payment_webhook_secret.encode(), payload, hashlib.sha256
+    ).hexdigest()
+    return payload, signature
 
 
 @pytest.mark.asyncio
@@ -98,10 +130,153 @@ async def test_paid_send_settles_once_and_only_delivers_after_payment(db_session
     )
     assert await finance.process_development_webhook(db_session, payload, signature) is None
     assert await db_session.scalar(select(func.count()).select_from(Message)) == 1
-    await finance.refund_message_charge(db_session, pending, buyer, "support refund")
-    await db_session.flush()
+    original_ledger_id = pending.ledger_transaction_id
+    refund_payload = json.dumps(
+        {
+            "id": f"provider-message-refund-{attempt.id}",
+            "type": "payment.refunded",
+            "payment_reference": attempt.provider_reference,
+        },
+        separators=(",", ":"),
+    ).encode()
+    refund_signature = hmac.new(
+        get_settings().payment_webhook_secret.encode(), refund_payload, hashlib.sha256
+    ).hexdigest()
+    await finance.process_development_webhook(db_session, refund_payload, refund_signature)
     assert pending.status == "refunded"
+    assert attempt.status is PaymentStatus.refunded
     assert await db_session.scalar(select(func.count()).select_from(Message)) == 1
+    reversal = await db_session.scalar(
+        select(LedgerTransaction).where(
+            LedgerTransaction.reversal_of_transaction_id == original_ledger_id,
+            LedgerTransaction.transaction_type == LedgerTransactionType.refund,
+        )
+    )
+    assert reversal
+
+
+@pytest.mark.asyncio
+async def test_signed_messaging_disputes_deny_delivery_and_reverse_once(db_session):
+    owner, profile = await creator(db_session, "message-dispute-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session, "message-dispute-buyer@example.com", "strong-password-123", None
+    )
+    settings = await messaging.settings_for_creator(db_session, profile.id)
+    settings.permission = MessagingPermission.anyone
+    settings.send_fee_minor, settings.send_fee_currency = 250, "EUR"
+
+    message_count = await db_session.scalar(select(func.count()).select_from(Message))
+    pending = await messaging.initiate_paid_send(
+        db_session, buyer, profile.id, "must remain undelivered", "message-dispute-send"
+    )
+    pending_attempt = await db_session.get(PaymentAttempt, pending.payment_attempt_id)
+    assert pending_attempt
+    dispute_payload, dispute_signature = signed_payment_event(
+        pending_attempt, "payment.disputed", f"message-send-dispute-{pending_attempt.id}"
+    )
+    await finance.process_development_webhook(db_session, dispute_payload, dispute_signature)
+    assert pending.status == "disputed"
+    assert pending_attempt.status is PaymentStatus.disputed
+    late_success, late_success_signature = signed_payment_event(
+        pending_attempt,
+        "payment.succeeded",
+        f"message-send-late-success-{pending_attempt.id}",
+    )
+    await finance.process_development_webhook(db_session, late_success, late_success_signature)
+    assert pending.status == "disputed"
+    assert pending.ledger_transaction_id is None
+    assert pending.message_id is None
+    assert await db_session.scalar(select(func.count()).select_from(Message)) == message_count
+    chargeback_payload, chargeback_signature = signed_payment_event(
+        pending_attempt,
+        "payment.chargeback",
+        f"message-send-chargeback-{pending_attempt.id}",
+    )
+    await finance.process_development_webhook(db_session, chargeback_payload, chargeback_signature)
+    requirement = await db_session.scalar(
+        select(PaymentRefundRequirement).where(
+            PaymentRefundRequirement.payment_attempt_id == pending_attempt.id
+        )
+    )
+    assert requirement and requirement.status.value == "completed"
+    assert pending.status == "failed"
+    assert pending_attempt.status is PaymentStatus.chargeback
+    assert await db_session.scalar(select(func.count()).select_from(Message)) == message_count
+
+    initiated = await messaging.send_message(db_session, buyer, profile.id, "hello")
+    locked_message = await messaging.send_in_conversation(
+        db_session, owner, initiated.conversation_id, "locked"
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        storage_key="private/message-dispute-locked",
+        original_filename="dispute.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    attachment = await messaging.attach_media(
+        db_session, owner, locked_message.id, asset.id, 700, "EUR"
+    )
+    unlock = await messaging.create_unlock_purchase(
+        db_session, buyer, attachment.id, "message-dispute-unlock"
+    )
+    unlock_attempt = await db_session.get(PaymentAttempt, unlock.payment_attempt_id)
+    assert unlock_attempt
+    success_payload, success_signature = finance.development_webhook_payload(unlock_attempt)
+    await finance.process_development_webhook(db_session, success_payload, success_signature)
+    decision = adult_access.resolve_adult_access(buyer, None)
+    assert unlock.status == "paid"
+    assert await can_access_asset(db_session, asset.id, buyer, decision)
+    original_ledger_id = unlock.ledger_transaction_id
+    assert original_ledger_id
+
+    unlock_dispute, unlock_dispute_signature = signed_payment_event(
+        unlock_attempt,
+        "payment.disputed",
+        f"message-unlock-dispute-{unlock_attempt.id}",
+    )
+    await finance.process_development_webhook(db_session, unlock_dispute, unlock_dispute_signature)
+    assert unlock.status == "disputed"
+    assert unlock_attempt.status is PaymentStatus.disputed
+    assert not await can_access_asset(db_session, asset.id, buyer, decision)
+    assert (
+        await db_session.scalar(
+            select(LedgerTransaction.id).where(
+                LedgerTransaction.reversal_of_transaction_id == original_ledger_id
+            )
+        )
+        is None
+    )
+
+    unlock_refund, unlock_refund_signature = signed_payment_event(
+        unlock_attempt,
+        "payment.refunded",
+        f"message-unlock-refund-{unlock_attempt.id}",
+    )
+    await finance.process_development_webhook(db_session, unlock_refund, unlock_refund_signature)
+    assert unlock.status == "refunded"
+    assert unlock_attempt.status is PaymentStatus.refunded
+    unlock_chargeback, unlock_chargeback_signature = signed_payment_event(
+        unlock_attempt,
+        "payment.chargeback",
+        f"message-unlock-chargeback-{unlock_attempt.id}",
+    )
+    await finance.process_development_webhook(
+        db_session, unlock_chargeback, unlock_chargeback_signature
+    )
+    assert unlock.status == "chargeback"
+    assert unlock_attempt.status is PaymentStatus.chargeback
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(LedgerTransaction)
+            .where(LedgerTransaction.reversal_of_transaction_id == original_ledger_id)
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -221,14 +396,99 @@ async def test_paid_attachment_unlocks_only_after_settlement(db_session):
     db_session.add(asset)
     await db_session.flush()
     attachment = await messaging.attach_media(db_session, owner, sent.id, asset.id, 700, "EUR")
-    assert not await can_access_asset(db_session, asset.id, buyer)
+    decision = adult_access.resolve_adult_access(buyer, None)
+    assert not await can_access_asset(db_session, asset.id, buyer, decision)
     purchase = await messaging.create_unlock_purchase(db_session, buyer, attachment.id, "unlock-1")
     attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
     payload, signature = finance.development_webhook_payload(attempt)
     await finance.process_development_webhook(db_session, payload, signature)
     assert purchase.status == "paid"
-    assert await can_access_asset(db_session, asset.id, buyer)
+    assert await can_access_asset(db_session, asset.id, buyer, decision)
+    db_session.add(UserBlock(blocker_user_id=owner.id, blocked_user_id=buyer.id))
+    await db_session.flush()
+    assert not await can_access_asset(db_session, asset.id, buyer, decision)
     assert await finance.process_development_webhook(db_session, payload, signature) is None
+
+
+@pytest.mark.parametrize(
+    "containment", ["private", "status", "kyc", "buyer_blocks", "creator_blocks"]
+)
+@pytest.mark.asyncio
+async def test_messaging_commands_require_current_public_creator_access(db_session, containment):
+    slug = {
+        "private": "p",
+        "status": "s",
+        "kyc": "k",
+        "buyer_blocks": "bb",
+        "creator_blocks": "cb",
+    }[containment]
+    owner, profile = await creator(db_session, f"pc-{slug}@example.com")
+    buyer, _ = await accounts.register(
+        db_session,
+        f"pb-{slug}@example.com",
+        "strong-password-123",
+        None,
+    )
+    settings = await messaging.settings_for_creator(db_session, profile.id)
+    settings.permission = MessagingPermission.anyone
+    settings.send_fee_minor, settings.send_fee_currency = 250, "EUR"
+    initiated = await messaging.send_message(db_session, buyer, profile.id, "hello")
+    sent = await messaging.send_in_conversation(
+        db_session, owner, initiated.conversation_id, "locked"
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        storage_key=f"private/contained-{containment}",
+        original_filename="contained.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    attachment = await messaging.attach_media(db_session, owner, sent.id, asset.id, 700, "EUR")
+    if containment == "private":
+        profile.is_public = False
+    elif containment == "status":
+        profile.status = CreatorStatus.suspended
+    elif containment == "kyc":
+        db_session.add(
+            CreatorVerification(
+                creator_profile_id=profile.id,
+                provider="test-expiry",
+                provider_reference=f"contained-{containment}",
+                status=VerificationStatus.expired,
+                adult_verified=False,
+                created_at=datetime.now(UTC) + timedelta(seconds=1),
+            )
+        )
+    else:
+        db_session.add(
+            UserBlock(
+                blocker_user_id=buyer.id if containment == "buyer_blocks" else owner.id,
+                blocked_user_id=owner.id if containment == "buyer_blocks" else buyer.id,
+            )
+        )
+    await db_session.flush()
+    attempts_before = await db_session.scalar(select(func.count()).select_from(PaymentAttempt))
+    messages_before = await db_session.scalar(select(func.count()).select_from(Message))
+
+    with pytest.raises(PermissionError, match="Messaging is not permitted"):
+        await messaging.send_message(db_session, buyer, profile.id, "new free message")
+    with pytest.raises(PermissionError, match="Messaging is not permitted"):
+        await messaging.initiate_paid_send(
+            db_session, buyer, profile.id, "paid", f"contained-send-{containment}"
+        )
+    with pytest.raises(PermissionError, match="Locked attachment not found"):
+        await messaging.create_unlock_purchase(
+            db_session, buyer, attachment.id, f"contained-unlock-{containment}"
+        )
+    assert (
+        await db_session.scalar(select(func.count()).select_from(PaymentAttempt)) == attempts_before
+    )
+    assert await db_session.scalar(select(func.count()).select_from(Message)) == messages_before
+    assert await db_session.scalar(select(PendingMessageSend.id)) is None
+    assert await db_session.scalar(select(MessageUnlockPurchase.id)) is None
 
 
 @pytest.mark.asyncio
@@ -270,6 +530,7 @@ async def test_attachment_access_exposes_preview_but_not_full_media_before_unloc
         ]
     )
     attachment = await messaging.attach_media(db_session, owner, sent.id, asset.id, 700, "EUR")
+    buyer.email_verified_at = accounts._now()
     await db_session.commit()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -294,6 +555,27 @@ async def test_attachment_access_exposes_preview_but_not_full_media_before_unloc
         assert unlocked.status_code == 200
         assert unlocked.json()["locked"] is False
         assert unlocked.json()["full_delivery_path"].startswith("/media/derivatives/")
+        refund_payload = json.dumps(
+            {
+                "id": f"provider-unlock-refund-{attempt.id}",
+                "type": "payment.refunded",
+                "payment_reference": attempt.provider_reference,
+            },
+            separators=(",", ":"),
+        ).encode()
+        refund_signature = hmac.new(
+            get_settings().payment_webhook_secret.encode(),
+            refund_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        await finance.process_development_webhook(db_session, refund_payload, refund_signature)
+        await db_session.commit()
+        locked_again = await buyer_client.get(
+            f"/api/v1/messages/attachments/{attachment.id}/access"
+        )
+        assert locked_again.status_code == 200
+        assert locked_again.json()["locked"] is True
+        assert locked_again.json()["full_delivery_path"] is None
 
 
 @pytest.mark.asyncio
@@ -493,6 +775,7 @@ async def test_message_reports_and_moderator_access_are_authorized_and_audited(d
     moderator, _ = await accounts.register(
         db_session, "report-moderator@example.com", "strong-password-123", None
     )
+    viewer.email_verified_at = moderator.email_verified_at = accounts._now()
     await accounts.assign_role(db_session, moderator, "moderator", moderator.id, None)
     await db_session.commit()
     async with (

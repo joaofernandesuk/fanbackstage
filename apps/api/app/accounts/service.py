@@ -7,6 +7,7 @@ from pwdlib import PasswordHash
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.adult_access import attest_account, current_policy_version
 from app.audit.service import record_event
 from app.core.config import get_settings
 from app.models.identity import Role, SecurityToken, TokenPurpose, User, UserSession
@@ -56,14 +57,26 @@ async def assign_role(
 
 
 async def register(
-    db: AsyncSession, email: str, password: str, correlation_id: str | None
+    db: AsyncSession,
+    email: str,
+    password: str,
+    correlation_id: str | None,
+    *,
+    adult_confirmed: bool = False,
 ) -> tuple[User, str]:
+    """Create an account, persisting self-attestation only from a trusted caller signal.
+
+    Omitting ``adult_confirmed`` is deliberately safe: low-level callers create an
+    unattested account which cannot perform adult-gated or paid actions.
+    """
     normalized = email.strip().lower()
     if await db.scalar(select(User).where(User.email == normalized)):
         raise ValueError("An account with this email already exists")
     await ensure_roles(db)
     viewer = await db.scalar(select(Role).where(Role.name == "viewer"))
     user = User(email=normalized, password_hash=password_hash.hash(password), roles=[viewer])
+    if adult_confirmed:
+        attest_account(user)
     db.add(user)
     await db.flush()
     token = await issue_security_token(db, user.id, TokenPurpose.email_verification)
@@ -74,6 +87,10 @@ async def register(
         target_type="user",
         target_id=str(user.id),
         correlation_id=correlation_id,
+        metadata={
+            "adult_assurance": "self_attested" if adult_confirmed else "none",
+            **({"adult_attestation_version": current_policy_version()} if adult_confirmed else {}),
+        },
     )
     return user, token
 
@@ -134,7 +151,7 @@ async def authenticate(db: AsyncSession, raw: str | None) -> tuple[User, UserSes
     if not session or session.revoked_at or session.expires_at <= _now():
         return None
     user = await db.scalar(select(User).where(User.id == session.user_id))
-    if not user or not user.is_active:
+    if not user or not user.is_active or user.email_verified_at is None:
         return None
     await db.refresh(user, ["roles"])
     return user, session

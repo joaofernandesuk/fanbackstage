@@ -161,12 +161,7 @@ export function Discovery({ initialQuery = "" }: { initialQuery?: string }) {
               {marketplaceContent.map((item) => {
                 const listing = marketplaceById.get(item.id);
                 if (!listing) return <MarketplaceDiscoveryCard item={item} key={item.id} />;
-                const creator: DiscoveryResult = {
-                  ...item,
-                  entity_type: "creator",
-                  title: item.subtitle ?? item.creator_username ?? "FanBackstage creator",
-                };
-                return <MarketplaceCard creator={creator} key={item.id} listing={listing} sponsored={item.sponsored} />;
+                return <MarketplaceCard key={item.id} listing={listing} sponsored={item.sponsored} />;
               })}
             </DiscoverySection>
           )}

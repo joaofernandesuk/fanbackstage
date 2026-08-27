@@ -17,7 +17,7 @@ export default function LivePage() {
         <Link className={styles.secondaryLink} href="/creators?filter=live">Discover creators</Link>
       </header>
       <LiveNow />
-      <LoginGate className={styles.secondaryLink} label="Log in to view your private-session queue">
+      <LoginGate className={styles.secondaryLink} label="Log in to view your private-session queue" nextPath="/live">
         <PrivateSessionRoom />
       </LoginGate>
     </div>

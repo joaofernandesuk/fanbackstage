@@ -1,11 +1,19 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
+from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.content import service
-from app.content.access import can_access_content
+from app.content.access import (
+    can_access_asset,
+    can_access_content,
+    can_access_preview,
+    content_requires_adult_access,
+    public_content_surface_eligible,
+)
+from app.core.config import get_settings
 from app.media.service import approved_creator
 from app.models.content import (
     ContentItem,
@@ -13,6 +21,7 @@ from app.models.content import (
     DerivativeType,
     Gallery,
     GalleryItem,
+    MediaAsset,
     MediaDerivative,
     MediaStatus,
     VideoContent,
@@ -35,7 +44,12 @@ from app.worker.tasks import render_video_preview
 router = APIRouter(prefix="/content", tags=["content"])
 
 
-def response(item: ContentItem, has_access: bool = True) -> ContentResponse:
+def response(
+    item: ContentItem,
+    has_access: bool = True,
+    *,
+    preview_duration_seconds: int | None = None,
+) -> ContentResponse:
     return ContentResponse(
         id=item.id,
         content_type=item.content_type.value,
@@ -48,6 +62,8 @@ def response(item: ContentItem, has_access: bool = True) -> ContentResponse:
         price_amount_minor=item.price_amount_minor if item.access_policy.value == "ppv" else None,
         price_currency=item.price_currency if item.access_policy.value == "ppv" else None,
         requires_verified_consent=item.requires_verified_consent,
+        published_at=item.published_at,
+        preview_duration_seconds=preview_duration_seconds,
     )
 
 
@@ -61,11 +77,61 @@ async def my_content(identity: CurrentIdentity, db: Db) -> list[ContentResponse]
             .order_by(ContentItem.created_at.desc())
         )
     ).all()
-    return [response(item) for item in items]
+    content_ids = [item.id for item in items]
+    preview_rows = (
+        (
+            await db.execute(
+                select(VideoContent.content_id, VideoContent.preview_duration_seconds).where(
+                    VideoContent.content_id.in_(content_ids)
+                )
+            )
+        ).all()
+        if content_ids
+        else []
+    )
+    preview_by_content = dict(preview_rows)
+    return [
+        response(item, preview_duration_seconds=preview_by_content.get(item.id)) for item in items
+    ]
 
 
-async def public_response(db: Db, item: ContentItem, has_access: bool) -> ContentResponse:
+def media_response(
+    derivative: MediaDerivative,
+    *,
+    kind: str,
+    position: int,
+    preview: bool,
+) -> ContentPreview:
+    segment = "previews" if preview else "derivatives"
+    return ContentPreview(
+        derivative_id=derivative.id,
+        media_type="video" if derivative.mime_type.startswith("video/") else "image",
+        delivery_path=f"/media/{segment}/{derivative.id}",
+        kind=kind,
+        position=position,
+        width=derivative.width,
+        height=derivative.height,
+        duration_seconds=derivative.duration_seconds,
+    )
+
+
+async def public_response(
+    db: Db,
+    item: ContentItem,
+    has_access: bool,
+    user=None,
+    adult_decision: adult_access.AdultAccessDecision | None = None,
+) -> ContentResponse:
     result = response(item, has_access)
+    result.adult_access_required = await content_requires_adult_access(db, item)
+    result.adult_access_granted = not result.adult_access_required or bool(
+        adult_decision and adult_decision.allowed
+    )
+    creator = await db.get(CreatorProfile, item.owner_creator_id)
+    if creator:
+        result.creator_id = creator.id
+        result.creator_username = creator.username
+        result.creator_display_name = creator.display_name or creator.username
     gallery = await db.scalar(select(Gallery).where(Gallery.content_id == item.id))
     if gallery:
         gallery_items = (
@@ -75,53 +141,127 @@ async def public_response(db: Db, item: ContentItem, has_access: bool) -> Conten
                 .order_by(GalleryItem.position)
             )
         ).all()
-        preview_asset_ids = [
-            gallery_item.media_asset_id
+        result.media_count = len(gallery_items)
+        preview_items = [
+            gallery_item
             for gallery_item in gallery_items
             if gallery_item.is_preview or gallery_item.position < gallery.preview_count
         ]
-        if not preview_asset_ids:
-            return result
+        preview_items.sort(
+            key=lambda gallery_item: (
+                gallery_item.media_asset_id != gallery.cover_media_asset_id,
+                gallery_item.position,
+            )
+        )
+        preview_asset_ids = [gallery_item.media_asset_id for gallery_item in preview_items]
+        preview_derivative_type = (
+            DerivativeType.display
+            if item.access_policy.value == "free"
+            else DerivativeType.blurred_preview
+        )
         derivatives = (
             await db.scalars(
                 select(MediaDerivative)
                 .where(
                     MediaDerivative.media_asset_id.in_(preview_asset_ids),
-                    MediaDerivative.derivative_type == DerivativeType.blurred_preview,
+                    MediaDerivative.derivative_type == preview_derivative_type,
                     MediaDerivative.status == MediaStatus.ready,
                 )
                 .order_by(MediaDerivative.created_at)
             )
         ).all()
         derivatives_by_asset = {derivative.media_asset_id: derivative for derivative in derivatives}
-        result.previews = [
-            ContentPreview(
-                derivative_id=derivative.id,
-                media_type="image",
-                delivery_path=f"/media/previews/{derivative.id}",
-            )
-            for asset_id in preview_asset_ids
-            if (derivative := derivatives_by_asset.get(asset_id))
-        ]
+        for gallery_item in preview_items:
+            derivative = derivatives_by_asset.get(gallery_item.media_asset_id)
+            if derivative and await can_access_preview(db, derivative, user, adult_decision):
+                result.previews.append(
+                    media_response(
+                        derivative,
+                        kind=("image" if item.access_policy.value == "free" else "teaser"),
+                        position=gallery_item.position,
+                        preview=True,
+                    )
+                )
+        if has_access and gallery_items:
+            full_derivatives = (
+                await db.scalars(
+                    select(MediaDerivative)
+                    .join(MediaAsset, MediaAsset.id == MediaDerivative.media_asset_id)
+                    .where(
+                        MediaDerivative.media_asset_id.in_(
+                            [gallery_item.media_asset_id for gallery_item in gallery_items]
+                        ),
+                        MediaAsset.owner_creator_id == item.owner_creator_id,
+                        MediaDerivative.derivative_type == DerivativeType.display,
+                        MediaDerivative.status == MediaStatus.ready,
+                    )
+                )
+            ).all()
+            full_by_asset = {
+                derivative.media_asset_id: derivative for derivative in full_derivatives
+            }
+            for gallery_item in gallery_items:
+                derivative = full_by_asset.get(gallery_item.media_asset_id)
+                if derivative and await can_access_asset(
+                    db, gallery_item.media_asset_id, user, adult_decision
+                ):
+                    result.media.append(
+                        media_response(
+                            derivative,
+                            kind="image",
+                            position=gallery_item.position,
+                            preview=False,
+                        )
+                    )
         return result
     video = await db.scalar(select(VideoContent).where(VideoContent.content_id == item.id))
     if not video:
         return result
-    derivative = await db.scalar(
-        select(MediaDerivative).where(
-            MediaDerivative.media_asset_id == video.source_media_asset_id,
-            MediaDerivative.derivative_type == DerivativeType.poster,
-            MediaDerivative.status == MediaStatus.ready,
-        )
-    )
-    if derivative:
-        result.previews = [
-            ContentPreview(
-                derivative_id=derivative.id,
-                media_type="image",
-                delivery_path=f"/media/previews/{derivative.id}",
+    result.preview_duration_seconds = video.preview_duration_seconds
+    asset = await db.get(MediaAsset, video.source_media_asset_id)
+    if not asset or asset.owner_creator_id != item.owner_creator_id:
+        result.media_count = 0
+        return result
+    result.media_count = 1
+    result.duration_seconds = asset.duration_seconds
+    derivatives = (
+        await db.scalars(
+            select(MediaDerivative).where(
+                MediaDerivative.media_asset_id == video.source_media_asset_id,
+                MediaDerivative.derivative_type.in_(
+                    [DerivativeType.poster, DerivativeType.preview_clip]
+                ),
+                MediaDerivative.status == MediaStatus.ready,
             )
-        ]
+        )
+    ).all()
+    preview_order = {DerivativeType.poster: 0, DerivativeType.preview_clip: 1}
+    for derivative in sorted(derivatives, key=lambda value: preview_order[value.derivative_type]):
+        if await can_access_preview(db, derivative, user, adult_decision):
+            result.previews.append(
+                media_response(
+                    derivative,
+                    kind=(
+                        "poster"
+                        if derivative.derivative_type is DerivativeType.poster
+                        else "trailer"
+                    ),
+                    position=preview_order[derivative.derivative_type],
+                    preview=True,
+                )
+            )
+    if has_access:
+        playback = await db.scalar(
+            select(MediaDerivative).where(
+                MediaDerivative.media_asset_id == video.source_media_asset_id,
+                MediaDerivative.derivative_type == DerivativeType.playback,
+                MediaDerivative.status == MediaStatus.ready,
+            )
+        )
+        if playback and await can_access_asset(
+            db, video.source_media_asset_id, user, adult_decision
+        ):
+            result.media = [media_response(playback, kind="playback", position=0, preview=False)]
     return result
 
 
@@ -182,8 +322,15 @@ async def create_video(payload: VideoCreate, identity: CurrentIdentity, db: Db) 
             payload.price_currency,
             payload.requires_verified_consent,
         )
+        if not item.video:
+            raise ValueError("Video content is missing")
+        preview_job = (
+            str(item.id),
+            item.video.preview_start_seconds,
+            item.video.preview_duration_seconds,
+        )
         await db.commit()
-        render_video_preview.delay(str(item.id))
+        render_video_preview.delay(*preview_job)
         return response(item)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
@@ -253,8 +400,15 @@ async def configure_video_preview(
             payload.preview_start_seconds,
             payload.preview_duration_seconds,
         )
+        if not item.video:
+            raise ValueError("Video content is missing")
+        preview_job = (
+            str(item.id),
+            item.video.preview_start_seconds,
+            item.video.preview_duration_seconds,
+        )
         await db.commit()
-        render_video_preview.delay(str(item.id))
+        render_video_preview.delay(*preview_job)
         return response(item)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
@@ -308,22 +462,26 @@ async def update_content(
 
 
 @router.get("/public/{content_id}", response_model=ContentResponse)
-async def public_content(content_id: UUID, identity: OptionalIdentity, db: Db) -> ContentResponse:
+async def public_content(
+    content_id: UUID, request: Request, identity: OptionalIdentity, db: Db
+) -> ContentResponse:
     item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
-    if not item or item.status.value != "published":
+    user = identity[0] if identity else None
+    if not item or not await public_content_surface_eligible(db, item, user):
         raise HTTPException(status_code=404, detail="Content not found")
-    has_access = await can_access_content(db, item, identity[0] if identity else None)
-    # A mandatory release is a serving prerequisite, not merely an entitlement
-    # lock.  Do not project a withdrawn/expired release's content through a
-    # public endpoint, including to its owner or staff using this route.
-    if item.requires_verified_consent and not has_access:
-        raise HTTPException(status_code=404, detail="Content not found")
-    return await public_response(db, item, has_access)
+    decision = adult_access.resolve_adult_access(
+        user, request.cookies.get(get_settings().adult_access_cookie_name)
+    )
+    requires_adult = await content_requires_adult_access(db, item)
+    has_access = await can_access_content(db, item, user) and (
+        not requires_adult or decision.allowed
+    )
+    return await public_response(db, item, has_access, user, decision)
 
 
 @router.get("/public/by-creator/{username}", response_model=list[ContentResponse])
 async def public_creator_content(
-    username: str, identity: OptionalIdentity, db: Db
+    username: str, request: Request, identity: OptionalIdentity, db: Db
 ) -> list[ContentResponse]:
     items = (
         (
@@ -343,9 +501,16 @@ async def public_creator_content(
         .all()
     )
     result = []
+    user = identity[0] if identity else None
+    decision = adult_access.resolve_adult_access(
+        user, request.cookies.get(get_settings().adult_access_cookie_name)
+    )
     for item in items:
-        has_access = await can_access_content(db, item, identity[0] if identity else None)
-        if item.requires_verified_consent and not has_access:
+        if not await public_content_surface_eligible(db, item, user):
             continue
-        result.append(await public_response(db, item, has_access))
+        requires_adult = await content_requires_adult_access(db, item)
+        has_access = await can_access_content(db, item, user) and (
+            not requires_adult or decision.allowed
+        )
+        result.append(await public_response(db, item, has_access, user, decision))
     return result

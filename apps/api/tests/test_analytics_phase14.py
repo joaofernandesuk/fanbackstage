@@ -22,6 +22,9 @@ async def test_creator_analytics_is_ledger_derived_and_currency_separated(db_ses
     creator = await creators.get_or_create_profile(db_session, owner)
     now = datetime.now(UTC)
     eur_pending = await _account(db_session, LedgerAccountKind.creator_pending, "EUR", creator.id)
+    eur_available = await _account(
+        db_session, LedgerAccountKind.creator_available, "EUR", creator.id
+    )
     usd_pending = await _account(db_session, LedgerAccountKind.creator_pending, "USD", creator.id)
     clearing_eur = await _account(db_session, LedgerAccountKind.platform_clearing, "EUR")
     clearing_usd = await _account(db_session, LedgerAccountKind.platform_clearing, "USD")
@@ -58,6 +61,17 @@ async def test_creator_analytics_is_ledger_derived_and_currency_separated(db_ses
             (usd_pending, LedgerDirection.credit, 500),
         ],
     )
+    await post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.payment_dispute_hold,
+        currency="EUR",
+        idempotency_key="analytics-dispute-hold",
+        reference="analytics-dispute-hold",
+        entries=[
+            (eur_available, LedgerDirection.debit, 400),
+            (eur_pending, LedgerDirection.credit, 400),
+        ],
+    )
     report = await service.creator_overview(
         db_session, creator.id, now - timedelta(days=1), now + timedelta(days=1)
     )
@@ -67,6 +81,7 @@ async def test_creator_analytics_is_ledger_derived_and_currency_separated(db_ses
     assert by_currency["EUR"]["reversed_minor"] == 250
     assert by_currency["USD"]["gross_sales_minor"] == 500
     assert report["metric_definition_version"] == "phase14.v1"
+    assert all(row["source"] != "payment_dispute_hold" for row in report["revenue_sources"])
 
 
 def test_analytics_csv_formula_cells_are_neutralized():
@@ -146,6 +161,13 @@ async def test_platform_and_creator_analytics_reconcile_immutable_reversal_histo
     group_pending = await _account(
         db_session, LedgerAccountKind.group_pending, "EUR", owner_group_id=group.id
     )
+    creator_available = await _account(
+        db_session, LedgerAccountKind.creator_available, "EUR", creator.id
+    )
+    group_available = await _account(
+        db_session, LedgerAccountKind.group_available, "EUR", owner_group_id=group.id
+    )
+    refund_clearing = await _account(db_session, LedgerAccountKind.refund_clearing, "EUR")
     purchase = await post_entries(
         db_session,
         transaction_type=LedgerTransactionType.ppv_purchase,
@@ -161,17 +183,78 @@ async def test_platform_and_creator_analytics_reconcile_immutable_reversal_histo
     )
     await post_entries(
         db_session,
+        transaction_type=LedgerTransactionType.earnings_release,
+        currency="EUR",
+        idempotency_key="analytics-reconcile-release",
+        reference="analytics-reconcile-release",
+        entries=[
+            (creator_pending, LedgerDirection.debit, 400),
+            (creator_available, LedgerDirection.credit, 400),
+            (group_pending, LedgerDirection.debit, 400),
+            (group_available, LedgerDirection.credit, 400),
+        ],
+    )
+    await post_entries(
+        db_session,
         transaction_type=LedgerTransactionType.refund,
         currency="EUR",
         idempotency_key="analytics-reconcile-refund",
         reference="analytics-reconcile-refund",
         reversal_of_transaction_id=purchase.id,
         entries=[
-            (creator_pending, LedgerDirection.debit, 400),
-            (group_pending, LedgerDirection.debit, 400),
+            (creator_available, LedgerDirection.debit, 400),
+            (group_available, LedgerDirection.debit, 400),
             (platform, LedgerDirection.debit, 200),
             (clearing, LedgerDirection.credit, 1000),
         ],
+    )
+    liability = await post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.excess_capture_liability,
+        currency="EUR",
+        idempotency_key="analytics-excess-capture",
+        reference="analytics-excess-capture",
+        entries=[
+            (clearing, LedgerDirection.debit, 300),
+            (refund_clearing, LedgerDirection.credit, 300),
+        ],
+    )
+    await post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.refund,
+        currency="EUR",
+        idempotency_key="analytics-excess-capture-resolution",
+        reference="analytics-excess-capture-resolution",
+        reversal_of_transaction_id=liability.id,
+        entries=[
+            (refund_clearing, LedgerDirection.debit, 300),
+            (clearing, LedgerDirection.credit, 300),
+        ],
+        metadata={"payment_refund_requirement_id": str(uuid4())},
+    )
+    chargeback_liability = await post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.excess_capture_liability,
+        currency="EUR",
+        idempotency_key="analytics-excess-capture-chargeback",
+        reference="analytics-excess-capture-chargeback",
+        entries=[
+            (clearing, LedgerDirection.debit, 200),
+            (refund_clearing, LedgerDirection.credit, 200),
+        ],
+    )
+    await post_entries(
+        db_session,
+        transaction_type=LedgerTransactionType.chargeback,
+        currency="EUR",
+        idempotency_key="analytics-excess-capture-chargeback-resolution",
+        reference="analytics-excess-capture-chargeback-resolution",
+        reversal_of_transaction_id=chargeback_liability.id,
+        entries=[
+            (refund_clearing, LedgerDirection.debit, 200),
+            (clearing, LedgerDirection.credit, 200),
+        ],
+        metadata={"payment_refund_requirement_id": str(uuid4())},
     )
     report = await service.platform_overview(
         db_session, now - timedelta(days=1), now + timedelta(days=1)
@@ -179,7 +262,23 @@ async def test_platform_and_creator_analytics_reconcile_immutable_reversal_histo
     eur = {row["currency"]: row for row in report["currencies"]}["EUR"]
     assert eur["gmv_minor"] == 1000
     assert eur["refunds_minor"] == 1000
+    assert eur["chargebacks_minor"] == 0
     assert eur["creator_distributable_minor"] == 0
     assert eur["group_distributable_minor"] == 0
     assert eur["platform_fee_minor"] == 0
     assert eur["platform_retained_net_minor"] == 0
+    creator_report = await service.creator_overview(
+        db_session, creator.id, now - timedelta(days=1), now + timedelta(days=1)
+    )
+    creator_eur = {row["currency"]: row for row in creator_report["currencies"]}["EUR"]
+    assert creator_eur["gross_sales_minor"] == 400
+    assert creator_eur["creator_net_minor"] == 0
+    assert creator_eur["reversed_minor"] == 400
+    assert all(row["source"] != "earnings_release" for row in creator_report["revenue_sources"])
+    group_report = await service.group_overview(
+        db_session, group.id, now - timedelta(days=1), now + timedelta(days=1)
+    )
+    group_eur = {row["currency"]: row for row in group_report["currencies"]}["EUR"]
+    assert group_eur["group_net_minor"] == 0
+    assert group_eur["reversed_minor"] == 400
+    assert all(row["source"] != "earnings_release" for row in group_report["revenue_sources"])

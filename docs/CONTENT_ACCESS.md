@@ -30,6 +30,14 @@ Content
 
 Access policies should resolve through an entitlement service. The same asset may participate in subscription access, PPV, bundle ownership or a direct paid message without duplicating the original file.
 
+Media audience and entitlement are independent checks. `safe_public` assets may expose
+only approved derivatives through the normal public resolver. `adult_restricted` assets
+also require a current server-resolved adult-access decision, even when the viewer owns a
+subscription, PPV, or message entitlement. Buying or following never satisfies the age
+boundary. Anonymous decisions come only from the server-signed acknowledgement cookie;
+restricted presigned URLs cannot outlive that cookie. Original storage keys and original
+media URLs remain private in both classifications.
+
 # 5. Galleries and Image Monetisation
 
 - Creators may create galleries with arbitrary image counts.
@@ -44,6 +52,7 @@ Access policies should resolve through an entitlement service. The same asset ma
 - Videos may be free, follower-only, subscription-included, PPV, private/direct or bundled.
 - Creator may define a preview duration, e.g. first 20 seconds, or choose a custom time range.
 - Backend generates a separate preview derivative via media processing; unauthorised clients never receive the original source URL.
+- For every non-free video, the configured preview interval and rendered trailer must end strictly before the protected source ends. A short source can never silently make the full playback derivative its public trailer.
 - Creator preview start/duration changes are accepted only before review and render asynchronously. Content cannot enter review while that selected derivative is unavailable.
 - Video purchase grants a durable entitlement subject to platform policy, refunds/chargebacks and legal takedown conditions.
 - Creator can publish teasers separately from the paid master asset.
@@ -174,6 +183,12 @@ Bundle purchase grants entitlement to each included asset according to bundle ru
 # Phase 3 PPV integration
 
 PPV access is granted only by an active `ContentEntitlement` whose purchase source references the settled purchase. A payment attempt, client success message, or ledger record alone never grants content access. A full PPV refund revokes that entitlement without deleting it.
+
+Baseline platform eligibility is checked before every new paid reservation or payment
+attempt, including safe-public marketplace items. This does not classify a physical item
+as adult media; anonymous marketplace browsing remains separate from the authenticated
+18+ transaction boundary. Idempotent replays of an already-created action remain replays
+and do not create new value movement.
 # Message attachment access
 
 Paid message attachments are distinct from content PPV. The central media resolver permits a full asset only for the creator owner, an existing authorised content policy, or the recipient's settled message-unlock purchase for that exact attachment. A message unlock never grants access to unrelated galleries or videos.

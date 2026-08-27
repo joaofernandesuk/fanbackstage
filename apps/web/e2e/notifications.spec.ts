@@ -22,6 +22,7 @@ test("notification center is recipient-scoped and reflects read state", async ({
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
@@ -50,6 +51,7 @@ test("notification center is recipient-scoped and reflects read state", async ({
   await otherPage.goto("/register");
   await otherPage.getByLabel("Email").fill(otherEmail);
   await otherPage.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await otherPage.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
   await otherPage.getByRole("button", { name: "Create account" }).click();
   await otherPage.goto(await securityLink(otherEmail, "/verify-email"));
   await otherPage.getByRole("button", { name: "Verify email" }).click();

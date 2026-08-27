@@ -47,6 +47,8 @@ class LedgerTransactionType(str, enum.Enum):
     private_live_session = "private_live_session"
     marketplace_order = "marketplace_order"
     featuring_charge = "featuring_charge"
+    excess_capture_liability = "excess_capture_liability"
+    payment_dispute_hold = "payment_dispute_hold"
 
 
 class PaymentStatus(str, enum.Enum):
@@ -65,6 +67,21 @@ class PurchaseStatus(str, enum.Enum):
     refunded = "refunded"
     disputed = "disputed"
     chargeback = "chargeback"
+
+
+class RefundRequirementStatus(str, enum.Enum):
+    required = "required"
+    completed = "completed"
+
+
+class ExcessCaptureSource(str, enum.Enum):
+    ppv_purchase = "ppv_purchase"
+    subscription_period = "subscription_period"
+    marketplace_order = "marketplace_order"
+    feature_booking = "feature_booking"
+    message_unlock = "message_unlock"
+    paid_message_send = "paid_message_send"
+    private_live_session = "private_live_session"
 
 
 class LedgerAccount(UUIDPrimaryKey, Timestamped, Base):
@@ -221,6 +238,69 @@ class Purchase(UUIDPrimaryKey, Timestamped, Base):
         ForeignKey("ledger_transactions.id", ondelete="RESTRICT"), unique=True
     )
     purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PurchasePaymentAttempt(UUIDPrimaryKey, Timestamped, Base):
+    """Durable attempt history for one canonical buyer/content purchase."""
+
+    __tablename__ = "purchase_payment_attempts"
+    __table_args__ = (
+        CheckConstraint("attempt_number > 0", name="ck_purchase_attempt_positive_number"),
+        UniqueConstraint("purchase_id", "attempt_number", name="uq_purchase_attempt_number"),
+        UniqueConstraint("payment_attempt_id", name="uq_purchase_attempt_payment"),
+    )
+    purchase_id: Mapped[UUID] = mapped_column(
+        ForeignKey("purchases.id", ondelete="RESTRICT"), index=True
+    )
+    payment_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="RESTRICT"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+
+
+class PaymentRefundRequirement(UUIDPrimaryKey, Timestamped, Base):
+    """Frozen evidence that a duplicate provider capture requires refunding."""
+
+    __tablename__ = "payment_refund_requirements"
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_payment_refund_requirement_positive_amount"),
+        UniqueConstraint("payment_attempt_id", name="uq_payment_refund_requirement_attempt"),
+        UniqueConstraint(
+            "liability_ledger_transaction_id",
+            name="uq_payment_refund_requirement_liability_ledger",
+        ),
+        UniqueConstraint(
+            "refund_ledger_transaction_id",
+            name="uq_payment_refund_requirement_refund_ledger",
+        ),
+        UniqueConstraint(
+            "provider_refund_reference",
+            name="uq_payment_refund_requirement_provider_reference",
+        ),
+    )
+    payment_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="RESTRICT"), index=True
+    )
+    source_type: Mapped[ExcessCaptureSource] = mapped_column(
+        Enum(ExcessCaptureSource, name="excess_capture_source"), index=True
+    )
+    source_reference: Mapped[str] = mapped_column(String(64), index=True)
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    status: Mapped[RefundRequirementStatus] = mapped_column(
+        Enum(RefundRequirementStatus, name="refund_requirement_status"),
+        default=RefundRequirementStatus.required,
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(String(64), default="duplicate_capture")
+    liability_ledger_transaction_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ledger_transactions.id", ondelete="RESTRICT")
+    )
+    refund_ledger_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ledger_transactions.id", ondelete="RESTRICT")
+    )
+    provider_refund_reference: Mapped[str | None] = mapped_column(String(255))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PaymentWebhookEvent(UUIDPrimaryKey, Timestamped, Base):

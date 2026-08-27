@@ -7,7 +7,20 @@ from app.accounts import service as accounts
 from app.creators import service as creators
 from app.discovery import service
 from app.main import app
-from app.models.content import AccessPolicy, ContentItem, ContentStatus, ContentType
+from app.models.content import (
+    AccessPolicy,
+    ContentItem,
+    ContentStatus,
+    ContentType,
+    Gallery,
+    GalleryItem,
+    MediaAsset,
+    MediaAudience,
+    MediaStatus,
+    MediaType,
+    ModerationStatus,
+    VideoContent,
+)
 from app.models.creator import CreatorStatus
 from app.models.messaging import UserBlock
 from app.social import service as social
@@ -58,6 +71,7 @@ async def test_discovery_filters_pending_blocked_and_locked_content(db_session):
         description="Safe description",
         status=ContentStatus.published,
         access_policy=AccessPolicy.ppv,
+        moderation_status=ModerationStatus.approved,
         published_at=datetime.now(UTC),
     )
     db_session.add(locked)
@@ -152,3 +166,86 @@ async def test_discovery_route_parses_repeated_entity_type_query_values(db_sessi
     assert response.status_code == 200
     assert {item["entity_type"] for item in response.json()["items"]} == {"creator"}
     assert {item["id"] for item in response.json()["items"]} == {str(profile.id)}
+
+
+@pytest.mark.asyncio
+async def test_content_projection_includes_canonical_gallery_count_and_video_duration(db_session):
+    owner, profile = await creator(db_session, "projection@example.com")
+    gallery_assets = [
+        MediaAsset(
+            owner_creator_id=profile.id,
+            media_type=MediaType.image,
+            status=MediaStatus.ready,
+            moderation_status=ModerationStatus.approved,
+            audience=MediaAudience.safe_public,
+            storage_key=f"original/projection-gallery-{index}",
+            original_filename=f"projection-{index}.png",
+            mime_type="image/png",
+        )
+        for index in range(3)
+    ]
+    video_asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.video,
+        status=MediaStatus.ready,
+        moderation_status=ModerationStatus.approved,
+        audience=MediaAudience.safe_public,
+        storage_key="original/projection-video",
+        original_filename="projection.mp4",
+        mime_type="video/mp4",
+        duration_seconds=95,
+    )
+    db_session.add_all([*gallery_assets, video_asset])
+    await db_session.flush()
+    gallery = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Projection gallery",
+        status=ContentStatus.published,
+        access_policy=AccessPolicy.free,
+        moderation_status=ModerationStatus.approved,
+        published_at=datetime.now(UTC),
+    )
+    gallery.gallery = Gallery(preview_count=0)
+    video = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.video,
+        title="Projection video",
+        status=ContentStatus.published,
+        access_policy=AccessPolicy.free,
+        moderation_status=ModerationStatus.approved,
+        published_at=datetime.now(UTC),
+    )
+    video.video = VideoContent(
+        source_media_asset_id=video_asset.id,
+        preview_start_seconds=0,
+        preview_duration_seconds=20,
+    )
+    db_session.add_all([gallery, video])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            GalleryItem(
+                gallery_id=gallery.gallery.id,
+                media_asset_id=asset.id,
+                position=position,
+            )
+            for position, asset in enumerate(gallery_assets)
+        ]
+    )
+    await db_session.flush()
+
+    items, _, _ = await service.search(
+        db_session,
+        None,
+        query="projection",
+        entity_types={"gallery", "video"},
+    )
+
+    by_type = {item.entity_type: item for item in items}
+    assert by_type["gallery"].gallery_image_count == 3
+    assert by_type["gallery"].video_duration_seconds is None
+    assert by_type["video"].video_duration_seconds == 95
+    assert by_type["video"].gallery_image_count is None

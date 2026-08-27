@@ -9,14 +9,17 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
 from app.core.config import get_settings
-from app.finance.service import _account, currency_code, post_entries
+from app.creators.service import has_current_adult_verification
+from app.finance.service import _account, currency_code, post_entries, reverse_original_ledger
 from app.groups.service import has_delegated_permission
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.featuring import (
     FeatureBooking,
+    FeatureBookingPaymentAttempt,
     FeatureBookingStatus,
     FeatureIneligibilityReason,
     FeaturePrice,
@@ -28,10 +31,12 @@ from app.models.featuring import (
     FeatureTargetType,
 )
 from app.models.finance import (
+    ExcessCaptureSource,
     LedgerAccount,
     LedgerAccountKind,
     LedgerDirection,
     LedgerEntry,
+    LedgerTransaction,
     LedgerTransactionType,
     PaymentAttempt,
     PaymentStatus,
@@ -118,6 +123,7 @@ async def assert_target_eligibility(
         or not creator
         or creator.status is not CreatorStatus.approved
         or not creator.is_public
+        or not await has_current_adult_verification(db, creator.id)
     ):
         raise FeaturingError("Target is not eligible for featuring")
     return creator_id
@@ -243,7 +249,12 @@ async def _availability_count(
                             )
                         )
                         | (
-                            (FeatureBooking.status == FeatureBookingStatus.awaiting_payment)
+                            FeatureBooking.status.in_(
+                                [
+                                    FeatureBookingStatus.awaiting_payment,
+                                    FeatureBookingStatus.failed,
+                                ]
+                            )
                             & (FeatureBooking.reservation_expires_at > now)
                         )
                     ),
@@ -281,6 +292,10 @@ async def create_booking(
     )
     if existing:
         return existing
+    try:
+        require_current_self_attestation(purchaser)
+    except PermissionError as exc:
+        raise FeaturingError("Current adult self-attestation is required") from exc
     slot = await db.scalar(select(FeatureSlot).where(FeatureSlot.id == slot_id).with_for_update())
     if not slot or not slot.active:
         raise FeaturingError("Feature slot is unavailable")
@@ -345,22 +360,60 @@ async def create_booking(
     return booking
 
 
+async def _lock_booking_payment_attempt(
+    db: AsyncSession, booking_id: UUID
+) -> tuple[FeatureBooking, PaymentAttempt | None]:
+    """Lock the current payment attempt before its booking, matching callbacks."""
+    payment_attempt_id = await db.scalar(
+        select(FeatureBooking.payment_attempt_id).where(FeatureBooking.id == booking_id)
+    )
+    attempt = None
+    if payment_attempt_id is not None:
+        attempt = await db.scalar(
+            select(PaymentAttempt)
+            .where(PaymentAttempt.id == payment_attempt_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if attempt is None:
+            raise FeaturingError("Featuring payment attempt is missing")
+    booking = await db.scalar(
+        select(FeatureBooking)
+        .where(FeatureBooking.id == booking_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if booking is None:
+        raise FeaturingError("Featuring booking not found")
+    if booking.payment_attempt_id != payment_attempt_id:
+        raise FeaturingError("Featuring payment attempt changed; retry the command")
+    return booking, attempt
+
+
 async def expire_reservations(db: AsyncSession, now: datetime | None = None) -> int:
     """Release only expired unpaid reservations; replaying this command is harmless."""
     now = now or datetime.now(UTC)
-    rows = (
+    booking_ids = (
         await db.scalars(
-            select(FeatureBooking)
-            .where(
-                FeatureBooking.status == FeatureBookingStatus.awaiting_payment,
+            select(FeatureBooking.id).where(
+                FeatureBooking.status.in_(
+                    [FeatureBookingStatus.awaiting_payment, FeatureBookingStatus.failed]
+                ),
                 FeatureBooking.reservation_expires_at <= now,
             )
-            .with_for_update()
         )
     ).all()
-    for booking in rows:
+    expired = 0
+    for booking_id in booking_ids:
+        booking, _attempt = await _lock_booking_payment_attempt(db, booking_id)
+        if booking.status not in {
+            FeatureBookingStatus.awaiting_payment,
+            FeatureBookingStatus.failed,
+        } or not (booking.reservation_expires_at and booking.reservation_expires_at <= now):
+            continue
         booking.status = FeatureBookingStatus.failed
         booking.reservation_expires_at = None
+        expired += 1
         await emit_transactional(
             db,
             recipient_user_id=booking.purchaser_user_id,
@@ -371,7 +424,7 @@ async def expire_reservations(db: AsyncSession, now: datetime | None = None) -> 
             body="Your featuring reservation has expired without payment.",
             target_path="/featuring",
         )
-    return len(rows)
+    return expired
 
 
 def _add_delivery(booking: FeatureBooking, now: datetime) -> int:
@@ -387,19 +440,23 @@ def _add_delivery(booking: FeatureBooking, now: datetime) -> int:
 async def activate_due_bookings(db: AsyncSession, now: datetime | None = None) -> int:
     """Activate due, paid bookings only after rechecking their current target state."""
     now = now or datetime.now(UTC)
-    rows = (
+    booking_ids = (
         await db.scalars(
-            select(FeatureBooking)
-            .where(
+            select(FeatureBooking.id).where(
                 FeatureBooking.status == FeatureBookingStatus.scheduled,
                 FeatureBooking.starts_at <= now,
                 FeatureBooking.ends_at > now,
             )
-            .with_for_update()
         )
     ).all()
     count = 0
-    for booking in rows:
+    for booking_id in booking_ids:
+        booking, _attempt = await _lock_booking_payment_attempt(db, booking_id)
+        if not (
+            booking.status is FeatureBookingStatus.scheduled
+            and booking.starts_at <= now < booking.ends_at
+        ):
+            continue
         try:
             await assert_target_eligibility(db, booking.target_type, booking.target_id)
         except FeaturingError:
@@ -432,19 +489,22 @@ async def activate_due_bookings(db: AsyncSession, now: datetime | None = None) -
 
 async def deactivate_due_bookings(db: AsyncSession, now: datetime | None = None) -> int:
     now = now or datetime.now(UTC)
-    rows = (
+    booking_ids = (
         await db.scalars(
-            select(FeatureBooking)
-            .where(
+            select(FeatureBooking.id).where(
                 FeatureBooking.status == FeatureBookingStatus.active, FeatureBooking.ends_at <= now
             )
-            .with_for_update()
         )
     ).all()
-    for booking in rows:
+    deactivated = 0
+    for booking_id in booking_ids:
+        booking, _attempt = await _lock_booking_payment_attempt(db, booking_id)
+        if not (booking.status is FeatureBookingStatus.active and booking.ends_at <= now):
+            continue
         _add_delivery(booking, now)
         booking.status = FeatureBookingStatus.completed
         booking.ended_at = now
+        deactivated += 1
         await record_event(
             db,
             "featuring.placement_deactivated",
@@ -463,23 +523,24 @@ async def deactivate_due_bookings(db: AsyncSession, now: datetime | None = None)
             body="Your sponsored placement has ended.",
             target_path="/featuring",
         )
-    return len(rows)
+    return deactivated
 
 
 async def revalidate_active_bookings(db: AsyncSession, now: datetime | None = None) -> int:
     """Stop active placements whose current source-domain policy has failed closed."""
     now = now or datetime.now(UTC)
-    rows = (
+    booking_ids = (
         await db.scalars(
-            select(FeatureBooking)
-            .where(
+            select(FeatureBooking.id).where(
                 FeatureBooking.status == FeatureBookingStatus.active, FeatureBooking.ends_at > now
             )
-            .with_for_update()
         )
     ).all()
     stopped = 0
-    for booking in rows:
+    for booking_id in booking_ids:
+        booking, _attempt = await _lock_booking_payment_attempt(db, booking_id)
+        if not (booking.status is FeatureBookingStatus.active and booking.ends_at > now):
+            continue
         try:
             await assert_target_eligibility(db, booking.target_type, booking.target_id)
         except FeaturingError:
@@ -498,6 +559,7 @@ async def _refund(
 ) -> FeatureRefund | None:
     if amount_minor <= 0:
         return None
+    booking, _attempt = await _lock_booking_payment_attempt(db, booking.id)
     existing = await db.scalar(
         select(FeatureRefund).where(
             FeatureRefund.booking_id == booking.id, FeatureRefund.reason == reason
@@ -507,6 +569,13 @@ async def _refund(
         return existing
     if not booking.ledger_transaction_id:
         raise FeaturingError("Cannot refund an unpaid booking")
+    original = await db.scalar(
+        select(LedgerTransaction)
+        .where(LedgerTransaction.id == booking.ledger_transaction_id)
+        .with_for_update()
+    )
+    if original is None:
+        raise FeaturingError("Featuring ledger snapshot is missing")
     original_entries = (
         await db.scalars(
             select(LedgerEntry).where(LedgerEntry.transaction_id == booking.ledger_transaction_id)
@@ -519,6 +588,24 @@ async def _refund(
     )
     if original_amount != booking.price_minor:
         raise FeaturingError("Featuring ledger snapshot is inconsistent")
+    reversed_amount = int(
+        await db.scalar(
+            select(func.coalesce(func.sum(LedgerEntry.amount_minor), 0))
+            .join(LedgerTransaction, LedgerTransaction.id == LedgerEntry.transaction_id)
+            .where(
+                LedgerTransaction.reversal_of_transaction_id == original.id,
+                LedgerTransaction.transaction_type.in_(
+                    [LedgerTransactionType.refund, LedgerTransactionType.chargeback]
+                ),
+                LedgerEntry.direction == LedgerDirection.debit,
+            )
+        )
+        or 0
+    )
+    remaining = original_amount - reversed_amount
+    if remaining <= 0:
+        return None
+    amount_minor = min(amount_minor, remaining)
     entries = []
     for entry in original_entries:
         account = await db.get(LedgerAccount, entry.ledger_account_id)
@@ -557,6 +644,23 @@ async def _refund(
     return refund
 
 
+async def _fully_reversed(db: AsyncSession, booking: FeatureBooking) -> bool:
+    if not booking.ledger_transaction_id:
+        return False
+    reversed_amount = await db.scalar(
+        select(func.coalesce(func.sum(LedgerEntry.amount_minor), 0))
+        .join(LedgerTransaction, LedgerTransaction.id == LedgerEntry.transaction_id)
+        .where(
+            LedgerTransaction.reversal_of_transaction_id == booking.ledger_transaction_id,
+            LedgerTransaction.transaction_type.in_(
+                [LedgerTransactionType.refund, LedgerTransactionType.chargeback]
+            ),
+            LedgerEntry.direction == LedgerDirection.debit,
+        )
+    )
+    return int(reversed_amount or 0) >= booking.price_minor
+
+
 async def terminate_ineligible(
     db: AsyncSession,
     booking: FeatureBooking,
@@ -566,10 +670,12 @@ async def terminate_ineligible(
 ) -> FeatureBooking:
     """Stop serving; platform/moderation reasons refund unused time, creator end does not."""
     now = now or datetime.now(UTC)
+    booking, _attempt = await _lock_booking_payment_attempt(db, booking.id)
     if booking.status in {
         FeatureBookingStatus.refunded,
         FeatureBookingStatus.completed,
         FeatureBookingStatus.cancelled,
+        FeatureBookingStatus.chargeback,
     }:
         return booking
     _add_delivery(booking, now)
@@ -581,7 +687,7 @@ async def terminate_ineligible(
         # Floor in minor units is deterministic and never refunds more than the snapshot price.
         amount = booking.price_minor * unused // booking.duration_seconds
         refund = await _refund(db, booking, reason, amount)
-        if refund and amount == booking.price_minor:
+        if refund and await _fully_reversed(db, booking):
             booking.status = FeatureBookingStatus.refunded
     await record_event(
         db,
@@ -620,11 +726,16 @@ async def cancel_before_start(
     db: AsyncSession, booking: FeatureBooking, actor: User, now: datetime | None = None
 ) -> FeatureBooking:
     now = now or datetime.now(UTC)
+    booking, _attempt = await _lock_booking_payment_attempt(db, booking.id)
     if actor.id not in {booking.purchaser_user_id, booking.actor_user_id}:
         raise FeaturingError("You are not authorized to cancel this booking")
     if (
         booking.status
-        not in {FeatureBookingStatus.awaiting_payment, FeatureBookingStatus.scheduled}
+        not in {
+            FeatureBookingStatus.awaiting_payment,
+            FeatureBookingStatus.failed,
+            FeatureBookingStatus.scheduled,
+        }
         or now >= booking.starts_at
     ):
         raise FeaturingError("Booking can no longer be cancelled before start")
@@ -648,38 +759,24 @@ async def cancel_before_start(
 
 async def handle_chargeback(db: AsyncSession, booking: FeatureBooking) -> FeatureBooking:
     """Reverse the exact paid platform revenue once and remove the placement."""
+    booking = await db.scalar(
+        select(FeatureBooking)
+        .where(FeatureBooking.id == booking.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if booking is None:
+        raise FeaturingError("Featuring booking not found")
     if booking.status is FeatureBookingStatus.chargeback:
         return booking
     if not booking.ledger_transaction_id:
         raise FeaturingError("Cannot charge back an unpaid booking")
-    original_entries = (
-        await db.scalars(
-            select(LedgerEntry).where(LedgerEntry.transaction_id == booking.ledger_transaction_id)
-        )
-    ).all()
-    if len(original_entries) != 2:
-        raise FeaturingError("Unexpected featuring ledger allocation")
-    entries = []
-    for entry in original_entries:
-        account = await db.get(LedgerAccount, entry.ledger_account_id)
-        assert account
-        entries.append(
-            (
-                account,
-                LedgerDirection.credit
-                if entry.direction is LedgerDirection.debit
-                else LedgerDirection.debit,
-                entry.amount_minor,
-            )
-        )
-    await post_entries(
+    await reverse_original_ledger(
         db,
+        booking.ledger_transaction_id,
         transaction_type=LedgerTransactionType.chargeback,
-        currency=booking.currency,
         idempotency_key=f"feature-chargeback:{booking.id}",
         reference=f"feature_chargeback:{booking.id}",
-        reversal_of_transaction_id=booking.ledger_transaction_id,
-        entries=entries,
         metadata={"booking_id": str(booking.id), "reason": "provider_chargeback"},
     )
     _add_delivery(booking, datetime.now(UTC))
@@ -797,36 +894,210 @@ async def record_sponsored_event(
     return True
 
 
+async def booking_for_payment_attempt(
+    db: AsyncSession, payment_attempt_id: UUID, *, for_update: bool = False
+) -> FeatureBooking | None:
+    """Resolve a booking through durable attempt history, including stale retries."""
+
+    statement = (
+        select(FeatureBooking)
+        .join(
+            FeatureBookingPaymentAttempt,
+            FeatureBookingPaymentAttempt.booking_id == FeatureBooking.id,
+        )
+        .where(FeatureBookingPaymentAttempt.payment_attempt_id == payment_attempt_id)
+    )
+    if for_update:
+        statement = statement.with_for_update(of=FeatureBooking)
+    return await db.scalar(statement)
+
+
 async def initiate_payment(
-    db: AsyncSession, booking: FeatureBooking, payer: User
+    db: AsyncSession,
+    booking: FeatureBooking,
+    payer: User,
+    idempotency_key: str | None = None,
 ) -> PaymentAttempt:
     if booking.purchaser_user_id != payer.id:
         raise FeaturingError("Only the selected payer can authorize this booking")
+    if idempotency_key is None:
+        # Compatibility for internal seed/lifecycle callers. Public API callers
+        # must send an explicit key and pass an empty string when it is absent.
+        idempotency_key = f"feature:{booking.id}"
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise FeaturingError("A valid Idempotency-Key is required")
+    replay = await db.scalar(
+        select(PaymentAttempt)
+        .join(
+            FeatureBookingPaymentAttempt,
+            FeatureBookingPaymentAttempt.payment_attempt_id == PaymentAttempt.id,
+        )
+        .where(
+            FeatureBookingPaymentAttempt.booking_id == booking.id,
+            PaymentAttempt.buyer_user_id == payer.id,
+            PaymentAttempt.idempotency_key == idempotency_key,
+        )
+    )
+    if replay:
+        return replay
+    used_key = await db.scalar(
+        select(PaymentAttempt.id).where(
+            PaymentAttempt.buyer_user_id == payer.id,
+            PaymentAttempt.idempotency_key == idempotency_key,
+        )
+    )
+    if used_key:
+        raise FeaturingError("This Idempotency-Key was already used for another payment")
+    booking = await db.scalar(
+        select(FeatureBooking).where(FeatureBooking.id == booking.id).with_for_update()
+    )
+    assert booking
+    now = datetime.now(UTC)
     if (
-        booking.status is not FeatureBookingStatus.awaiting_payment
+        booking.status not in {FeatureBookingStatus.awaiting_payment, FeatureBookingStatus.failed}
         or not booking.reservation_expires_at
-        or booking.reservation_expires_at <= datetime.now(UTC)
+        or booking.reservation_expires_at <= now
     ):
         raise FeaturingError("Booking payment reservation has expired")
     if booking.payment_attempt_id:
-        attempt = await db.get(PaymentAttempt, booking.payment_attempt_id)
-        if attempt:
-            return attempt
+        current_attempt = await db.get(PaymentAttempt, booking.payment_attempt_id)
+        if current_attempt and current_attempt.status in {
+            PaymentStatus.pending,
+            PaymentStatus.succeeded,
+        }:
+            return current_attempt
+    try:
+        require_current_self_attestation(payer)
+    except PermissionError as exc:
+        raise FeaturingError("Current adult self-attestation is required") from exc
     attempt = PaymentAttempt(
         buyer_user_id=payer.id,
         provider=get_settings().payment_provider,
         provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
         amount_minor=booking.price_minor,
         currency=booking.currency,
-        idempotency_key=f"feature:{booking.id}",
+        idempotency_key=idempotency_key,
     )
     db.add(attempt)
     await db.flush()
+    attempt_number = (
+        int(
+            await db.scalar(
+                select(
+                    func.coalesce(func.max(FeatureBookingPaymentAttempt.attempt_number), 0)
+                ).where(FeatureBookingPaymentAttempt.booking_id == booking.id)
+            )
+            or 0
+        )
+        + 1
+    )
+    db.add(
+        FeatureBookingPaymentAttempt(
+            booking_id=booking.id,
+            payment_attempt_id=attempt.id,
+            attempt_number=attempt_number,
+        )
+    )
     booking.payment_attempt_id = attempt.id
+    booking.status = FeatureBookingStatus.awaiting_payment
+    await record_event(
+        db,
+        "featuring.payment_retry_started" if attempt_number > 1 else "featuring.payment_started",
+        actor_user_id=payer.id,
+        target_type="feature_booking",
+        target_id=str(booking.id),
+        metadata={"attempt_number": attempt_number, "payment_attempt_id": str(attempt.id)},
+    )
+    await db.flush()
     return attempt
 
 
-async def settle_payment(db: AsyncSession, booking: FeatureBooking) -> FeatureBooking:
+async def fail_payment_attempt(db: AsyncSession, attempt: PaymentAttempt) -> FeatureBooking | None:
+    """Keep failed paid inventory reserved until its original bounded expiry."""
+
+    booking = await booking_for_payment_attempt(db, attempt.id, for_update=True)
+    if not booking or booking.payment_attempt_id != attempt.id:
+        return booking
+    if booking.ledger_transaction_id or booking.status not in {
+        FeatureBookingStatus.awaiting_payment,
+        FeatureBookingStatus.failed,
+    }:
+        return booking
+    if booking.status is FeatureBookingStatus.failed:
+        return booking
+    booking.status = FeatureBookingStatus.failed
+    await record_event(
+        db,
+        "featuring.payment_failed",
+        actor_user_id=booking.purchaser_user_id,
+        target_type="feature_booking",
+        target_id=str(booking.id),
+        metadata={
+            "payment_attempt_id": str(attempt.id),
+            "reservation_expires_at": (
+                booking.reservation_expires_at.isoformat()
+                if booking.reservation_expires_at
+                else None
+            ),
+        },
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=booking.purchaser_user_id,
+        notification_type="FEATURING_PAYMENT_FAILED",
+        source_domain="featuring",
+        source_id=str(booking.id),
+        title="Featuring payment was not completed",
+        body="Your slot remains reserved for a short time so you can retry safely.",
+        target_path="/featuring",
+    )
+    return booking
+
+
+async def settle_payment_attempt(
+    db: AsyncSession, attempt: PaymentAttempt
+) -> FeatureBooking | None:
+    """Settle the first valid capture and contain every stale/later success."""
+
+    booking = await booking_for_payment_attempt(db, attempt.id, for_update=True)
+    if not booking:
+        return None
+    if attempt.status is not PaymentStatus.succeeded:
+        raise FeaturingError("Booking payment is not settled")
+    if booking.ledger_transaction_id:
+        if booking.payment_attempt_id != attempt.id:
+            from app.finance.service import record_excess_capture
+
+            await record_excess_capture(
+                db,
+                attempt,
+                source_type=ExcessCaptureSource.feature_booking,
+                source_reference=booking.id,
+            )
+        return booking
+    now = datetime.now(UTC)
+    if (
+        booking.status not in {FeatureBookingStatus.awaiting_payment, FeatureBookingStatus.failed}
+        or not booking.reservation_expires_at
+        or booking.reservation_expires_at <= now
+    ):
+        from app.finance.service import record_excess_capture
+
+        await record_excess_capture(
+            db,
+            attempt,
+            source_type=ExcessCaptureSource.feature_booking,
+            source_reference=booking.id,
+        )
+        return booking
+    return await settle_payment(db, booking, attempt)
+
+
+async def settle_payment(
+    db: AsyncSession,
+    booking: FeatureBooking,
+    payment_attempt: PaymentAttempt | None = None,
+) -> FeatureBooking:
     if booking.status in {
         FeatureBookingStatus.scheduled,
         FeatureBookingStatus.active,
@@ -835,9 +1106,15 @@ async def settle_payment(db: AsyncSession, booking: FeatureBooking) -> FeatureBo
         return booking
     if not booking.payment_attempt_id:
         raise FeaturingError("Booking has no payment attempt")
-    attempt = await db.get(PaymentAttempt, booking.payment_attempt_id)
+    if booking.status not in {
+        FeatureBookingStatus.awaiting_payment,
+        FeatureBookingStatus.failed,
+    }:
+        raise FeaturingError("Booking is not awaiting payment")
+    attempt = payment_attempt or await db.get(PaymentAttempt, booking.payment_attempt_id)
     if not attempt or attempt.status is not PaymentStatus.succeeded:
         raise FeaturingError("Booking payment is not settled")
+    booking.payment_attempt_id = attempt.id
     clearing = await _account(db, LedgerAccountKind.platform_clearing, booking.currency)
     revenue = await _account(db, LedgerAccountKind.platform_revenue, booking.currency)
     ledger = await post_entries(
@@ -852,6 +1129,7 @@ async def settle_payment(db: AsyncSession, booking: FeatureBooking) -> FeatureBo
         ],
         metadata={
             "booking_id": str(booking.id),
+            "payment_attempt_id": str(attempt.id),
             "payer_user_id": str(booking.purchaser_user_id),
             "owner_creator_id": str(booking.owner_creator_id),
             "price_version": str(booking.price_version),

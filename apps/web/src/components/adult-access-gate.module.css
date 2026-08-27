@@ -1,0 +1,38 @@
+.gate {
+  align-items: center;
+  background: radial-gradient(circle at top, rgb(139 92 246 / 0.2), transparent 52%), #080b17;
+  border: 1px solid var(--border-strong);
+  border-radius: 24px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  min-height: 480px;
+  padding: clamp(28px, 7vw, 70px);
+  text-align: center;
+}
+
+.mark {
+  align-items: center;
+  background: var(--brand-gradient);
+  border-radius: 50%;
+  color: var(--brand-midnight);
+  display: flex;
+  font-size: 1.45rem;
+  font-weight: 900;
+  height: 76px;
+  justify-content: center;
+  margin-bottom: 22px;
+  width: 76px;
+}
+
+.eyebrow { color: var(--brand-pink); font-size: .68rem; font-weight: 850; letter-spacing: .15em; margin: 0; }
+.gate h2 { font-size: clamp(1.7rem, 4vw, 2.6rem); margin: 8px 0; max-width: 650px; }
+.gate > p:not(.eyebrow, .error) { color: var(--text-secondary); line-height: 1.65; max-width: 650px; }
+.confirmation { align-items: center; background: rgb(255 255 255 / .04); border: 1px solid var(--border-subtle); border-radius: 14px; display: flex; gap: 11px; margin: 18px 0 14px; padding: 14px 16px; text-align: left; }
+.confirmation input { accent-color: var(--brand-pink); height: 20px; width: 20px; }
+.confirmation span { color: var(--text-primary); font-size: .82rem; font-weight: 700; }
+.gate button { background: var(--brand-gradient); border: 0; border-radius: 999px; color: var(--brand-midnight); font-size: .78rem; font-weight: 850; min-height: 44px; padding: 11px 20px; }
+.gate button:disabled { cursor: not-allowed; opacity: .48; }
+.error { color: #ffa2b2; font-size: .76rem; }
+
+@media (max-width: 640px) { .gate { border-radius: 16px; min-height: 420px; padding: 28px 20px; } }

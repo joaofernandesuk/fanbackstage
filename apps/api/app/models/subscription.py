@@ -50,6 +50,8 @@ class SubscriptionPeriodStatus(str, enum.Enum):
     active = "active"
     failed = "failed"
     refunded = "refunded"
+    disputed = "disputed"
+    chargeback = "chargeback"
 
 
 class SubscriptionPlan(UUIDPrimaryKey, Timestamped, Base):
@@ -199,7 +201,7 @@ class SubscriptionPeriod(UUIDPrimaryKey, Timestamped, Base):
 
 
 class SubscriptionRenewalAttempt(UUIDPrimaryKey, Timestamped, Base):
-    """Durable payment-attempt history for one renewal period."""
+    """Durable payment-attempt history for one initial or renewal period."""
 
     __tablename__ = "subscription_renewal_attempts"
     __table_args__ = (

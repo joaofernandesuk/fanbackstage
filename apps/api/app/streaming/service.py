@@ -9,16 +9,23 @@ from uuid import UUID
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
 from app.core.config import get_settings
+from app.creators.service import (
+    has_current_adult_verification,
+    require_public_creator_access,
+)
 from app.finance import service as finance
 from app.finance.service import currency_code, ppv_commission
 from app.integrations.streaming import LiveKitStreamingProvider, StreamingProviderError
 from app.media.service import approved_creator
-from app.models.creator import CreatorProfile
+from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.finance import (
     LedgerAccountKind,
     LedgerDirection,
+    LedgerEntry,
+    LedgerTransaction,
     LedgerTransactionType,
     PaymentAttempt,
     PaymentStatus,
@@ -42,6 +49,7 @@ from app.models.streaming import (
     PrivateSession,
     PrivateSessionMode,
     PrivateSessionRequest,
+    PrivateSessionSettlement,
     PrivateSessionStatus,
     ProviderLiveEvent,
     SessionParticipant,
@@ -177,7 +185,15 @@ async def can_join_live(db: AsyncSession, viewer: User, room: LiveRoom) -> bool:
     if room.status is not LiveRoomStatus.live:
         return False
     creator = await db.get(CreatorProfile, room.creator_id)
-    if creator is None or await is_blocked(db, viewer.id, creator.user_id):
+    if (
+        creator is None
+        or not await has_current_adult_verification(db, creator.id)
+        or await is_blocked(db, viewer.id, creator.user_id)
+    ):
+        return False
+    if creator.user_id != viewer.id and (
+        creator.status is not CreatorStatus.approved or not creator.is_public
+    ):
         return False
     if room.access_mode is LiveAccessMode.public:
         return True
@@ -227,6 +243,7 @@ async def join_live(db: AsyncSession, viewer: User, room_id: UUID) -> LivePartic
 
 
 async def issue_live_token(db: AsyncSession, viewer: User, room_id: UUID) -> tuple[LiveRoom, str]:
+    require_current_self_attestation(viewer)
     room = await db.get(LiveRoom, room_id)
     if room is None:
         raise PermissionError("Live room not found")
@@ -408,12 +425,12 @@ async def request_private_session(
     invited_user_id: UUID | None = None,
     note: str | None = None,
 ) -> PrivateSessionRequest:
-    creator = await db.get(CreatorProfile, creator_id)
-    if (
-        creator is None
-        or creator.user_id == requester.id
-        or await is_blocked(db, requester.id, creator.user_id)
-    ):
+    require_current_self_attestation(requester)
+    try:
+        creator = await require_public_creator_access(db, creator_id, requester.id)
+    except ValueError as exc:
+        raise PermissionError("Private session is unavailable") from exc
+    if creator.user_id == requester.id:
         raise PermissionError("Private session is unavailable")
     settings = await settings_for_creator(db, creator.id)
     if not settings.private_sessions_enabled:
@@ -538,6 +555,14 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
     )
     if active:
         raise StreamingError("Creator already has an active private session")
+    payer = await db.get(User, request.requester_user_id)
+    if not payer:
+        raise PermissionError("Private session requester is unavailable")
+    require_current_self_attestation(payer)
+    try:
+        await require_public_creator_access(db, creator.id, payer.id)
+    except ValueError as exc:
+        raise PermissionError("Private session request not found") from exc
     request.status = PrivateRequestStatus.accepted
     request.accepted_at = datetime.now(UTC)
     session = PrivateSession(
@@ -748,6 +773,7 @@ async def issue_private_token(
     db: AsyncSession, actor: User, session_id: UUID
 ) -> tuple[PrivateSession, str]:
     """Issue a short-lived token only to a named, authorized participant."""
+    require_current_self_attestation(actor)
     session = await db.scalar(
         select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
     )
@@ -786,7 +812,12 @@ async def end_private_session(
         (await db.get(CreatorProfile, session.creator_id)).user_id,
     }:
         raise PermissionError("Only the creator or payer can end this private session")
-    if session.status in (PrivateSessionStatus.settled, PrivateSessionStatus.cancelled):
+    if session.status in {
+        PrivateSessionStatus.settled,
+        PrivateSessionStatus.cancelled,
+        PrivateSessionStatus.failed,
+        PrivateSessionStatus.disputed,
+    }:
         return session
     if session.status is PrivateSessionStatus.active and session.active_started_at:
         session.billable_seconds += max(0, int((now - session.active_started_at).total_seconds()))
@@ -1072,8 +1103,6 @@ async def settle_private_session(db: AsyncSession, session: PrivateSession) -> P
         source_ledger_transaction_id=ledger.id,
         allocation=referral_allocation,
     )
-    from app.models.streaming import PrivateSessionSettlement
-
     settlement = await db.scalar(
         select(PrivateSessionSettlement).where(
             PrivateSessionSettlement.private_session_id == session.id
@@ -1092,4 +1121,149 @@ async def settle_private_session(db: AsyncSession, session: PrivateSession) -> P
             )
         )
     session.status = PrivateSessionStatus.settled
+    return session
+
+
+_PRIVATE_REVERSAL_TYPES = {
+    LedgerTransactionType.refund,
+    LedgerTransactionType.chargeback,
+}
+
+
+async def _validate_private_settlement_ledger(
+    db: AsyncSession, original: LedgerTransaction, settlement: PrivateSessionSettlement
+) -> None:
+    """Verify that the settlement snapshot still identifies one balanced exact charge."""
+    original_entries = (
+        await db.scalars(select(LedgerEntry).where(LedgerEntry.transaction_id == original.id))
+    ).all()
+    debits = sum(
+        entry.amount_minor for entry in original_entries if entry.direction is LedgerDirection.debit
+    )
+    credits = sum(
+        entry.amount_minor
+        for entry in original_entries
+        if entry.direction is LedgerDirection.credit
+    )
+    if debits != settlement.gross_amount_minor or credits != settlement.gross_amount_minor:
+        raise StreamingError("Private-session settlement ledger snapshot is inconsistent")
+
+
+async def reverse_private_session_payment(
+    db: AsyncSession,
+    payment_attempt: PaymentAttempt,
+    *,
+    resolution_type: LedgerTransactionType,
+    reason: str,
+) -> PrivateSession | None:
+    """Apply one signed provider refund/chargeback to its private session.
+
+    The caller owns signature verification and provider-event deduplication. This
+    domain hook locks the attempt and session, reverses the exact frozen
+    settlement at most once, and makes private-room access terminal. A
+    chargeback dominates a refund when provider events arrive out of order.
+    """
+    if resolution_type not in _PRIVATE_REVERSAL_TYPES:
+        raise StreamingError("Private-session payment reversal type is invalid")
+    attempt = await db.scalar(
+        select(PaymentAttempt)
+        .where(PaymentAttempt.id == payment_attempt.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if attempt is None:
+        return None
+    session = await db.scalar(
+        select(PrivateSession)
+        .where(PrivateSession.payment_attempt_id == attempt.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if session is None:
+        return None
+
+    settlement = await db.scalar(
+        select(PrivateSessionSettlement)
+        .where(PrivateSessionSettlement.private_session_id == session.id)
+        .with_for_update()
+    )
+    reversal: LedgerTransaction | None = None
+    if settlement is not None:
+        original = await db.get(LedgerTransaction, settlement.ledger_transaction_id)
+        if (
+            original is None
+            or original.transaction_type is not LedgerTransactionType.private_live_session
+            or original.currency != settlement.currency
+            or settlement.currency != session.currency
+        ):
+            raise StreamingError("Private-session settlement snapshot is inconsistent")
+        await _validate_private_settlement_ledger(db, original, settlement)
+        reversal = await db.scalar(
+            select(LedgerTransaction)
+            .where(
+                LedgerTransaction.reversal_of_transaction_id == original.id,
+                LedgerTransaction.transaction_type.in_(_PRIVATE_REVERSAL_TYPES),
+            )
+            .order_by(LedgerTransaction.created_at, LedgerTransaction.id)
+            .with_for_update()
+        )
+        if reversal is None:
+            reversal = await finance.reverse_original_ledger(
+                db,
+                original.id,
+                transaction_type=resolution_type,
+                idempotency_key=f"private-session-reversal:{session.id}",
+                reference=f"private_session_reversal:{session.id}",
+                metadata={
+                    "private_session_id": str(session.id),
+                    "private_session_settlement_id": str(settlement.id),
+                    "original_ledger_transaction_id": str(original.id),
+                    "reason": reason,
+                    "resolution_type": resolution_type.value,
+                },
+            )
+        elif reversal.currency != settlement.currency:
+            raise StreamingError("Private-session reversal ledger snapshot is inconsistent")
+        await _validate_private_settlement_ledger(db, reversal, settlement)
+    elif session.status is PrivateSessionStatus.settled:
+        raise StreamingError("Private-session settlement snapshot is missing")
+
+    previous_session_status = session.status
+    previous_attempt_status = attempt.status
+    chargeback_dominates = (
+        resolution_type is LedgerTransactionType.chargeback
+        or attempt.status is PaymentStatus.chargeback
+        or (reversal is not None and reversal.transaction_type is LedgerTransactionType.chargeback)
+    )
+    session.status = (
+        PrivateSessionStatus.disputed if chargeback_dominates else PrivateSessionStatus.cancelled
+    )
+    attempt.status = PaymentStatus.chargeback if chargeback_dominates else PaymentStatus.refunded
+    now = datetime.now(UTC)
+    if session.ended_at is None:
+        session.ended_at = now
+    if session.end_reason is None:
+        session.end_reason = "provider_chargeback" if chargeback_dominates else "provider_refund"
+
+    if (
+        session.status is not previous_session_status
+        or attempt.status is not previous_attempt_status
+    ):
+        await record_event(
+            db,
+            "private_session.payment_reversed",
+            actor_user_id=session.payer_user_id,
+            target_type="private_session",
+            target_id=str(session.id),
+            metadata={
+                "resolution_type": (
+                    LedgerTransactionType.chargeback.value
+                    if chargeback_dominates
+                    else LedgerTransactionType.refund.value
+                ),
+                "reason": reason,
+                "payment_attempt_id": str(attempt.id),
+                "reversal_ledger_transaction_id": str(reversal.id) if reversal else "",
+            },
+        )
     return session

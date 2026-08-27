@@ -7,9 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.service import record_event
 from app.core.config import get_settings
 from app.media.storage import StorageProvider, storage_provider
-from app.models.content import MediaAsset, MediaStatus, MediaType
+from app.models.content import MediaAsset, MediaAudience, MediaStatus, MediaType
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.identity import User
+from app.permissions.policies import Permission, authorize
 
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 VIDEO_TYPES = {"video/mp4", "video/webm"}
@@ -27,7 +28,38 @@ async def approved_creator(db: AsyncSession, user: User) -> CreatorProfile:
     profile = await db.scalar(select(CreatorProfile).where(CreatorProfile.user_id == user.id))
     if not profile or profile.status is not CreatorStatus.approved:
         raise PermissionError("An approved creator profile is required")
+    from app.creators.service import has_current_adult_verification
+
+    if not await has_current_adult_verification(db, profile.id):
+        raise PermissionError("A current verified adult creator profile is required")
     return profile
+
+
+async def classify_audience(
+    db: AsyncSession,
+    actor: User,
+    asset_id: UUID,
+    audience: MediaAudience,
+) -> tuple[MediaAsset, bool]:
+    """Apply a moderator-owned audience decision once and audit actual changes."""
+
+    authorize(actor, Permission.MODERATION_ACCESS)
+    asset = await db.scalar(select(MediaAsset).where(MediaAsset.id == asset_id).with_for_update())
+    if not asset:
+        raise ValueError("Media asset not found")
+    previous = asset.audience
+    if previous is audience:
+        return asset, False
+    asset.audience = audience
+    await record_event(
+        db,
+        "media.audience_classified",
+        actor_user_id=actor.id,
+        target_type="media_asset",
+        target_id=str(asset.id),
+        metadata={"previous": previous.value, "audience": audience.value},
+    )
+    return asset, True
 
 
 async def begin_upload(

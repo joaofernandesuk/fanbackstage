@@ -9,16 +9,23 @@ from datetime import UTC, datetime
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts import adult_access
 from app.db.session import SessionLocal
+from app.marketplace import service as marketplace
 from app.models.content import (
+    AccessPolicy,
     ContentItem,
     ContentStatus,
     ContentType,
     DerivativeType,
+    Gallery,
+    GalleryItem,
     MediaAsset,
+    MediaAudience,
     MediaDerivative,
     MediaStatus,
     MediaType,
+    VideoContent,
 )
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.featuring import FeatureBooking, FeatureBookingStatus
@@ -27,20 +34,23 @@ from app.models.groups import Group, GroupContract, GroupContractStatus
 from app.models.identity import User
 from app.models.marketplace import (
     MarketplaceListing,
+    MarketplaceListingMedia,
     MarketplaceListingStatus,
     MarketplaceOrder,
     MarketplaceOrderStatus,
 )
 from app.models.messaging import Conversation, Message
-from app.models.notification import NotificationIntent
+from app.models.notification import EmailSuppression, NotificationIntent, NotificationPreference
 from app.models.referral import ReferralCommissionAllocation, ReferralProgram, SignupAttribution
 from app.models.social import FeedPost, FeedPostStatus, Follow, PostComment, PostReaction
 from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
 from app.models.subscription import Subscription, SubscriptionStatus
+from app.notifications.service import email_hash
 from app.seed.demo import _assert_development
 from app.seed.manifest import (
     CREATORS,
+    GALLERY_SHOWCASES,
     GROUPS,
     PUBLIC_CREATORS,
     RESTRICTED_CREATOR,
@@ -62,6 +72,7 @@ from app.seed.manifest import (
     story_caption,
     video_title,
 )
+from app.seed.media import VIDEO_DURATION_SECONDS, VIDEO_PREVIEW_DURATION_SECONDS
 from app.stories import service as stories
 
 
@@ -96,6 +107,22 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     story_creator_ids = [
         by_slug[creator.slug].id for creator in STORY_CREATORS if creator.slug in by_slug
     ]
+    marketing_users = (
+        await db.scalars(
+            select(User).where(
+                User.email.in_(
+                    [
+                        "marketing-in@demo.fanbackstage.local",
+                        "marketing-out@demo.fanbackstage.local",
+                    ]
+                )
+            )
+        )
+    ).all()
+    marketing_users_by_email = {user.email: user for user in marketing_users}
+    marketing_user_ids = [user.id for user in marketing_users]
+    marketing_in = marketing_users_by_email.get("marketing-in@demo.fanbackstage.local")
+    marketing_out = marketing_users_by_email.get("marketing-out@demo.fanbackstage.local")
     now = datetime.now(UTC)
     eligible_story_rows = (
         await db.execute(
@@ -173,6 +200,20 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
             MarketplaceListing.owner_creator_id.in_(public_ids),
             MarketplaceListing.status == MarketplaceListingStatus.published,
         ),
+        "published_listing_media": int(
+            await db.scalar(
+                select(func.count(MarketplaceListingMedia.id))
+                .join(
+                    MarketplaceListing,
+                    MarketplaceListing.id == MarketplaceListingMedia.listing_id,
+                )
+                .where(
+                    MarketplaceListing.owner_creator_id.in_(public_ids),
+                    MarketplaceListing.status == MarketplaceListingStatus.published,
+                )
+            )
+            or 0
+        ),
         "conversations": await _count(db, Conversation),
         "messages": await _count(db, Message),
         "subscriptions": await _count(db, Subscription),
@@ -211,6 +252,49 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
             db, FeatureBooking, FeatureBooking.status == FeatureBookingStatus.active
         ),
         "notification_intents": await _count(db, NotificationIntent),
+        "marketing_preference_rows": await _count(
+            db,
+            NotificationPreference,
+            NotificationPreference.user_id.in_(marketing_user_ids),
+            NotificationPreference.category == "marketing",
+        ),
+        "marketing_opted_in": (
+            await _count(
+                db,
+                NotificationPreference,
+                NotificationPreference.user_id == marketing_in.id,
+                NotificationPreference.category == "marketing",
+                NotificationPreference.email_enabled.is_(True),
+                NotificationPreference.in_app_enabled.is_(True),
+                NotificationPreference.consented_at.is_not(None),
+                NotificationPreference.consent_source == "account_settings",
+            )
+            if marketing_in
+            else 0
+        ),
+        "marketing_opted_out": (
+            await _count(
+                db,
+                NotificationPreference,
+                NotificationPreference.user_id == marketing_out.id,
+                NotificationPreference.category == "marketing",
+                NotificationPreference.email_enabled.is_(False),
+                NotificationPreference.in_app_enabled.is_(True),
+                NotificationPreference.consented_at.is_(None),
+                NotificationPreference.consent_source.is_(None),
+            )
+            if marketing_out
+            else 0
+        ),
+        "marketing_in_suppressions": (
+            await _count(
+                db,
+                EmailSuppression,
+                EmailSuppression.email_hash == email_hash(marketing_in.email),
+            )
+            if marketing_in
+            else 0
+        ),
         "active_stories": await _count(
             db,
             Story,
@@ -250,6 +334,13 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
             )
             or 0
         ),
+        "current_adult_attested_users": await _count(
+            db,
+            User,
+            User.email.in_([seed.email for seed in USERS]),
+            User.adult_attested_at.is_not(None),
+            User.adult_attestation_version == adult_access.current_policy_version(),
+        ),
     }
     failures: list[str] = []
 
@@ -263,6 +354,7 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
 
     exact("users", TARGET_USER_COUNT)
     exact("manifest_users", TARGET_USER_COUNT)
+    exact("current_adult_attested_users", TARGET_USER_COUNT)
     exact("creators", TARGET_CREATOR_COUNT)
     exact("manifest_creators", TARGET_CREATOR_COUNT)
     exact("public_creators", TARGET_PUBLIC_CREATOR_COUNT)
@@ -273,6 +365,7 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     minimum("published_videos", TARGET_PUBLISHED_VIDEO_COUNT)
     minimum("published_posts", TARGET_PUBLISHED_POST_COUNT)
     minimum("published_listings", TARGET_PUBLISHED_LISTING_COUNT)
+    exact("published_listing_media", TARGET_PUBLISHED_LISTING_COUNT)
     minimum("follows", 100)
     minimum("reactions", 150)
     minimum("comments", 80)
@@ -293,6 +386,10 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     minimum("feature_bookings", 1)
     minimum("active_feature_bookings", 1)
     minimum("notification_intents", 20)
+    exact("marketing_preference_rows", 2)
+    exact("marketing_opted_in", 1)
+    exact("marketing_opted_out", 1)
+    exact("marketing_in_suppressions", 0)
     minimum("active_stories", TARGET_ACTIVE_STORY_COUNT)
     minimum("active_story_creators", len(STORY_CREATORS))
     minimum("eligible_active_stories", TARGET_ACTIVE_STORY_COUNT)
@@ -330,6 +427,112 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     )
     if not expected_content_titles <= actual_content_titles:
         failures.append("one or more manifest content titles are missing")
+    for showcase in GALLERY_SHOWCASES:
+        creator = by_slug.get(showcase.creator_slug)
+        if not creator:
+            failures.append(f"showcase gallery creator missing: {showcase.creator_slug}")
+            continue
+        row = await db.execute(
+            select(ContentItem, Gallery, func.count(GalleryItem.id))
+            .join(Gallery, Gallery.content_id == ContentItem.id)
+            .outerjoin(GalleryItem, GalleryItem.gallery_id == Gallery.id)
+            .where(
+                ContentItem.owner_creator_id == creator.id,
+                ContentItem.title == showcase.title,
+                ContentItem.status == ContentStatus.published,
+            )
+            .group_by(ContentItem.id, Gallery.id)
+        )
+        gallery_row = row.first()
+        if not gallery_row:
+            failures.append(f"showcase gallery missing: {showcase.title}")
+            continue
+        content_item, gallery, item_count = gallery_row
+        expected_policy = AccessPolicy(showcase.access_policy)
+        if content_item.access_policy is not expected_policy:
+            failures.append(f"showcase gallery policy mismatch: {showcase.title}")
+        if int(item_count) != 4:
+            failures.append(f"showcase gallery image count mismatch: {showcase.title}")
+        if expected_policy is not AccessPolicy.free and gallery.preview_count < 1:
+            failures.append(f"showcase gallery preview missing: {showcase.title}")
+        if content_item.price_amount_minor != showcase.price_amount_minor:
+            failures.append(f"showcase gallery price mismatch: {showcase.title}")
+        gallery_assets = (
+            await db.execute(
+                select(GalleryItem.position, MediaAsset.audience)
+                .join(MediaAsset, MediaAsset.id == GalleryItem.media_asset_id)
+                .where(GalleryItem.gallery_id == gallery.id)
+                .order_by(GalleryItem.position)
+            )
+        ).all()
+        for position, audience in gallery_assets:
+            expected_audience = (
+                MediaAudience.adult_restricted
+                if showcase.creator_slug == "zara-pulse" and position > 0
+                else MediaAudience.safe_public
+            )
+            if audience is not expected_audience:
+                failures.append(
+                    f"showcase gallery audience mismatch: {showcase.title} item {position + 1}"
+                )
+    for creator_seed in PUBLIC_CREATORS:
+        creator = by_slug.get(creator_seed.slug)
+        if not creator:
+            continue
+        video_item = await db.scalar(
+            select(ContentItem).where(
+                ContentItem.owner_creator_id == creator.id,
+                ContentItem.title == video_title(creator_seed),
+            )
+        )
+        video = (
+            await db.scalar(select(VideoContent).where(VideoContent.content_id == video_item.id))
+            if video_item
+            else None
+        )
+        asset = await db.get(MediaAsset, video.source_media_asset_id) if video else None
+        if not asset:
+            failures.append(f"demo video source missing: {creator_seed.slug}")
+            continue
+        expected_audience = (
+            MediaAudience.adult_restricted
+            if creator_seed.slug == "zara-pulse"
+            else MediaAudience.safe_public
+        )
+        if asset.audience is not expected_audience:
+            failures.append(f"demo video audience mismatch: {creator_seed.slug}")
+        if (
+            video.preview_start_seconds != 0
+            or video.preview_duration_seconds != VIDEO_PREVIEW_DURATION_SECONDS
+        ):
+            failures.append(f"demo video preview configuration mismatch: {creator_seed.slug}")
+        derivatives = (
+            await db.scalars(
+                select(MediaDerivative).where(
+                    MediaDerivative.media_asset_id == asset.id,
+                    MediaDerivative.derivative_type.in_(
+                        [DerivativeType.playback, DerivativeType.preview_clip]
+                    ),
+                    MediaDerivative.status == MediaStatus.ready,
+                )
+            )
+        ).all()
+        by_type = {row.derivative_type: row for row in derivatives}
+        playback = by_type.get(DerivativeType.playback)
+        preview = by_type.get(DerivativeType.preview_clip)
+        if (
+            not playback
+            or not preview
+            or playback.duration_seconds is None
+            or preview.duration_seconds is None
+            or preview.duration_seconds >= playback.duration_seconds
+            or asset.duration_seconds is None
+            or preview.duration_seconds >= asset.duration_seconds
+            or playback.duration_seconds != VIDEO_DURATION_SECONDS
+            or asset.duration_seconds != VIDEO_DURATION_SECONDS
+            or preview.duration_seconds != VIDEO_PREVIEW_DURATION_SECONDS
+        ):
+            failures.append(f"demo trailer is not shorter than playback: {creator_seed.slug}")
     expected_post_bodies = {
         post_body(creator, position) for creator in PUBLIC_CREATORS for position in range(4)
     }
@@ -357,6 +560,20 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     )
     if not set(expected_listing_titles()) <= actual_listing_titles:
         failures.append("one or more manifest marketplace listings are missing")
+    published_listings = (
+        await db.scalars(
+            select(MarketplaceListing).where(
+                MarketplaceListing.owner_creator_id.in_(public_ids),
+                MarketplaceListing.status == MarketplaceListingStatus.published,
+            )
+        )
+    ).all()
+    for listing in published_listings:
+        projected_media = await marketplace.public_listing_media(db, listing)
+        if len(projected_media) != 1:
+            failures.append(
+                f"marketplace listing must have one dedicated safe display derivative: {listing.title}"
+            )
     for creator in STORY_CREATORS:
         profile = by_slug.get(creator.slug)
         if not profile:

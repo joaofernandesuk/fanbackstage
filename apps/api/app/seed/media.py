@@ -14,7 +14,7 @@ import io
 from pathlib import Path
 from uuid import UUID
 
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ from app.media.storage import StorageProvider
 from app.models.content import (
     DerivativeType,
     MediaAsset,
+    MediaAudience,
     MediaDerivative,
     MediaStatus,
     ModerationStatus,
@@ -34,7 +35,28 @@ from app.models.identity import User
 ASSET_ROOT = Path(__file__).with_name("assets")
 VIDEO_WIDTH = 640
 VIDEO_HEIGHT = 480
-VIDEO_DURATION_SECONDS = 3
+VIDEO_DURATION_SECONDS = 8
+VIDEO_PREVIEW_DURATION_SECONDS = 2
+
+
+def _variant_image_body(body: bytes, variant: str) -> bytes:
+    """Create deterministic harmless gallery variety from a repository-owned master."""
+    if not variant.startswith("gallery-showcase-"):
+        return body
+    position = int(variant.rsplit("-", 1)[-1])
+    with Image.open(io.BytesIO(body)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+        if position % 2 == 0:
+            image = ImageOps.mirror(image)
+        if position == 2:
+            image = ImageEnhance.Color(image).enhance(0.68)
+        elif position == 3:
+            image = ImageEnhance.Contrast(image).enhance(1.16)
+        elif position == 4:
+            image = ImageEnhance.Brightness(image).enhance(0.82)
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=92, optimize=True)
+        return output.getvalue()
 
 
 async def _asset_by_filename(
@@ -61,10 +83,12 @@ async def ensure_image_asset(
     asset_root: Path = ASSET_ROOT,
     *,
     variant: str = "studio",
+    audience: MediaAudience = MediaAudience.safe_public,
+    classification_actor: User,
 ) -> MediaAsset:
     filename = f"demo-{slug}-{variant}.jpg"
     asset = await _asset_by_filename(db, creator, filename)
-    body = (asset_root / f"{slug}.jpg").read_bytes()
+    body = _variant_image_body((asset_root / f"{slug}.jpg").read_bytes(), variant)
     if not asset:
         asset, _ = await media_service.begin_upload(db, user, filename, "image/jpeg", provider)
     if asset.status is MediaStatus.pending_upload:
@@ -77,6 +101,7 @@ async def ensure_image_asset(
     if asset.status is not MediaStatus.ready:
         raise RuntimeError(f"Demo image did not become ready: {slug}")
     asset.moderation_status = ModerationStatus.approved
+    await media_service.classify_audience(db, classification_actor, asset.id, audience)
     return asset
 
 
@@ -128,12 +153,15 @@ async def ensure_video_asset(
     asset_root: Path = ASSET_ROOT,
     *,
     variant: str = "after-hours",
+    audience: MediaAudience = MediaAudience.safe_public,
+    classification_actor: User,
 ) -> MediaAsset:
-    """Install an owned, pre-rendered three-second MP4 and its private derivatives."""
+    """Install an owned master and a genuinely shorter acquisition trailer."""
 
     filename = f"demo-{slug}-{variant}.mp4"
     asset = await _asset_by_filename(db, creator, filename)
     video_body = (asset_root / f"{slug}.mp4").read_bytes()
+    preview_body = (asset_root / f"{slug}-preview.mp4").read_bytes()
     poster_body = (asset_root / f"{slug}.jpg").read_bytes()
     with Image.open(io.BytesIO(poster_body)) as image:
         poster_width, poster_height = image.size
@@ -157,6 +185,7 @@ async def ensure_video_asset(
     asset.height = VIDEO_HEIGHT
     asset.duration_seconds = VIDEO_DURATION_SECONDS
     asset.checksum_sha256 = media_service.checksum(video_body)
+    await media_service.classify_audience(db, classification_actor, asset.id, audience)
     await _ready_derivative(
         db,
         asset,
@@ -167,18 +196,28 @@ async def ensure_video_asset(
         width=poster_width,
         height=poster_height,
     )
-    for derivative_type in (DerivativeType.playback, DerivativeType.preview_clip):
-        await _ready_derivative(
-            db,
-            asset,
-            provider,
-            derivative_type,
-            video_body,
-            "video/mp4",
-            width=VIDEO_WIDTH,
-            height=VIDEO_HEIGHT,
-            duration_seconds=VIDEO_DURATION_SECONDS,
-        )
+    await _ready_derivative(
+        db,
+        asset,
+        provider,
+        DerivativeType.playback,
+        video_body,
+        "video/mp4",
+        width=VIDEO_WIDTH,
+        height=VIDEO_HEIGHT,
+        duration_seconds=VIDEO_DURATION_SECONDS,
+    )
+    await _ready_derivative(
+        db,
+        asset,
+        provider,
+        DerivativeType.preview_clip,
+        preview_body,
+        "video/mp4",
+        width=VIDEO_WIDTH,
+        height=VIDEO_HEIGHT,
+        duration_seconds=VIDEO_PREVIEW_DURATION_SECONDS,
+    )
     await db.flush()
     return asset
 

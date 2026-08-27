@@ -58,6 +58,7 @@ async function register(page: Page, email: string, password: string) {
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
@@ -109,6 +110,7 @@ test("active Stories render from safe derivatives and expired Stories stay absen
 
   await login(page, email, password);
   await page.goto("/creator-onboarding");
+  await page.getByRole("checkbox", { name: "Make my approved creator profile public" }).check();
   await page.getByRole("button", { name: "Save profile" }).click();
   await expect.poll(async () => (await api(page, "/creators/me")).body, {
     timeout: 15_000,
@@ -192,6 +194,16 @@ test("active Stories render from safe derivatives and expired Stories stay absen
 
   const viewerContext = await browser.newContext();
   const viewer = await viewerContext.newPage();
+  const adultAccessResponse = await viewer.request.post(
+    `${apiBase}/api/v1/auth/adult-access`,
+    { data: { adult_confirmed: true } },
+  );
+  expect(adultAccessResponse.status()).toBe(200);
+  expect(await adultAccessResponse.json()).toMatchObject({
+    allowed: true,
+    assurance: "self_attested",
+    source: "cookie",
+  });
   const railResponse = await viewer.request.get(
     `${apiBase}/api/v1/stories/rail?creator_username=${encodeURIComponent(username)}`,
   );

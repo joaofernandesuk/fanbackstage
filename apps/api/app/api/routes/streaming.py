@@ -7,8 +7,10 @@ from sqlalchemy import select
 from app.api.deps import CurrentIdentity, Db
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_streaming_rate_limit
+from app.creators.service import current_adult_verification_predicate
 from app.finance.service import currency_code
 from app.integrations.streaming import LiveKitStreamingProvider
+from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.streaming import (
     LiveAccessMode,
     LiveChatMessage,
@@ -128,7 +130,13 @@ async def discovery(db: Db) -> list[LiveRoomResponse]:
         for room in (
             await db.scalars(
                 select(LiveRoom)
-                .where(LiveRoom.status == "live")
+                .join(CreatorProfile, CreatorProfile.id == LiveRoom.creator_id)
+                .where(
+                    LiveRoom.status == "live",
+                    CreatorProfile.status == CreatorStatus.approved,
+                    CreatorProfile.is_public.is_(True),
+                    current_adult_verification_predicate(CreatorProfile.id),
+                )
                 .order_by(LiveRoom.started_at.desc())
             )
         ).all()

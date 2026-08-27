@@ -11,6 +11,7 @@ from app.models.creator import CreatorProfile, CreatorVerification
 from app.models.discovery import DiscoveryConfig, DiscoveryEvent, DiscoveryHide
 from app.models.featuring import (
     FeatureBooking,
+    FeatureBookingPaymentAttempt,
     FeaturePrice,
     FeatureRefund,
     FeatureSlot,
@@ -22,8 +23,10 @@ from app.models.finance import (
     LedgerEntry,
     LedgerTransaction,
     PaymentAttempt,
+    PaymentRefundRequirement,
     PaymentWebhookEvent,
     Purchase,
+    PurchasePaymentAttempt,
 )
 from app.models.groups import (
     Group,
@@ -137,6 +140,7 @@ __all__ = [
     "DiscoveryHide",
     "EmailSuppression",
     "FeatureBooking",
+    "FeatureBookingPaymentAttempt",
     "FeaturePrice",
     "FeatureRefund",
     "FeatureSlot",
@@ -186,6 +190,7 @@ __all__ = [
     "NotificationIntent",
     "NotificationPreference",
     "PaymentAttempt",
+    "PaymentRefundRequirement",
     "PaymentWebhookEvent",
     "PendingMessageSend",
     "PostComment",
@@ -197,6 +202,7 @@ __all__ = [
     "PrivateSessionSettlement",
     "ProviderLiveEvent",
     "Purchase",
+    "PurchasePaymentAttempt",
     "ReferralCommissionAllocation",
     "ReferralCommissionPolicy",
     "ReferralLink",

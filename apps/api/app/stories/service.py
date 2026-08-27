@@ -4,7 +4,12 @@ from uuid import UUID
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.adult_access import AdultAccessDecision, resolve_adult_access
 from app.audit.service import record_event
+from app.creators.service import (
+    current_adult_verification_predicate,
+    require_current_adult_verification,
+)
 from app.media.service import approved_creator
 from app.models.content import (
     AccessPolicy,
@@ -14,6 +19,7 @@ from app.models.content import (
     Gallery,
     GalleryItem,
     MediaAsset,
+    MediaAudience,
     MediaDerivative,
     MediaStatus,
     MediaType,
@@ -114,6 +120,10 @@ async def create_story(
     )
     if not creator:
         raise PermissionError("An approved creator profile is required")
+    try:
+        await require_current_adult_verification(db, creator.id)
+    except ValueError as exc:
+        raise PermissionError("A current verified adult creator profile is required") from exc
     normalized_key = idempotency_key.strip()
     if not 8 <= len(normalized_key) <= 128:
         raise ValueError("A valid Idempotency-Key is required")
@@ -262,7 +272,12 @@ async def expire_due_stories(db: AsyncSession, *, now: datetime | None = None) -
     return len(stories)
 
 
-def _active_public_query(user: User | None, current_time: datetime):
+def _active_public_query(
+    user: User | None,
+    current_time: datetime,
+    access_decision: AdultAccessDecision | None = None,
+):
+    decision = access_decision or resolve_adult_access(user, None, now=current_time)
     ready_derivative = exists(
         select(MediaDerivative.id).where(
             MediaDerivative.media_asset_id == Story.media_asset_id,
@@ -336,12 +351,14 @@ def _active_public_query(user: User | None, current_time: datetime):
             CreatorProfile.status == CreatorStatus.approved,
             CreatorProfile.is_public.is_(True),
             CreatorProfile.username.is_not(None),
+            current_adult_verification_predicate(Story.creator_id),
             MediaAsset.owner_creator_id == Story.creator_id,
             MediaAsset.status == MediaStatus.ready,
             MediaAsset.deleted_at.is_(None),
             MediaAsset.moderation_status.notin_(UNSAFE_MODERATION_STATUSES),
             ready_derivative,
             ~external_asset_reference(Story.media_asset_id),
+            True if decision.allowed else MediaAsset.audience == MediaAudience.safe_public,
             ~blocked if user else True,
             access,
         )
@@ -371,11 +388,12 @@ async def public_rail(
     cursor: str | None,
     limit: int,
     creator_username: str | None = None,
+    access_decision: AdultAccessDecision | None = None,
     *,
     now: datetime | None = None,
 ) -> tuple[list[Story], str | None]:
     current_time = now or datetime.now(UTC)
-    query = _active_public_query(user, current_time)
+    query = _active_public_query(user, current_time, access_decision)
     if creator_username:
         query = query.where(CreatorProfile.username == creator_username.strip().lower())
     parsed = parse_cursor(cursor)
@@ -397,10 +415,17 @@ async def public_rail(
 
 
 async def public_story(
-    db: AsyncSession, story_id: UUID, user: User | None, *, now: datetime | None = None
+    db: AsyncSession,
+    story_id: UUID,
+    user: User | None,
+    *,
+    now: datetime | None = None,
+    access_decision: AdultAccessDecision | None = None,
 ) -> Story | None:
     current_time = now or datetime.now(UTC)
-    return await db.scalar(_active_public_query(user, current_time).where(Story.id == story_id))
+    return await db.scalar(
+        _active_public_query(user, current_time, access_decision).where(Story.id == story_id)
+    )
 
 
 async def own_stories(

@@ -12,6 +12,24 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 
 
+class _TrustedSelfAttestedAccounts:
+    """Test factory adapter for scenarios whose users accepted the 18+ baseline."""
+
+    async def register(self, db, email, password, correlation_id, **kwargs):
+        from app.accounts import service
+
+        kwargs.setdefault("adult_confirmed", True)
+        return await service.register(db, email, password, correlation_id, **kwargs)
+
+    def __getattr__(self, name):
+        from app.accounts import service
+
+        return getattr(service, name)
+
+
+trusted_self_attested_accounts = _TrustedSelfAttestedAccounts()
+
+
 @pytest.fixture(autouse=True)
 async def clean_database() -> None:
     async with SessionLocal() as session:

@@ -25,6 +25,9 @@ const environment = {
   // isolated worker. Keep production throttling intact while avoiding a
   // shared test-worker counter masking the financial assertions.
   FANBACKSTAGE_AUTH_RATE_LIMIT_ATTEMPTS: "1000",
+  // The development KYC mutation is denied by default, including in tests.
+  // Real-stack creator journeys opt in explicitly on this isolated API only.
+  FANBACKSTAGE_DEVELOPMENT_KYC_HTTP_ENABLED: "true",
   FANBACKSTAGE_SMTP_PORT: mailpitSmtpPort,
   E2E_MAILPIT_URL: process.env.E2E_MAILPIT_URL ?? `http://127.0.0.1:${mailpitUiPort}`,
   FANBACKSTAGE_STORAGE_ENDPOINT_URL: storageEndpoint,

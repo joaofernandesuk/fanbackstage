@@ -34,6 +34,11 @@ class MediaStatus(str, enum.Enum):
     archived = "archived"
 
 
+class MediaAudience(str, enum.Enum):
+    safe_public = "safe_public"
+    adult_restricted = "adult_restricted"
+
+
 class DerivativeType(str, enum.Enum):
     thumbnail = "thumbnail"
     display = "display"
@@ -93,6 +98,12 @@ class MediaAsset(UUIDPrimaryKey, Timestamped, Base):
     moderation_status: Mapped[ModerationStatus] = mapped_column(
         Enum(ModerationStatus, name="moderation_status"),
         default=ModerationStatus.not_reviewed,
+        index=True,
+    )
+    audience: Mapped[MediaAudience] = mapped_column(
+        Enum(MediaAudience, name="media_audience"),
+        default=MediaAudience.adult_restricted,
+        nullable=False,
         index=True,
     )
     storage_key: Mapped[str] = mapped_column(String(512), unique=True)

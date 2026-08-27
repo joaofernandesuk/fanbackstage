@@ -1,0 +1,64 @@
+.detailShell { display: grid; gap: 22px; margin: 0 auto; max-width: 1120px; }
+.detailHeader { align-items: center; display: flex; gap: 18px; justify-content: space-between; }
+.creatorLink { align-items: center; color: var(--text-primary); display: flex; gap: 12px; text-decoration: none; }
+.creatorLink > span { display: grid; }
+.creatorLink small, .creatorLink em { color: var(--text-muted); font-size: .66rem; font-style: normal; }
+.creatorLink strong { font-size: .9rem; }
+.headerBadges { align-items: center; display: flex; gap: 9px; }
+.headerBadges > span { border: 1px solid var(--border-subtle); border-radius: 999px; color: var(--text-secondary); font-size: .7rem; padding: 7px 10px; }
+.galleryViewer { display: grid; gap: 12px; }
+.galleryStage { aspect-ratio: 16 / 10; background: #070a14; border: 1px solid var(--border-subtle); border-radius: 24px; box-shadow: var(--shadow-card); overflow: hidden; position: relative; }
+.stageImageButton { background: transparent; border: 0; box-shadow: none; height: 100%; padding: 0; width: 100%; }
+.stageImageButton:disabled { cursor: default; opacity: 1; }
+.stageImageButton img, .videoFrame video, .videoFrame > img { height: 100%; object-fit: contain; width: 100%; }
+.lockedStage .stageImageButton img { filter: saturate(.82); }
+.galleryArrow { align-items: center; backdrop-filter: blur(12px); background: rgb(7 10 20 / .72); border: 1px solid rgb(255 255 255 / .28); border-radius: 50%; color: white; display: flex; font-size: 1.8rem; height: 46px; justify-content: center; padding: 0; position: absolute; top: 50%; transform: translateY(-50%); width: 46px; z-index: 3; }
+.previous { left: 14px; }.next { right: 14px; }
+.imageCounter { background: rgb(7 10 20 / .76); border-radius: 999px; bottom: 14px; color: white; font-size: .72rem; padding: 7px 10px; position: absolute; right: 14px; }
+.thumbnails { display: flex; gap: 9px; overflow-x: auto; padding: 2px; }
+.thumbnails button { aspect-ratio: 1; background: #070a14; border: 2px solid transparent; border-radius: 12px; flex: 0 0 74px; overflow: hidden; padding: 0; }
+.thumbnails button[aria-pressed="true"] { border-color: var(--brand-cyan); }
+.thumbnails img { height: 100%; object-fit: cover; width: 100%; }
+.lockedRemainder { align-items: center; background: rgb(15 20 39 / .88); border: 1px solid var(--border-subtle); border-radius: 16px; display: flex; flex-wrap: wrap; gap: 8px; padding: 14px; }
+.lockedRemainder > span { align-items: center; aspect-ratio: 1; background: rgb(255 255 255 / .05); border-radius: 10px; display: flex; justify-content: center; width: 42px; }
+.lockedRemainder strong { color: var(--text-secondary); font-size: .78rem; margin-left: 5px; }
+.videoFrame { aspect-ratio: 16 / 9; background: #05070d; border: 1px solid var(--border-subtle); border-radius: 24px; box-shadow: var(--shadow-card); overflow: hidden; position: relative; }
+.videoLabel { background: rgb(7 10 20 / .82); border: 1px solid rgb(255 255 255 / .18); border-radius: 999px; color: white; font-size: .61rem; font-weight: 850; left: 14px; letter-spacing: .08em; padding: 7px 10px; position: absolute; top: 14px; }
+.mediaFallback { align-items: center; color: var(--text-muted); display: flex; height: 100%; justify-content: center; min-height: 280px; }
+.detailBody { align-items: start; display: grid; gap: 28px; grid-template-columns: minmax(0, 1fr) minmax(280px, 370px); }
+.detailBody h1 { font-size: clamp(2rem, 4vw, 3.5rem); margin: 5px 0 0; }
+.eyebrow { color: var(--brand-cyan); font-size: .67rem; font-weight: 850; letter-spacing: .13em; margin: 0; }
+.description { font-size: .98rem; line-height: 1.7; max-width: 700px; }
+.published { color: var(--text-muted); font-size: .72rem; }
+.accessPanel { background: linear-gradient(145deg, rgb(19 24 46 / .96), rgb(9 13 28 / .98)); border: 1px solid var(--border-subtle); border-radius: 20px; display: grid; gap: 11px; padding: 20px; }
+.accessPanel > strong { font-size: 1.45rem; }.accessPanel p { font-size: .79rem; margin: 0; }
+.primaryButton, .secondaryButton, .primaryLink, .secondaryLink { align-items: center; border-radius: 999px; display: inline-flex; font-size: .76rem; font-weight: 850; justify-content: center; min-height: 42px; padding: 10px 16px; text-decoration: none; }
+.primaryButton, .primaryLink { background: var(--brand-gradient); border: 0; color: var(--brand-midnight); }.secondaryButton, .secondaryLink { background: transparent; border: 1px solid var(--border-strong); color: var(--text-primary); }
+.purchaseDialog, .lightbox { background: transparent; border: 0; color: var(--text-primary); max-height: 100dvh; max-width: 100vw; padding: 18px; }
+.purchaseDialog::backdrop, .lightbox::backdrop { backdrop-filter: blur(15px); background: rgb(2 4 12 / .82); }
+.purchasePanel { background: linear-gradient(145deg, #171d38, #090d1c); border: 1px solid var(--border-strong); border-radius: 24px; box-shadow: var(--shadow-popover); max-width: 500px; padding: 28px; position: relative; width: min(500px, calc(100vw - 36px)); }
+.purchasePanel h2 { font-size: 1.8rem; margin: 8px 35px 6px 0; }.purchasePanel > p { color: var(--text-secondary); }
+.closeButton, .lightboxClose { align-items: center; background: rgb(255 255 255 / .07); border: 1px solid var(--border-subtle); border-radius: 50%; color: white; display: flex; font-size: 1.3rem; height: 38px; justify-content: center; padding: 0; position: absolute; right: 18px; top: 18px; width: 38px; z-index: 5; }
+.purchaseTotal { align-items: center; border-bottom: 1px solid var(--border-subtle); border-top: 1px solid var(--border-subtle); display: flex; justify-content: space-between; margin: 20px 0; padding: 16px 0; }.purchaseTotal strong { font-size: 1.55rem; }
+.providerNote { font-size: .74rem; line-height: 1.55; }.dialogActions { display: flex; gap: 10px; justify-content: end; margin-top: 22px; }.error { color: #ffa2b2 !important; font-size: .76rem; }
+.success { color: var(--brand-cyan); font-weight: 750; }
+.lightbox { height: 100dvh; margin: 0; width: 100vw; }.lightbox img { height: 100%; object-fit: contain; width: 100%; }.lightboxClose { position: fixed; }
+.relatedSection { border-top: 1px solid var(--border-subtle); display: grid; gap: 16px; padding-top: 24px; }
+.relatedHeader { align-items: end; display: flex; gap: 18px; justify-content: space-between; }
+.relatedHeader h2 { margin: 5px 0 0; }
+.relatedHeader > a { color: #86dcff; font-size: .74rem; font-weight: 800; text-decoration: none; }
+.relatedGrid { display: grid; gap: 14px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.relatedCard { background: rgb(15 20 39 / .9); border: 1px solid var(--border-subtle); border-radius: 16px; color: var(--text-primary); overflow: hidden; text-decoration: none; }
+.relatedCard:focus-visible { outline: 3px solid var(--brand-cyan); outline-offset: 2px; }
+.relatedMedia { aspect-ratio: 16 / 10; background: #070a14; display: block; overflow: hidden; position: relative; }
+.relatedMedia > img { height: 100%; object-fit: cover; width: 100%; }
+.relatedMedia > span:not(.relatedFallback) { left: 9px; position: absolute; top: 9px; }
+.relatedFallback { align-items: center; color: var(--text-muted); display: flex; font-size: .7rem; height: 100%; justify-content: center; }
+.relatedBody { display: grid; gap: 4px; padding: 12px; }
+.relatedBody strong { font-size: .82rem; }
+.relatedBody small { color: var(--text-muted); font-size: .66rem; }
+.loading { display: grid; gap: 20px; margin: 30px auto; max-width: 1100px; }
+@media (max-width: 900px) { .relatedGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .detailHeader { align-items: flex-start; flex-direction: column; }.detailBody { grid-template-columns: 1fr; }.galleryStage { aspect-ratio: 4 / 5; border-radius: 16px; }.videoFrame { border-radius: 16px; }.galleryArrow { height: 40px; width: 40px; }.purchasePanel { padding: 23px; }.dialogActions { flex-direction: column-reverse; }.dialogActions button { width: 100%; }.relatedHeader { align-items: flex-start; flex-direction: column; }.relatedGrid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 430px) { .relatedGrid { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .galleryStage, .videoFrame { scroll-behavior: auto; } }

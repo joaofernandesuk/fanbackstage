@@ -18,6 +18,7 @@ async function register(page: import("@playwright/test").Page, email: string, pa
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
@@ -60,6 +61,7 @@ test("Phase 5 social access, engagement, and report moderation use the real stac
   const profileSaved = page.waitForResponse((response) =>
     response.url().endsWith("/api/v1/creators/me") && response.request().method() === "PATCH",
   );
+  await page.getByRole("checkbox", { name: "Make my approved creator profile public" }).check();
   await page.getByRole("button", { name: "Save profile" }).click();
   expect((await profileSaved).status()).toBe(200);
   await expect.poll(async () => (await api(page, "/creators/me")).body, { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });

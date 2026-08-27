@@ -22,12 +22,13 @@ from app.models.content import (
     Gallery,
     GalleryItem,
     MediaAsset,
+    MediaAudience,
     MediaDerivative,
     MediaStatus,
     MediaType,
     ModerationStatus,
 )
-from app.models.creator import CreatorStatus, CreatorVerification
+from app.models.creator import CreatorStatus, CreatorVerification, VerificationStatus
 from app.models.messaging import UserBlock
 from app.models.social import Follow
 from app.models.story import StoryStatus
@@ -61,6 +62,7 @@ async def ready_asset(
     *,
     moderation_status: ModerationStatus = ModerationStatus.not_reviewed,
     with_derivative: bool = True,
+    audience: MediaAudience = MediaAudience.safe_public,
 ):
     mime_type = "image/png" if media_type is MediaType.image else "video/mp4"
     asset = MediaAsset(
@@ -68,6 +70,7 @@ async def ready_asset(
         media_type=media_type,
         status=MediaStatus.ready,
         moderation_status=moderation_status,
+        audience=audience,
         storage_key=f"original/private-{name}",
         original_filename=f"{name}.{'png' if media_type is MediaType.image else 'mp4'}",
         mime_type=mime_type,
@@ -362,6 +365,19 @@ async def test_public_rail_resolves_access_and_excludes_due_or_unsafe_rows(db_se
     asset.moderation_status = ModerationStatus.rejected
     assert (await stories.public_rail(db_session, viewer, None, 50, now=current_time))[0] == []
     assert overdue.status is StoryStatus.active
+    asset.moderation_status = ModerationStatus.approved
+    db_session.add(
+        CreatorVerification(
+            creator_profile_id=profile.id,
+            provider="test-expiry",
+            provider_reference="test-story-current-verification-expired",
+            status=VerificationStatus.expired,
+            adult_verified=False,
+            created_at=now + timedelta(days=10),
+        )
+    )
+    await db_session.flush()
+    assert (await stories.public_rail(db_session, viewer, None, 50, now=current_time))[0] == []
 
 
 @pytest.mark.asyncio
@@ -446,6 +462,9 @@ async def test_story_report_and_moderation_removal_are_authoritative(db_session)
         None,
         AccessPolicy.free,
     )
+    verified_at = accounts._now()
+    for user in (owner, reporter, moderator):
+        user.email_verified_at = verified_at
     await db_session.commit()
 
     async with (
@@ -567,6 +586,7 @@ async def test_story_api_projects_only_safe_paths_and_soft_deleted_detail_disapp
         AccessPolicy.free,
         now=datetime.now(UTC) - timedelta(days=2),
     )
+    owner.email_verified_at = accounts._now()
     await db_session.commit()
 
     class FakeStorage:

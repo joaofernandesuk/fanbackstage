@@ -2,15 +2,21 @@ import asyncio
 import io
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 
 from app.accounts import service as accounts
+from app.api.routes.content import response as content_response
 from app.content import service as content_service
 from app.creators import service as creators
-from app.media.processing import process_media_asset, render_video_preview
+from app.media.processing import (
+    RetryableMediaProcessingError,
+    process_media_asset,
+    render_video_preview,
+)
 from app.media.service import requeue_failed_upload
 from app.models.content import (
     AccessPolicy,
@@ -35,6 +41,18 @@ class MemoryStorage:
 
     def put(self, key: str, body: bytes, content_type: str) -> None:
         self.objects[key] = (body, content_type)
+
+
+class TransientStorage(MemoryStorage):
+    def __init__(self, objects: dict[str, tuple[bytes, str]], failures: int = 1) -> None:
+        super().__init__(objects)
+        self.failures = failures
+
+    def get(self, key: str) -> bytes:
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("temporary object storage failure")
+        return super().get(key)
 
 
 async def approved_creator(db, email: str):
@@ -153,6 +171,7 @@ async def test_creator_selected_video_preview_is_rendered_before_review(db_sessi
         preview_start_seconds=1,
         preview_duration_seconds=2,
     )
+    assert content_response(video, preview_duration_seconds=2).preview_duration_seconds == 2
     preview = await db_session.scalar(
         select(MediaDerivative).where(
             MediaDerivative.media_asset_id == asset.id,
@@ -161,11 +180,131 @@ async def test_creator_selected_video_preview_is_rendered_before_review(db_sessi
     )
     assert preview
     assert preview.status is MediaStatus.queued
-    await render_video_preview(db_session, video.id, storage)
+    transient_storage = TransientStorage(storage.objects)
+    with pytest.raises(RetryableMediaProcessingError):
+        await render_video_preview(
+            db_session,
+            video.id,
+            transient_storage,
+            retry_transient_failure=True,
+        )
+    assert preview.status is MediaStatus.queued
+    assert await render_video_preview(db_session, video.id, transient_storage) is True
     assert preview.status is MediaStatus.ready
     assert preview.duration_seconds == 2
+    exhausted_storage = TransientStorage(storage.objects)
+    with pytest.raises(ConnectionError):
+        await render_video_preview(db_session, video.id, exhausted_storage)
+    assert preview.status is MediaStatus.failed
+    assert await render_video_preview(db_session, video.id, storage) is True
+    assert preview.status is MediaStatus.ready
     await content_service.submit_for_review(db_session, creator, video.id)
     assert video.status is ContentStatus.pending_review
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_video_preview_job_cannot_replace_current_selection(
+    db_session, tmp_path: Path
+):
+    creator, profile = await approved_creator(db_session, "video-preview-race@example.com")
+    source = tmp_path / "race-source.mp4"
+    await asyncio.to_thread(
+        subprocess.run,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=green:s=32x24:d=3",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.video,
+        status=MediaStatus.queued,
+        storage_key="original/preview-race",
+        original_filename="race-source.mp4",
+        mime_type="video/mp4",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    storage = MemoryStorage({asset.storage_key: (source.read_bytes(), "video/mp4")})
+    await process_media_asset(db_session, asset.id, storage)
+    content = await content_service.create_video(
+        db_session,
+        creator,
+        "Preview race",
+        None,
+        asset.id,
+        AccessPolicy.free,
+        preview_start_seconds=1,
+        preview_duration_seconds=2,
+    )
+    assert content.video
+    preview = await db_session.scalar(
+        select(MediaDerivative).where(
+            MediaDerivative.media_asset_id == asset.id,
+            MediaDerivative.derivative_type == DerivativeType.preview_clip,
+        )
+    )
+    assert preview
+    original_key = preview.storage_key
+
+    class ReconfiguringStorage(MemoryStorage):
+        def get(self, key: str) -> bytes:
+            content.video.preview_start_seconds = 0
+            content.video.preview_duration_seconds = 1
+            preview.status = MediaStatus.queued
+            return super().get(key)
+
+    stale_storage = ReconfiguringStorage(storage.objects)
+    applied = await render_video_preview(
+        db_session,
+        content.id,
+        stale_storage,
+        expected_start_seconds=1,
+        expected_duration_seconds=2,
+    )
+    assert applied is False
+    assert preview.status is MediaStatus.queued
+    assert preview.storage_key == original_key
+
+    assert (
+        await render_video_preview(
+            db_session,
+            content.id,
+            storage,
+            expected_start_seconds=0,
+            expected_duration_seconds=1,
+        )
+        is True
+    )
+    current_key = preview.storage_key
+    current_object = storage.objects[current_key]
+    assert current_key != original_key
+    assert preview.status is MediaStatus.ready
+    assert preview.duration_seconds == 1
+
+    assert (
+        await render_video_preview(
+            db_session,
+            content.id,
+            storage,
+            expected_start_seconds=1,
+            expected_duration_seconds=2,
+        )
+        is False
+    )
+    assert preview.storage_key == current_key
+    assert storage.objects[current_key] == current_object
 
 
 def test_worker_reuses_one_event_loop_for_sequential_async_jobs():
@@ -176,3 +315,35 @@ def test_worker_reuses_one_event_loop_for_sequential_async_jobs():
     second = worker_tasks.run_async(loop_id())
 
     assert first == second
+
+
+@pytest.mark.parametrize(
+    "task,task_id",
+    [
+        (worker_tasks.process_media_asset, str(uuid4())),
+        (worker_tasks.render_video_preview, str(uuid4())),
+    ],
+)
+def test_media_worker_tasks_request_bounded_retry_for_transient_failures(
+    monkeypatch, task, task_id
+):
+    retry_calls: list[dict[str, object]] = []
+
+    class RetryRequested(Exception):
+        pass
+
+    def fail_transient(coroutine):
+        coroutine.close()
+        raise RetryableMediaProcessingError("temporary storage failure")
+
+    def request_retry(**kwargs):
+        retry_calls.append(kwargs)
+        raise RetryRequested
+
+    monkeypatch.setattr(worker_tasks, "run_async", fail_transient)
+    monkeypatch.setattr(task, "retry", request_retry)
+
+    with pytest.raises(RetryRequested):
+        task.run(task_id)
+    assert retry_calls[0]["max_retries"] == 2
+    assert retry_calls[0]["countdown"] == 1

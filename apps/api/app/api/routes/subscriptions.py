@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.audit.service import record_event
+from app.creators.service import require_public_creator_access
 from app.finance import service as finance
 from app.media.service import approved_creator
 from app.models.creator import CreatorProfile
@@ -109,9 +110,15 @@ async def create_promotion(payload: PromotionInput, identity: CurrentIdentity, d
 async def public_options(
     username: str, db: Db, identity: OptionalIdentity
 ) -> list[PublicPlanResponse]:
-    creator = await db.scalar(select(CreatorProfile).where(CreatorProfile.username == username))
+    creator = await db.scalar(
+        select(CreatorProfile).where(CreatorProfile.username == username.lower())
+    )
     if not creator:
         raise HTTPException(404, "Creator not found")
+    try:
+        await require_public_creator_access(db, creator.id, identity[0].id if identity else None)
+    except ValueError as exc:
+        raise HTTPException(404, "Creator not found") from exc
     plan = await service.plan_for_creator(db, creator.id)
     if not plan or not plan.enabled:
         return []

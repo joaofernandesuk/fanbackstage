@@ -1,26 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { MouseEvent, useRef, useState } from "react";
+import { useRef } from "react";
 
-import { AuthMode } from "../lib/auth-ui";
-import { AuthDialog } from "./auth-dialog";
+import {
+  authEntryPath,
+  AuthMode,
+  DEFAULT_REGISTRATION_DESTINATION,
+} from "../lib/auth-ui";
+import { useAuthExperience } from "./auth-experience";
 import { isNavigationItemActive, publicNavigation } from "./navigation-model";
 import { MenuIcon } from "./shell-icons";
 import styles from "./app-header.module.css";
 
 export function PublicNav({ pathname }: { pathname: string }) {
   const mobileMenu = useRef<HTMLDetailsElement>(null);
-  const [authMode, setAuthMode] = useState<AuthMode | null>(null);
-  const [authNext, setAuthNext] = useState(pathname);
+  const { openAuth } = useAuthExperience();
   const closeMobileMenu = () => mobileMenu.current?.removeAttribute("open");
 
-  function openAuth(event: MouseEvent<HTMLAnchorElement>, mode: AuthMode) {
-    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  function showAuth(event: { preventDefault: () => void }, mode: AuthMode) {
     event.preventDefault();
     closeMobileMenu();
-    setAuthNext(`${window.location.pathname}${window.location.search}`);
-    setAuthMode(mode);
+    openAuth(mode, mode === "register" ? DEFAULT_REGISTRATION_DESTINATION : undefined);
   }
 
   return (
@@ -39,14 +40,14 @@ export function PublicNav({ pathname }: { pathname: string }) {
           ))}
         </nav>
         <div className={styles.publicActions}>
-          <Link aria-haspopup="dialog" className={styles.loginLink} href="/login" onClick={(event) => openAuth(event, "login")}>Log in</Link>
-          <Link aria-haspopup="dialog" className={styles.joinButton} href="/register" onClick={(event) => openAuth(event, "register")}>Join</Link>
+          <Link aria-haspopup="dialog" className={styles.loginLink} href={authEntryPath("login", pathname)} onNavigate={(event) => showAuth(event, "login")}>Log in</Link>
+          <Link aria-haspopup="dialog" className={styles.joinButton} href={authEntryPath("register")} onNavigate={(event) => showAuth(event, "register")}>Join</Link>
         </div>
       </div>
 
       <div className={styles.publicMobileShell}>
-        <Link aria-haspopup="dialog" className={styles.mobileLoginLink} href="/login" onClick={(event) => openAuth(event, "login")}>Log in</Link>
-        <Link aria-haspopup="dialog" className={styles.mobileJoinButton} href="/register" onClick={(event) => openAuth(event, "register")}>Join</Link>
+        <Link aria-haspopup="dialog" className={styles.mobileLoginLink} href={authEntryPath("login", pathname)} onNavigate={(event) => showAuth(event, "login")}>Log in</Link>
+        <Link aria-haspopup="dialog" className={styles.mobileJoinButton} href={authEntryPath("register")} onNavigate={(event) => showAuth(event, "register")}>Join</Link>
         <details className={styles.mobilePublicMenu} ref={mobileMenu}>
           <summary aria-label="Open navigation menu" className={styles.iconControl}>
             <MenuIcon className={styles.actionIcon} />
@@ -66,14 +67,6 @@ export function PublicNav({ pathname }: { pathname: string }) {
           </nav>
         </details>
       </div>
-      {authMode && (
-        <AuthDialog
-          mode={authMode}
-          nextPath={authNext}
-          onClose={() => setAuthMode(null)}
-          onModeChange={setAuthMode}
-        />
-      )}
     </>
   );
 }

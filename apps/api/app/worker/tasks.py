@@ -71,38 +71,75 @@ def ffmpeg_version() -> dict[str, str]:
     return {"version": completed.stdout.splitlines()[0]}
 
 
-@celery_app.task(bind=True, autoretry_for=(ConnectionError,), retry_backoff=True, max_retries=3)
+@celery_app.task(bind=True)
 def process_media_asset(self, asset_id: str) -> dict[str, str]:
     """Idempotently create private derivatives for a finalized media upload."""
     from app.db.session import SessionLocal
-    from app.media.processing import process_media_asset as process
+    from app.media import processing
 
     async def run() -> str:
         async with SessionLocal() as session:
             try:
-                asset = await process(session, UUID(asset_id))
+                asset = await processing.process_media_asset(session, UUID(asset_id))
                 await session.commit()
                 return asset.status.value
             except Exception:
                 await session.commit()
                 raise
 
-    return {"asset_id": asset_id, "status": run_async(run())}
+    try:
+        status = run_async(run())
+    except processing.RetryableMediaProcessingError as exc:
+        settings = get_settings()
+        raise self.retry(
+            exc=exc,
+            countdown=min(60, 2**self.request.retries),
+            max_retries=max(0, settings.media_processing_max_attempts - 1),
+        ) from exc
+    return {"asset_id": asset_id, "status": status}
 
 
-@celery_app.task(bind=True, autoretry_for=(ConnectionError,), retry_backoff=True, max_retries=3)
-def render_video_preview(self, content_id: str) -> dict[str, str]:
+@celery_app.task(bind=True)
+def render_video_preview(
+    self,
+    content_id: str,
+    expected_start_seconds: int | None = None,
+    expected_duration_seconds: int | None = None,
+) -> dict[str, str]:
     """Render a creator-selected video preview without exposing the source asset."""
     from app.db.session import SessionLocal
-    from app.media.processing import render_video_preview as render
+    from app.media import processing
 
-    async def run() -> None:
+    settings = get_settings()
+    retry_transient_failure = self.request.retries + 1 < settings.media_processing_max_attempts
+
+    async def run() -> bool:
         async with SessionLocal() as session:
-            await render(session, UUID(content_id))
-            await session.commit()
+            try:
+                applied = await processing.render_video_preview(
+                    session,
+                    UUID(content_id),
+                    expected_start_seconds=expected_start_seconds,
+                    expected_duration_seconds=expected_duration_seconds,
+                    retry_transient_failure=retry_transient_failure,
+                )
+                await session.commit()
+                return applied
+            except Exception:
+                # Persist queued transient retries or the terminal failed state
+                # without exposing or mutating the protected original asset.
+                await session.commit()
+                raise
 
-    run_async(run())
-    return {"content_id": content_id, "status": "ready"}
+    try:
+        applied = run_async(run())
+    except processing.RetryableMediaProcessingError as exc:
+        raise self.retry(
+            exc=exc,
+            countdown=min(60, 2**self.request.retries),
+            max_retries=max(0, settings.media_processing_max_attempts - 1),
+        ) from exc
+    return {"content_id": content_id, "status": "ready" if applied else "stale"}
 
 
 @celery_app.task

@@ -22,6 +22,12 @@ The fixed development-only ports are PostgreSQL `15432`, Redis `16390`, SMTP `11
 
 Every account uses `fanbackstage-demo-local-only`. Never reuse this password or these accounts outside the disposable local environment.
 
+All listed fictional accounts converge to the current baseline adult self-attestation on
+every seed run, including accounts created by an older schema version. This convergence is
+limited to the known demo manifest and never backfills arbitrary users. Demo media meant
+for anonymous browsing is explicitly moderator-classified `safe_public`; the fail-closed
+model default remains `adult_restricted`.
+
 | Persona | Email | What to test |
 | --- | --- | --- |
 | Admin | admin@demo.fanbackstage.local | administration, moderation, and Featuring configuration |
@@ -33,6 +39,8 @@ Every account uses `fanbackstage-demo-local-only`. Never reuse this password or 
 | PPV buyer | ppvbuyer@demo.fanbackstage.local | attributed referral and settled PPV purchase |
 | Marketplace buyer | marketbuyer@demo.fanbackstage.local | paid, shipped, and delivered demo order |
 | Social fan | socialfan@demo.fanbackstage.local | feed reactions, comments, and messages |
+| Marketing opted in | marketing-in@demo.fanbackstage.local | consented marketing email eligibility and referral ownership |
+| Marketing opted out | marketing-out@demo.fanbackstage.local | marketing suppression by preference while transactional email remains eligible |
 | Creator | luna-sparks@demo.fanbackstage.local | established profile, content, shop, and active Featuring placement |
 | Creator | skye-live@demo.fanbackstage.local | safely ended public-live history |
 | Restricted creator | reya-restricted@demo.fanbackstage.local | suspended, non-public Trust & Safety state |
@@ -47,13 +55,15 @@ The validator expects exactly:
 - 13 creator profiles: 12 approved/public and `reya-restricted` suspended/non-public;
 - two real groups/agencies with accepted, versioned financial contracts;
 - 48 published feed posts (four per public creator);
-- 24 published content items (one gallery and one video per public creator), including 12 videos;
+- 27 published content items: one baseline gallery and one video per public creator, plus three multi-image showcase galleries; the total includes 12 videos;
 - 18 published physical marketplace listings;
 - 24 active authoritative Stories across eight creators, plus at least four expired historical Stories.
 
 It also requires a dense follow/reaction/comment graph, at least three conversations with message history, settled subscriptions and PPV purchases, three marketplace orders in varied states, balanced ledger transactions, one signup referral attribution and reward allocation, transactional notifications, an active paid Featuring example, and safely ended live-room history. Financial entitlements, immutable ledger entries, group allocation snapshots, referral allocations, and Featuring settlement are produced through their owning domain services and signed development payment webhooks; the seed never inserts them directly.
 
-All 12 public creators have enabled EUR subscription prices for `month_1` and `month_3`. Prices vary deterministically by persona. Galleries rotate through free, follower, and subscription access. Videos rotate through free, subscription, and PPV access, giving the demo genuine entitlement states rather than visual-only locks.
+The `marketing-in` and `marketing-out` personas have real notification-domain marketing preference rows. `marketing-in` has explicit email consent and no suppression; `marketing-out` has marketing email disabled with no consent while in-app notifications remain enabled. The seed reaches both states through the audited notification preference service and skips an already-converged state, so a second seed pass neither moves the consent timestamp nor adds another audit event.
+
+All 12 public creators have enabled EUR subscription prices for `month_1`, `month_3`, `month_6`, and `month_12`. Prices vary deterministically by persona. Galleries rotate through free, follower, and subscription access; the showcase set adds ordered free, subscription, and €12.99 PPV four-image examples. Videos rotate through free, subscription, and PPV access, giving the demo genuine entitlement states rather than visual-only locks. Zara's PPV showcase and video provide harmless `adult_restricted` policy fixtures: their safe acquisition media remains separate from restricted derivatives and requires the real server acknowledgement flow.
 
 Creator visuals use stable public references:
 
@@ -62,7 +72,9 @@ Creator visuals use stable public references:
 /demo/creators/<slug>/cover.jpg
 ```
 
-Repository-owned JPEG masters live under `apps/api/app/seed/assets/`. Images use the normal private upload, server-side finalize, and media-processing path. The same masters were rendered into tiny three-second MP4 fixtures checked in beside them. The slim development API image has no ffmpeg binary, so the seed’s narrowly scoped development adapter uploads those MP4s through the normal private storage boundary and installs their pre-rendered poster/playback/preview derivative metadata. This adapter accepts only repository paths from the immutable creator manifest and is unreachable from product APIs.
+Repository-owned JPEG masters live under `apps/api/app/seed/assets/`. Images use the normal private upload, server-side finalize, and media-processing path. The same harmless masters are rendered into small eight-second MP4 playback fixtures and distinct two-second `*-preview.mp4` trailers checked in beside them. `apps/api/app/seed/render_demo_videos.sh` is the deterministic rebuild recipe. The slim development API image has no ffmpeg binary, so the seed’s narrowly scoped development adapter uploads those MP4s through the normal private storage boundary and installs their pre-rendered poster/playback/preview derivative metadata. The validator requires the trailer duration to be exactly two seconds and strictly shorter than both the eight-second playback derivative and source metadata. This adapter accepts only repository paths from the immutable creator manifest and is unreachable from product APIs.
+
+The local web client uses the existing development payment completion hooks only when `NODE_ENV` is not `production`, allowing manual PPV and subscription entitlement testing against signed development callbacks. Production builds never invoke those development settlement endpoints: they leave the attempt pending until the configured external provider confirms it. There is no wallet or credits domain in this demo or in the consumer UI.
 
 Inside Docker, API storage I/O stays on the private `minio:9000` network address. Presigned browser URLs use the separate `http://localhost:19010` signing endpoint, so Story media and creator uploads work from the local web origin without making the bucket public or leaking original object keys through application payloads.
 

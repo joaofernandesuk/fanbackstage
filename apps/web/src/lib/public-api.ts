@@ -19,6 +19,10 @@ export type DiscoveryResult = {
   access_policy?: string | null;
   locked: boolean;
   preview_asset_id?: string | null;
+  gallery_image_count?: number | null;
+  video_duration_seconds?: number | null;
+  adult_access_required?: boolean;
+  adult_access_granted?: boolean;
   price_amount_minor?: number | null;
   currency?: string | null;
   availability?: string | null;
@@ -61,6 +65,14 @@ export type PublicSubscriptionOption = {
   discount_basis_points: number;
 };
 
+export type MarketplaceListingMedia = {
+  derivative_id: string;
+  delivery_path: string;
+  position: number;
+  width: number | null;
+  height: number | null;
+};
+
 export type MarketplaceListing = {
   id: string;
   public_id: string;
@@ -76,6 +88,14 @@ export type MarketplaceListing = {
   shipping_mode: string;
   origin_country_code: string;
   shipping_charged_minor: number;
+  media?: MarketplaceListingMedia[];
+  seller?: {
+    creator_id: string;
+    username: string;
+    display_name: string;
+    avatar_reference: string | null;
+    verified: boolean;
+  } | null;
 };
 
 export const PUBLIC_ENTITY_TYPES: readonly DiscoveryEntityType[] = [
@@ -144,6 +164,17 @@ export function formatMoney(amountMinor: number, currency: string): string {
   const formatted = parts.map((part) => part.type === "fraction" ? String(fraction).padStart(digits, "0") : part.value).join("");
   const minus = formatter.formatToParts(-1).find((part) => part.type === "minusSign")?.value ?? "-";
   return amountMinor < 0 ? `${minus}${formatted}` : formatted;
+}
+
+export function formatDurationSeconds(seconds: number | null | undefined): string | null {
+  if (seconds == null || seconds < 0 || !Number.isFinite(seconds)) return null;
+  const rounded = Math.floor(seconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const remainder = rounded % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
 export function accessLabel(policy: string | null | undefined, _locked = false): string {

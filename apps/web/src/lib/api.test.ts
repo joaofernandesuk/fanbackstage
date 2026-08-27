@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import { ApiError, api } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -34,5 +34,17 @@ describe("api", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
 
     await expect(api<void>("/messages/conversations/conversation-id/read", { method: "POST" })).resolves.toBeUndefined();
+  });
+
+  it("preserves a structured server error code for deterministic retry policy", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      detail: {
+        code: "marketplace_payment_terminal",
+        message: "Payment failed",
+      },
+    }), { status: 409 })));
+
+    await expect(api("/marketplace/listings/item/checkout", { method: "POST" }))
+      .rejects.toEqual(new ApiError("Payment failed", 409, "marketplace_payment_terminal"));
   });
 });

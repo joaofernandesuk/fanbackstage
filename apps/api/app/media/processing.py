@@ -13,6 +13,8 @@ from app.core.config import get_settings
 from app.media.service import checksum
 from app.media.storage import StorageProvider, storage_provider
 from app.models.content import (
+    AccessPolicy,
+    ContentItem,
     DerivativeType,
     MediaAsset,
     MediaDerivative,
@@ -20,6 +22,10 @@ from app.models.content import (
     MediaType,
     VideoContent,
 )
+
+
+class RetryableMediaProcessingError(ConnectionError):
+    """A transient failure persisted in a state the worker may safely replay."""
 
 
 async def _derivative(
@@ -167,7 +173,8 @@ async def _process_video(
             asset.duration_seconds,
             provider,
         )
-        await _render_video_preview(db, asset, source, 0, min(20, asset.duration_seconds), provider)
+        default_preview_duration = min(20, max(1, asset.duration_seconds - 1))
+        await _render_video_preview(db, asset, source, 0, default_preview_duration, provider)
 
 
 async def _render_video_preview(
@@ -178,6 +185,23 @@ async def _render_video_preview(
     duration_seconds: int,
     provider: StorageProvider,
 ) -> None:
+    body = _render_video_preview_bytes(source, start_seconds, duration_seconds)
+    await _derivative(
+        db,
+        asset,
+        DerivativeType.preview_clip,
+        f"derivative/{asset.id}/preview.mp4",
+        body,
+        "video/mp4",
+        asset.width,
+        asset.height,
+        duration_seconds,
+        provider,
+        overwrite=True,
+    )
+
+
+def _render_video_preview_bytes(source: Path, start_seconds: int, duration_seconds: int) -> bytes:
     preview = source.with_name("preview.mp4")
     _run(
         "ffmpeg",
@@ -197,27 +221,123 @@ async def _render_video_preview(
         "-an",
         str(preview),
     )
-    await _derivative(
-        db,
-        asset,
-        DerivativeType.preview_clip,
-        f"derivative/{asset.id}/preview.mp4",
-        preview.read_bytes(),
-        "video/mp4",
-        asset.width,
-        asset.height,
-        duration_seconds,
-        provider,
-        overwrite=True,
+    return preview.read_bytes()
+
+
+def _preview_snapshot_matches(
+    video: VideoContent, start_seconds: int, duration_seconds: int
+) -> bool:
+    return (
+        video.preview_start_seconds == start_seconds
+        and video.preview_duration_seconds == duration_seconds
     )
 
 
+async def _locked_video_for_snapshot(
+    db: AsyncSession, content_id: UUID, start_seconds: int, duration_seconds: int
+) -> VideoContent | None:
+    video = await db.scalar(
+        select(VideoContent)
+        .where(VideoContent.content_id == content_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not video or not _preview_snapshot_matches(video, start_seconds, duration_seconds):
+        return None
+    return video
+
+
+async def _set_preview_status_if_current(
+    db: AsyncSession,
+    content_id: UUID,
+    asset_id: UUID,
+    start_seconds: int,
+    duration_seconds: int,
+    status: MediaStatus,
+) -> bool:
+    video = await _locked_video_for_snapshot(db, content_id, start_seconds, duration_seconds)
+    if not video or video.source_media_asset_id != asset_id:
+        return False
+    preview = await db.scalar(
+        select(MediaDerivative)
+        .where(
+            MediaDerivative.media_asset_id == asset_id,
+            MediaDerivative.derivative_type == DerivativeType.preview_clip,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not preview:
+        return False
+    preview.status = status
+    return True
+
+
+async def _publish_video_preview_if_current(
+    db: AsyncSession,
+    content_id: UUID,
+    asset: MediaAsset,
+    start_seconds: int,
+    duration_seconds: int,
+    body: bytes,
+    provider: StorageProvider,
+) -> bool:
+    # Keep the lock order aligned with creator reconfiguration: selection first,
+    # canonical derivative second. The storage write happens while both are held,
+    # so a newer selection cannot commit between the CAS and publication.
+    video = await _locked_video_for_snapshot(db, content_id, start_seconds, duration_seconds)
+    if not video or video.source_media_asset_id != asset.id:
+        return False
+    preview = await db.scalar(
+        select(MediaDerivative)
+        .where(
+            MediaDerivative.media_asset_id == asset.id,
+            MediaDerivative.derivative_type == DerivativeType.preview_clip,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not preview:
+        raise ValueError("Video preview derivative is missing")
+    storage_key = (
+        f"derivative/{asset.id}/preview-{content_id}-{start_seconds}-{duration_seconds}.mp4"
+    )
+    provider.put(storage_key, body, "video/mp4")
+    preview.storage_key = storage_key
+    preview.mime_type = "video/mp4"
+    preview.status = MediaStatus.ready
+    preview.size_bytes = len(body)
+    preview.width = asset.width
+    preview.height = asset.height
+    preview.duration_seconds = duration_seconds
+    return True
+
+
 async def render_video_preview(
-    db: AsyncSession, content_id: UUID, provider: StorageProvider | None = None
-) -> None:
+    db: AsyncSession,
+    content_id: UUID,
+    provider: StorageProvider | None = None,
+    *,
+    expected_start_seconds: int | None = None,
+    expected_duration_seconds: int | None = None,
+    retry_transient_failure: bool = False,
+) -> bool:
+    """Render one immutable selection snapshot; return False when it was superseded."""
     video = await db.scalar(select(VideoContent).where(VideoContent.content_id == content_id))
     if not video:
         raise ValueError("Video content not found")
+    if (expected_start_seconds is None) != (expected_duration_seconds is None):
+        raise ValueError("Video preview snapshot is incomplete")
+    start_seconds = (
+        video.preview_start_seconds if expected_start_seconds is None else expected_start_seconds
+    )
+    duration_seconds = (
+        video.preview_duration_seconds
+        if expected_duration_seconds is None
+        else expected_duration_seconds
+    )
+    if not _preview_snapshot_matches(video, start_seconds, duration_seconds):
+        return False
     asset = await db.get(MediaAsset, video.source_media_asset_id)
     if (
         not asset
@@ -225,23 +345,74 @@ async def render_video_preview(
         or asset.media_type is not MediaType.video
     ):
         raise ValueError("Video media is not ready")
-    if (
-        asset.duration_seconds
-        and video.preview_start_seconds + video.preview_duration_seconds > asset.duration_seconds
-    ):
+    if asset.duration_seconds and start_seconds + duration_seconds > asset.duration_seconds:
         raise ValueError("Video preview must fit within the video duration")
-    storage = provider or storage_provider()
-    with tempfile.TemporaryDirectory() as directory:
-        source = Path(directory) / "source.mp4"
-        source.write_bytes(storage.get(asset.storage_key))
-        await _render_video_preview(
-            db,
-            asset,
-            source,
-            video.preview_start_seconds,
-            video.preview_duration_seconds,
-            storage,
+    from app.content.service import validate_video_preview
+
+    content = await db.get(ContentItem, video.content_id)
+    if not content:
+        raise ValueError("Video content not found")
+    validate_video_preview(
+        asset,
+        start_seconds,
+        duration_seconds,
+        require_strict_teaser=content.access_policy is not AccessPolicy.free,
+    )
+    preview_row = await db.scalar(
+        select(MediaDerivative).where(
+            MediaDerivative.media_asset_id == asset.id,
+            MediaDerivative.derivative_type == DerivativeType.preview_clip,
         )
+    )
+    if not preview_row:
+        raise ValueError("Video preview derivative is missing")
+    storage = provider or storage_provider()
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.mp4"
+            source.write_bytes(storage.get(asset.storage_key))
+            body = _render_video_preview_bytes(
+                source,
+                start_seconds,
+                duration_seconds,
+            )
+            return await _publish_video_preview_if_current(
+                db,
+                content_id,
+                asset,
+                start_seconds,
+                duration_seconds,
+                body,
+                storage,
+            )
+    except ConnectionError as exc:
+        is_current = await _set_preview_status_if_current(
+            db,
+            content_id,
+            asset.id,
+            start_seconds,
+            duration_seconds,
+            MediaStatus.queued if retry_transient_failure else MediaStatus.failed,
+        )
+        if not is_current:
+            return False
+        if retry_transient_failure:
+            raise RetryableMediaProcessingError(
+                "Transient video preview rendering failure"
+            ) from exc
+        raise
+    except Exception:
+        is_current = await _set_preview_status_if_current(
+            db,
+            content_id,
+            asset.id,
+            start_seconds,
+            duration_seconds,
+            MediaStatus.failed,
+        )
+        if not is_current:
+            return False
+        raise
 
 
 async def process_media_asset(
@@ -267,7 +438,16 @@ async def process_media_asset(
         else:
             await _process_video(db, asset, raw, storage)
         asset.status, asset.processing_error = MediaStatus.ready, None
+    except ConnectionError as exc:
+        if asset.processing_attempts < get_settings().media_processing_max_attempts:
+            asset.status = MediaStatus.queued
+            asset.processing_error = "Transient media processing failure; retry queued"
+            raise RetryableMediaProcessingError("Transient media processing failure") from exc
+        asset.status = MediaStatus.failed
+        asset.processing_error = "Media processing retry limit reached"
+        raise
     except Exception:
-        asset.status, asset.processing_error = MediaStatus.failed, "Media processing failed"
+        asset.status = MediaStatus.failed
+        asset.processing_error = "Media processing failed"
         raise
     return asset

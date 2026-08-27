@@ -5,11 +5,11 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
+from app.featuring.service import booking_for_payment_attempt
 from app.finance import service
 from app.media.service import approved_creator
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
-from app.models.featuring import FeatureBooking
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
 from app.models.marketplace import MarketplaceOrder
 from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
@@ -56,7 +56,7 @@ def purchase_response(purchase: Purchase) -> PurchaseResponse:
         platform_fee_minor=purchase.platform_fee_minor,
         creator_amount_minor=purchase.creator_amount_minor,
         currency=purchase.currency,
-        payment_attempt_id=purchase.payment_attempt_id,
+        payment_attempt_id=service.response_payment_attempt_id(purchase),
     )
 
 
@@ -130,9 +130,7 @@ async def complete_development_payment(
     if purchase is not None:
         return purchase_response(purchase)
 
-    booking = await db.scalar(
-        select(FeatureBooking).where(FeatureBooking.payment_attempt_id == attempt.id)
-    )
+    booking = await booking_for_payment_attempt(db, attempt.id)
     if booking is not None:
         return DevelopmentPaymentCompletionResponse(
             id=booking.id, status=booking.status.value, payment_attempt_id=attempt.id

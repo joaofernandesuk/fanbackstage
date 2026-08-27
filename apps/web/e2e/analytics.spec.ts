@@ -14,7 +14,10 @@ async function api(page: Page, path: string, method = "GET", body?: unknown, key
     const response = await fetch(`${apiBase}/api/v1${path}`, {
       method,
       credentials: "include",
-      headers: body ? { "Content-Type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) } : undefined,
+      headers: {
+        ...(body ? { "Content-Type": "application/json" } : {}),
+        ...(key ? { "Idempotency-Key": key } : {}),
+      },
       body: body ? JSON.stringify(body) : undefined,
     });
     return { status: response.status, body: await response.json().catch(() => null) };
@@ -33,6 +36,7 @@ async function register(page: Page, email: string, password: string) {
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
@@ -60,6 +64,7 @@ async function approvedCreator(page: Page, stamp: number, label: string) {
   expect((await api(page, `/admin/creator-applications/${application.id}/approve`, "POST")).status).toBe(200);
   await login(page, email, password);
   await page.goto("/creator-onboarding");
+  await page.getByRole("checkbox", { name: "Make my approved creator profile public" }).check();
   await page.getByRole("button", { name: "Save profile" }).click();
   await expect.poll(async () => (await api(page, "/creators/me")).body, { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   return { email, password, username, creatorId: application.id as string };
@@ -111,8 +116,10 @@ test("Phase 14 creator analytics is ledger-derived, currency-separated, and owne
   const refunded = await paidOrder(buyer, eur.public_id, stamp);
   const usdOrder = await paidOrder(buyer, usd.public_id, stamp + 1);
   await buyer.goto(`/creator/${creator.username}`);
-  await buyer.locator('section[aria-label="Subscriptions"]').getByRole("button", { name: "Subscribe" }).click();
-  await expect(buyer.getByText("Subscription is active.")).toBeVisible();
+  const subscriptionSection = buyer.locator('section[aria-label="Subscriptions"]');
+  await subscriptionSection.getByRole("button", { name: "Choose 1 month" }).click();
+  await buyer.getByRole("button", { name: "Confirm €10.00" }).click();
+  await expect(buyer.getByText("1 month subscription is active.")).toBeVisible();
   await login(page, admin.email, admin.password);
   expect((await api(page, `/marketplace/admin/orders/${refunded.id}/refund`, "POST", { reason: "Phase 14 refund" })).status).toBe(200);
 
@@ -202,7 +209,14 @@ test("Phase 14 admin BI and attribution dimensions coexist without mutation", as
   const targets = await api(page, "/featuring/eligible-targets");
   const booking = await api(page, "/featuring/bookings", "POST", { slot_id: slot.body.id, target_type: "creator", target_id: targets.body[0].target_id, starts_at: new Date(Date.now() + 1000).toISOString(), duration_seconds: 2 }, `phase14-feature-${stamp}`);
   expect(booking.status, JSON.stringify(booking.body)).toBe(200);
-  const payment = await api(page, `/featuring/bookings/${booking.body.id}/payment`, "POST");
+  const payment = await api(
+    page,
+    `/featuring/bookings/${booking.body.id}/payment`,
+    "POST",
+    undefined,
+    `phase14-feature-payment-${stamp}`,
+  );
+  expect(payment.status, JSON.stringify(payment.body)).toBe(200);
   expect((await api(page, `/payments/development/${payment.body.payment_attempt_id}/complete`, "POST")).status).toBe(200);
   await login(page, admin.email, admin.password);
   await expect.poll(async () => (await api(page, "/featuring/admin/reconcile", "POST")).body.activated, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);

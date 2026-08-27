@@ -7,11 +7,12 @@ from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.content import service as content_service
 from app.creators import service as creator_service
+from app.creators.service import current_adult_verification_predicate
 from app.finance import service as finance_service
 from app.finance.service import currency_code
 from app.groups import service
 from app.messaging import service as messaging_service
-from app.models.creator import CreatorProfile
+from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import (
     Group,
     GroupContract,
@@ -585,6 +586,9 @@ async def public_affiliations(group_id: UUID, db: Db) -> list[dict[str, str]]:
                 GroupCreatorMembership.group_id == group_id,
                 GroupCreatorMembership.status == "active",
                 GroupCreatorMembership.affiliation_public.is_(True),
+                CreatorProfile.status == CreatorStatus.approved,
+                CreatorProfile.is_public.is_(True),
+                current_adult_verification_predicate(CreatorProfile.id),
             )
             .order_by(CreatorProfile.username)
         )

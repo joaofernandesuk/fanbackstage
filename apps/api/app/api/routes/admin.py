@@ -8,6 +8,7 @@ from app.audit.service import record_event
 from app.content import service as content_service
 from app.creators import service as creator_service
 from app.marketplace import service as marketplace_service
+from app.media import service as media_service
 from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
@@ -24,6 +25,7 @@ from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatu
 from app.models.story import Story
 from app.permissions.policies import Permission, authorize
 from app.referrals import service as referral_service
+from app.schemas.admin import MediaAudienceUpdate
 from app.schemas.auth import MessageResponse
 from app.schemas.marketplace import (
     MarketplaceHoldPolicyInput,
@@ -46,6 +48,25 @@ from app.schemas.referral import (
 from app.stories import service as story_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.put("/media-assets/{asset_id}/audience")
+async def classify_media_audience(
+    asset_id: UUID,
+    payload: MediaAudienceUpdate,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    try:
+        asset, changed = await media_service.classify_audience(
+            db, identity[0], asset_id, payload.audience
+        )
+        await db.commit()
+        return {"id": str(asset.id), "audience": asset.audience.value, "changed": changed}
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/notifications/deliveries")
@@ -549,7 +570,9 @@ async def review_action(
     profile_id: str, target: CreatorStatus, identity: CurrentIdentity, db: Db
 ) -> MessageResponse:
     authorize(identity[0], Permission.ADMIN_ACCESS)
-    profile = await db.scalar(select(CreatorProfile).where(CreatorProfile.id == profile_id))
+    profile = await db.scalar(
+        select(CreatorProfile).where(CreatorProfile.id == profile_id).with_for_update()
+    )
     if not profile:
         raise HTTPException(status_code=404, detail="Creator application not found")
     try:

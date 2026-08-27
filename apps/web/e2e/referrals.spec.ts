@@ -31,6 +31,7 @@ async function register(page: import("@playwright/test").Page, email: string, pa
   await page.goto("/register");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
   await page.getByRole("button", { name: "Create account" }).click();
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
@@ -60,6 +61,10 @@ async function createApprovedSeller(page: import("@playwright/test").Page, stamp
   expect(application).toBeTruthy();
   expect((await api(page, `/admin/creator-applications/${application.id}/approve`, "POST")).status).toBe(200);
   await login(page, email, password);
+  await page.goto("/creator-onboarding");
+  await page.getByRole("checkbox", { name: "Make my approved creator profile public" }).check();
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(async () => (await api(page, "/creators/me")).body, { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   const listing = await api(page, "/marketplace/listings", "POST", {
     title: "Phase 10 referral item", category: "collectible", condition: "new", quantity_available: 3,
     price_amount_minor: 500, currency: "EUR", shipping_mode: "worldwide", origin_country_code: "PT",

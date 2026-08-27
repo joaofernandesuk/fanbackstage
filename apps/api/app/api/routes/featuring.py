@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException
@@ -8,7 +9,13 @@ from app.audit.service import record_event
 from app.featuring import service
 from app.groups.service import has_delegated_permission
 from app.models.creator import CreatorProfile
-from app.models.featuring import FeatureBooking, FeaturePrice, FeatureSlot, FeatureSurface
+from app.models.featuring import (
+    FeatureBooking,
+    FeatureBookingStatus,
+    FeaturePrice,
+    FeatureSlot,
+    FeatureSurface,
+)
 from app.models.groups import GroupPermission
 from app.models.identity import User
 from app.permissions.policies import Permission, authorize
@@ -18,6 +25,11 @@ router = APIRouter(prefix="/featuring", tags=["featuring"])
 
 
 def booking_response(row: FeatureBooking) -> dict:
+    retryable = bool(
+        row.status in {FeatureBookingStatus.awaiting_payment, FeatureBookingStatus.failed}
+        and row.reservation_expires_at
+        and row.reservation_expires_at > datetime.now(UTC)
+    )
     return {
         "id": str(row.id),
         "public_id": row.public_id,
@@ -35,6 +47,8 @@ def booking_response(row: FeatureBooking) -> dict:
         "currency": row.currency,
         "price_version": row.price_version,
         "payment_attempt_id": str(row.payment_attempt_id) if row.payment_attempt_id else None,
+        "reservation_expires_at": row.reservation_expires_at,
+        "retryable": retryable,
     }
 
 
@@ -174,14 +188,23 @@ async def create_booking(
 
 
 @router.post("/bookings/{booking_id}/payment")
-async def start_payment(booking_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
+async def start_payment(
+    booking_id: UUID,
+    identity: CurrentIdentity,
+    db: Db,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
     row = await db.get(FeatureBooking, booking_id)
     if not row:
         raise HTTPException(404, "Booking not found")
     try:
-        attempt = await service.initiate_payment(db, row, identity[0])
+        attempt = await service.initiate_payment(db, row, identity[0], idempotency_key or "")
         await db.commit()
-        return {"payment_attempt_id": str(attempt.id), "status": attempt.status.value}
+        return {
+            "payment_attempt_id": str(attempt.id),
+            "status": attempt.status.value,
+            "booking_status": row.status.value,
+        }
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc

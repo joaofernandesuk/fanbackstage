@@ -1,6 +1,6 @@
 # Financial Ledger, Commissions and Payouts
 
-Phase 6 message unlocks are a `messaging_charge` ledger transaction. They snapshot gross, platform fee, creator amount, currency, and commission basis points in `message_unlock_purchases`; webhook replay uses the same payment-attempt and ledger idempotency guarantees as PPV. Paid send fees are intentionally not settled until their command is implemented.
+Phase 6 message unlocks and paid sends are `messaging_charge` ledger transactions. They snapshot gross, platform fee, creator amount, currency, and commission basis points before payment; webhook replay uses the same payment-attempt and ledger idempotency guarantees as PPV. A paid send is not delivered until its verified charge settles.
 
 Phase 7 private sessions use the `private_live_session` transaction type. The request snapshots the per-minute rate, minimum charge, currency, authorization cap, participant mode and commission before acceptance. Server-persisted billable seconds—not browser timers—produce one deterministic final charge: `ceil(rate_minor * billable_seconds / 60)`, bounded by the authorization cap and raised to the configured minimum where applicable. Settlement and refunds use the existing immutable-ledger compensating-entry path; never mutable session balances.
 
@@ -140,6 +140,32 @@ Phase 3 records PPV purchases in integer minor units with an explicit ISO curren
 The development payment adapter is available only outside production. It signs development webhook payloads with `FANBACKSTAGE_PAYMENT_WEBHOOK_SECRET`; payment completion, webhook replay protection, ledger posting, and entitlement issuance all use the same webhook-processing path. Production startup rejects the development adapter.
 
 Payment recovery is replay-safe: the financial worker reconciles `succeeded` payment attempts whose purchase is still awaiting settlement. It uses the same idempotent settlement service as webhooks, so reconciliation cannot create a second ledger transaction or entitlement. Creator release is blocked while the configured settlement window contains newer paid purchases.
+
+## Payment retry, dispute and reversal invariants
+
+Buyer payment commands serialize on the buyer plus `Idempotency-Key`, and signed
+provider callbacks serialize on provider plus external event ID. A transport
+retry reuses its key and canonical attempt; a deliberate retry after a confirmed
+failure uses a new key while retaining immutable attempt history for the same
+purchase, subscription period or featuring booking.
+
+The first valid capture may settle value once. A later successful capture for a
+stale attempt creates a balanced `excess_capture_liability` and a durable
+`PaymentRefundRequirement`; it never creates a second entitlement, order,
+subscription period, message, private session or featuring placement. Provider
+refund completion posts one compensating refund/chargeback transaction against
+that liability. Production still requires a real payment/refund adapter; the
+development provider and its synthetic references are local/test-only.
+
+A signed dispute is fail-closed but is not itself a refund. Protected access is
+revoked or suspended and the attempt/domain enters a disputed state. If creator
+or referral earnings were already released, `payment_dispute_hold` moves the
+same frozen allocation from available back to pending without changing revenue.
+Final refund or chargeback reverses the exact original frozen ledger allocation
+once. Chargeback dominates an earlier refund without a second reversal; a later
+refund cannot downgrade chargeback. Earnings releases, dispute holds and excess
+capture containment are internal balance/operations movements and are excluded
+from GMV and ordinary revenue/refund analytics.
 
 # Phase 12 featuring ledger notes
 

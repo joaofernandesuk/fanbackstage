@@ -11,15 +11,22 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.adult_access import AdultAccessDecision
 from app.audit.service import record_event as record_audit_event
-from app.content.access import can_access_content, can_access_preview
+from app.content.access import can_access_content, can_access_preview, content_requires_adult_access
 from app.core.config import get_settings
+from app.creators.service import current_adult_verification_predicate
 from app.models.content import (
     ContentItem,
     ContentStatus,
     DerivativeType,
+    Gallery,
+    GalleryItem,
+    MediaAsset,
     MediaDerivative,
+    MediaStatus,
     ModerationStatus,
+    VideoContent,
 )
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.discovery import DiscoveryConfig, DiscoveryEntityType, DiscoveryEvent, DiscoveryHide
@@ -129,7 +136,9 @@ async def _creator_rows(
     rows = (
         await db.scalars(
             select(CreatorProfile).where(
-                CreatorProfile.status == CreatorStatus.approved, CreatorProfile.is_public.is_(True)
+                CreatorProfile.status == CreatorStatus.approved,
+                CreatorProfile.is_public.is_(True),
+                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
@@ -173,6 +182,7 @@ async def _creator_rows(
 async def _content_rows(
     db: AsyncSession,
     user: User | None,
+    adult_decision: AdultAccessDecision | None,
     query: str,
     blocked: set[UUID],
     hidden: set[tuple[str, UUID]],
@@ -185,9 +195,10 @@ async def _content_rows(
             .join(CreatorProfile, CreatorProfile.id == ContentItem.owner_creator_id)
             .where(
                 ContentItem.status == ContentStatus.published,
-                ContentItem.moderation_status.notin_(HIDDEN_MODERATION),
+                ContentItem.moderation_status == ModerationStatus.approved,
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
+                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
@@ -205,29 +216,51 @@ async def _content_rows(
         ):
             continue
         creator = await db.get(CreatorProfile, row.owner_creator_id)
+        requires_adult = await content_requires_adult_access(db, row)
+        adult_granted = not requires_adult or bool(adult_decision and adult_decision.allowed)
+        allowed = await can_access_content(db, row, user) and adult_granted
         preview_id = None
+        gallery = await db.scalar(select(Gallery).where(Gallery.content_id == row.id))
+        video = await db.scalar(select(VideoContent).where(VideoContent.content_id == row.id))
+        gallery_image_count = (
+            await db.scalar(
+                select(func.count())
+                .select_from(GalleryItem)
+                .where(GalleryItem.gallery_id == gallery.id)
+            )
+            if gallery
+            else None
+        )
+        video_duration_seconds = None
         # A discovery card uses only an authorised derivative identifier, never a storage key/URL.
-        if row.video:
+        if video:
+            source_asset = await db.get(MediaAsset, video.source_media_asset_id)
+            if source_asset and source_asset.owner_creator_id == row.owner_creator_id:
+                video_duration_seconds = source_asset.duration_seconds
             derivative = await db.scalar(
                 select(MediaDerivative).where(
-                    MediaDerivative.media_asset_id == row.video.source_media_asset_id,
-                    MediaDerivative.derivative_type.in_(
-                        [DerivativeType.poster, DerivativeType.preview_clip]
-                    ),
+                    MediaDerivative.media_asset_id == video.source_media_asset_id,
+                    MediaDerivative.derivative_type == DerivativeType.poster,
+                    MediaDerivative.status == MediaStatus.ready,
                 )
             )
-            if derivative and await can_access_preview(db, derivative):
+            if derivative and await can_access_preview(db, derivative, user, adult_decision):
                 preview_id = derivative.id
-        elif row.gallery and row.gallery.cover_media_asset_id:
+        elif gallery and gallery.cover_media_asset_id:
+            derivative_type = (
+                DerivativeType.display
+                if row.access_policy.value == "free"
+                else DerivativeType.blurred_preview
+            )
             derivative = await db.scalar(
                 select(MediaDerivative).where(
-                    MediaDerivative.media_asset_id == row.gallery.cover_media_asset_id,
-                    MediaDerivative.derivative_type == DerivativeType.blurred_preview,
+                    MediaDerivative.media_asset_id == gallery.cover_media_asset_id,
+                    MediaDerivative.derivative_type == derivative_type,
+                    MediaDerivative.status == MediaStatus.ready,
                 )
             )
-            if derivative and await can_access_preview(db, derivative):
+            if derivative and await can_access_preview(db, derivative, user, adult_decision):
                 preview_id = derivative.id
-        allowed = await can_access_content(db, row, user)
         result = DiscoveryResult(
             entity_type=kind,
             id=row.id,
@@ -239,6 +272,10 @@ async def _content_rows(
             access_policy=row.access_policy.value,
             locked=not allowed,
             preview_asset_id=preview_id,
+            gallery_image_count=gallery_image_count,
+            video_duration_seconds=video_duration_seconds,
+            adult_access_required=requires_adult,
+            adult_access_granted=adult_granted,
             price_amount_minor=row.price_amount_minor if row.access_policy.value == "ppv" else None,
             currency=row.price_currency if row.access_policy.value == "ppv" else None,
             created_at=row.published_at or row.created_at,
@@ -254,6 +291,7 @@ async def _content_rows(
                 FeedPost.moderation_status.notin_(HIDDEN_MODERATION),
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
+                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
@@ -310,6 +348,7 @@ async def _listing_rows(
                 MarketplaceListing.moderation_status.notin_(HIDDEN_MODERATION),
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
+                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
@@ -366,6 +405,7 @@ async def _live_rows(
                 LiveRoom.status == LiveRoomStatus.live,
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
+                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
@@ -411,6 +451,7 @@ async def search(
     db: AsyncSession,
     user: User | None,
     *,
+    adult_decision: AdultAccessDecision | None = None,
     query: str | None,
     entity_types: set[str] | None = None,
     cursor: str | None = None,
@@ -442,7 +483,7 @@ async def search(
     if types & {"post", "video", "gallery"}:
         candidates += [
             (r, s)
-            for r, s in await _content_rows(db, user, text, blocked, hidden)
+            for r, s in await _content_rows(db, user, adult_decision, text, blocked, hidden)
             if r.entity_type in types
         ]
     if "marketplace_listing" in types:

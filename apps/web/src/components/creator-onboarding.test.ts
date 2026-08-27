@@ -1,0 +1,132 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  canRunDevelopmentVerification,
+  CreatorOnboardingProfile,
+  creatorHasCurrentVerification,
+  creatorOnboardingError,
+  creatorProfilePayload,
+} from "./creator-onboarding";
+import { ApiError } from "../lib/api";
+
+const pendingProfile: CreatorOnboardingProfile = {
+  username: "creator-example",
+  display_name: "Creator Example",
+  bio: null,
+  country_code: null,
+  region: null,
+  city: null,
+  show_location: false,
+  timezone: null,
+  status: "pending_verification",
+  is_public: false,
+  verification_status: "not_started",
+  adult_verified: false,
+  rejection_reason: null,
+  languages: [],
+  categories: [],
+  social_links: [],
+  available_languages: [],
+  available_categories: [],
+  development_verification_available: false,
+};
+
+describe("creator onboarding", () => {
+  it("shows the development verification action only from an explicit current capability", () => {
+    expect(canRunDevelopmentVerification(pendingProfile)).toBe(false);
+    expect(canRunDevelopmentVerification({
+      ...pendingProfile,
+      development_verification_available: true,
+    })).toBe(true);
+    expect(canRunDevelopmentVerification({
+      ...pendingProfile,
+      status: "pending_review",
+      development_verification_available: true,
+    })).toBe(false);
+  });
+
+  it("does not treat an approved profile as currently verified after a failed KYC outcome", () => {
+    expect(creatorHasCurrentVerification({
+      ...pendingProfile,
+      status: "approved",
+      is_public: true,
+      verification_status: "failed",
+      adult_verified: false,
+    })).toBe(false);
+    expect(creatorHasCurrentVerification({
+      ...pendingProfile,
+      status: "approved",
+      verification_status: "verified",
+      adult_verified: true,
+    })).toBe(true);
+  });
+
+  it("builds the complete authoritative profile payload", () => {
+    const form = new FormData();
+    form.set("username", " creator-example ");
+    form.set("display_name", " Creator Example ");
+    form.set("bio", " Studio updates ");
+    form.set("country_code", " pt ");
+    form.set("region", " Lisbon ");
+    form.set("city", " Lisbon ");
+    form.set("timezone", " Europe/Lisbon ");
+    form.set("show_location", "on");
+    form.append("category_slugs", "studio");
+    form.append("language_codes", "en");
+    form.append("social_label", " Portfolio ");
+    form.append("social_url", " https://creator.example/portfolio ");
+    form.set("is_public", "on");
+
+    expect(creatorProfilePayload(form, true)).toEqual({
+      username: "creator-example",
+      display_name: "Creator Example",
+      bio: "Studio updates",
+      country_code: "PT",
+      region: "Lisbon",
+      city: "Lisbon",
+      show_location: true,
+      timezone: "Europe/Lisbon",
+      category_slugs: ["studio"],
+      language_codes: ["en"],
+      social_links: [
+        { label: "Portfolio", url: "https://creator.example/portfolio" },
+      ],
+      is_public: true,
+    });
+  });
+
+  it("rejects a partial social link before mutation", () => {
+    const form = new FormData();
+    form.append("social_label", "Portfolio");
+    form.append("social_url", "");
+    expect(() => creatorProfilePayload(form, false)).toThrow(
+      "Every social link needs both a label and a URL.",
+    );
+  });
+
+  it("sends explicit nulls when optional profile text is cleared", () => {
+    const form = new FormData();
+    expect(creatorProfilePayload(form, false)).toMatchObject({
+      bio: null,
+      country_code: null,
+      region: null,
+      city: null,
+      timezone: null,
+    });
+  });
+
+  it("does not expose unknown server or runtime error details", () => {
+    expect(creatorOnboardingError(
+      new ApiError("database connection details", 500),
+      "Unable to save the creator profile.",
+    )).toBe("Unable to save the creator profile.");
+    expect(creatorOnboardingError(
+      new Error("internal browser detail"),
+      "Unable to save the creator profile.",
+    )).toBe("Unable to save the creator profile.");
+    expect(creatorOnboardingError(
+      new Error("Every social link needs both a label and a URL."),
+      "Unable to save the creator profile.",
+    )).toBe("Every social link needs both a label and a URL.");
+  });
+});

@@ -17,7 +17,7 @@ TARGET_USER_COUNT = 40
 TARGET_CREATOR_COUNT = 13
 TARGET_PUBLIC_CREATOR_COUNT = 12
 TARGET_PUBLISHED_POST_COUNT = 48
-TARGET_PUBLISHED_CONTENT_COUNT = 24
+TARGET_PUBLISHED_CONTENT_COUNT = 27
 TARGET_PUBLISHED_VIDEO_COUNT = 12
 TARGET_PUBLISHED_LISTING_COUNT = 18
 TARGET_GROUP_COUNT = 2
@@ -52,6 +52,15 @@ class CreatorSeed:
     @property
     def cover_reference(self) -> str:
         return f"/demo/creators/{self.slug}/cover.jpg"
+
+
+@dataclass(frozen=True)
+class GalleryShowcaseSeed:
+    creator_slug: str
+    title: str
+    description: str
+    access_policy: str
+    price_amount_minor: int | None = None
 
 
 CREATORS = (
@@ -177,6 +186,28 @@ CREATORS = (
 PUBLIC_CREATORS = CREATORS[:-1]
 RESTRICTED_CREATOR = CREATORS[-1]
 STORY_CREATORS = PUBLIC_CREATORS[:8]
+
+GALLERY_SHOWCASES = (
+    GalleryShowcaseSeed(
+        "luna-sparks",
+        "Open Studio Contact Sheet",
+        "Four harmless color studies from a fictional daytime studio session.",
+        "free",
+    ),
+    GalleryShowcaseSeed(
+        "ivy-ember",
+        "Members' Editorial Notebook",
+        "A subscriber gallery used to verify ordered images and membership access.",
+        "subscription",
+    ),
+    GalleryShowcaseSeed(
+        "zara-pulse",
+        "Neon Motion Collection",
+        "A premium multi-image demo collection with an authorised locked teaser.",
+        "ppv",
+        1_299,
+    ),
+)
 
 CORE_USERS = (
     UserSeed(f"admin{DEMO_EMAIL_SUFFIX}", ("admin", "super_admin")),

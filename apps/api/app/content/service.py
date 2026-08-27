@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.audit.service import record_event
+from app.core.config import get_settings
 from app.media.service import approved_creator, asset_for_owner
 from app.models.content import (
     AccessPolicy,
@@ -69,10 +70,13 @@ async def add_gallery_item(
     db: AsyncSession, user: User, content_id: UUID, asset_id: UUID, preview: bool = False
 ) -> ContentItem:
     content = await owned_content(db, user, content_id, ContentType.gallery)
+    ensure_media_editable(content)
     asset = await asset_for_owner(db, user, asset_id)
     if asset.media_type is not MediaType.image:
         raise ValueError("Galleries require image assets")
     assert content.gallery
+    if len(content.gallery.items) >= get_settings().media_max_gallery_items:
+        raise ValueError("Gallery item limit reached")
     next_position = len(content.gallery.items)
     content.gallery.items.append(
         GalleryItem(media_asset_id=asset.id, position=next_position, is_preview=preview)
@@ -102,7 +106,12 @@ async def create_video(
     asset = await asset_for_owner(db, user, asset_id)
     if asset.media_type is not MediaType.video:
         raise ValueError("Videos require video assets")
-    validate_video_preview(asset, preview_start_seconds, preview_duration_seconds)
+    validate_video_preview(
+        asset,
+        preview_start_seconds,
+        preview_duration_seconds,
+        require_strict_teaser=policy is not AccessPolicy.free,
+    )
     content = ContentItem(
         owner_creator_id=creator.id,
         created_by_user_id=user.id,
@@ -274,6 +283,7 @@ async def update_content(
     target_amount = values.get("price_amount_minor", content.price_amount_minor)
     target_currency = values.get("price_currency", content.price_currency)
     validate_ppv_price(target_policy, target_amount, target_currency)
+    await validate_content_video_preview(db, content, target_policy)
     for field in (
         "title",
         "description",
@@ -307,6 +317,7 @@ async def update_content_as_group_manager(
     target_amount = values.get("price_amount_minor", content.price_amount_minor)
     target_currency = values.get("price_currency", content.price_currency)
     validate_ppv_price(target_policy, target_amount, target_currency)
+    await validate_content_video_preview(db, content, target_policy)
     for field in ("title", "description", "access_policy", "price_amount_minor", "price_currency"):
         if field in values:
             value = values[field]
@@ -325,6 +336,7 @@ async def configure_gallery_preview(
     db: AsyncSession, user: User, content_id: UUID, preview_count: int, preview_asset_ids: set[UUID]
 ) -> ContentItem:
     content = await owned_content(db, user, content_id, ContentType.gallery)
+    ensure_media_editable(content)
     assert content.gallery
     items = (
         await db.scalars(select(GalleryItem).where(GalleryItem.gallery_id == content.gallery.id))
@@ -344,6 +356,7 @@ async def configure_gallery_cover(
     db: AsyncSession, user: User, content_id: UUID, asset_id: UUID
 ) -> ContentItem:
     content = await owned_content(db, user, content_id, ContentType.gallery)
+    ensure_media_editable(content)
     assert content.gallery
     item = await db.scalar(
         select(GalleryItem).where(
@@ -357,17 +370,55 @@ async def configure_gallery_cover(
     return content
 
 
-def validate_video_preview(asset: MediaAsset, start: int, duration: int) -> None:
+def validate_video_preview(
+    asset: MediaAsset,
+    start: int,
+    duration: int,
+    *,
+    require_strict_teaser: bool = False,
+) -> None:
     if asset.duration_seconds is not None and start + duration > asset.duration_seconds:
         raise ValueError("Video preview must fit within the video duration")
+    if (
+        require_strict_teaser
+        and asset.duration_seconds is not None
+        and start + duration >= asset.duration_seconds
+    ):
+        raise ValueError("Premium video preview must end before the protected video")
+
+
+async def validate_content_video_preview(
+    db: AsyncSession, content: ContentItem, policy: AccessPolicy
+) -> None:
+    if content.content_type is not ContentType.video or policy is AccessPolicy.free:
+        return
+    video = await db.scalar(select(VideoContent).where(VideoContent.content_id == content.id))
+    if not video:
+        raise ValueError("Video content is missing")
+    asset = await db.get(MediaAsset, video.source_media_asset_id)
+    if not asset:
+        raise ValueError("Video media is missing")
+    validate_video_preview(
+        asset,
+        video.preview_start_seconds,
+        video.preview_duration_seconds,
+        require_strict_teaser=True,
+    )
+
+
+def ensure_media_editable(content: ContentItem) -> None:
+    if content.status not in {ContentStatus.draft, ContentStatus.processing}:
+        raise ValueError("Media can only be changed before review")
 
 
 async def mark_video_preview_queued(db: AsyncSession, asset_id: UUID) -> None:
     preview = await db.scalar(
-        select(MediaDerivative).where(
+        select(MediaDerivative)
+        .where(
             MediaDerivative.media_asset_id == asset_id,
             MediaDerivative.derivative_type == DerivativeType.preview_clip,
         )
+        .with_for_update()
     )
     if preview:
         preview.status = MediaStatus.queued
@@ -379,11 +430,23 @@ async def configure_video_preview(
     content = await owned_content(db, user, content_id, ContentType.video)
     if content.status not in {ContentStatus.draft, ContentStatus.processing}:
         raise ValueError("Video preview can only be changed before review")
-    assert content.video
-    asset = await asset_for_owner(db, user, content.video.source_media_asset_id)
-    validate_video_preview(asset, start, duration)
-    content.video.preview_start_seconds = start
-    content.video.preview_duration_seconds = duration
+    video = await db.scalar(
+        select(VideoContent)
+        .where(VideoContent.content_id == content.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not video:
+        raise ValueError("Video content is missing")
+    asset = await asset_for_owner(db, user, video.source_media_asset_id)
+    validate_video_preview(
+        asset,
+        start,
+        duration,
+        require_strict_teaser=content.access_policy is not AccessPolicy.free,
+    )
+    video.preview_start_seconds = start
+    video.preview_duration_seconds = duration
     await mark_video_preview_queued(db, asset.id)
     return content
 
@@ -392,6 +455,7 @@ async def reorder_gallery(
     db: AsyncSession, user: User, content_id: UUID, asset_ids: list[UUID]
 ) -> ContentItem:
     content = await owned_content(db, user, content_id, ContentType.gallery)
+    ensure_media_editable(content)
     assert content.gallery
     items = (
         await db.scalars(select(GalleryItem).where(GalleryItem.gallery_id == content.gallery.id))

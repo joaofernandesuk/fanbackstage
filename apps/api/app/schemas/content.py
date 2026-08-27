@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -80,6 +81,11 @@ class ContentPreview(BaseModel):
     derivative_id: UUID
     media_type: str
     delivery_path: str
+    kind: str = "preview"
+    position: int = 0
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: int | None = None
 
 
 class ContentResponse(BaseModel):
@@ -94,4 +100,14 @@ class ContentResponse(BaseModel):
     price_amount_minor: int | None = None
     price_currency: str | None = None
     requires_verified_consent: bool = False
+    creator_id: UUID | None = None
+    creator_username: str | None = None
+    creator_display_name: str | None = None
+    published_at: datetime | None = None
+    media_count: int = 0
+    duration_seconds: int | None = None
+    preview_duration_seconds: int | None = None
+    adult_access_required: bool = False
+    adult_access_granted: bool = True
     previews: list[ContentPreview] = Field(default_factory=list)
+    media: list[ContentPreview] = Field(default_factory=list)

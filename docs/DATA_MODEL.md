@@ -29,6 +29,19 @@ communication controls, never alternative identity stores.
 | Audit | AuditEvent |
 | Social | Follow, CreatorFeedSettings, FeedPost, FeedPostMedia, PostReaction, PostComment, PostMention, Hashtag, SocialReport |
 
+`User.adult_attested_at` and `adult_attestation_version` are a paired record of the
+platform's current baseline 18+ self-attestation. They are not a date of birth,
+jurisdiction decision, identity verification, or provider-backed age-assurance result.
+An authenticated account must hold the current policy version before a new paid action
+or adult-restricted delivery is authorised.
+
+`MediaAsset.audience` is moderator-owned and fail-closed: new and migrated assets are
+`adult_restricted` until an authorised reviewer explicitly classifies them
+`safe_public`. Actual classification changes are audited; replaying the same decision
+does not create another event. Creator verification remains separate: every public
+creator-owned projection requires the latest `CreatorVerification` outcome to be
+`verified` with `adult_verified = true`.
+
 # 37. Important State Machines
 
 
@@ -41,7 +54,16 @@ published -> restricted -> restored / removed
 published -> archived
 ```
 
-`MediaAsset` records a bounded `processing_attempts` counter. A failed asset may return to `queued` only through the owner-authorised recovery workflow while below the configured maximum; every processing attempt remains observable and derivative rows stay unique per asset/type.
+`MediaAsset` records a bounded `processing_attempts` counter. A transient storage failure remains `queued` only while the worker has a real retry available; the final attempt becomes `failed`. Other processing failures become `failed` immediately. A failed asset may return to `queued` only through the owner-authorised recovery workflow while below the configured maximum; every processing attempt remains observable and derivative rows stay unique per asset/type. Video preview regeneration follows the same queued-while-retryable and failed-at-limit rule, and an explicit regeneration can restore its unique preview derivative without changing the protected source.
+
+Payment retry associations are append-only domain history. `PurchasePaymentAttempt`,
+`SubscriptionRenewalAttempt`, and `FeatureBookingPaymentAttempt` retain a positive,
+monotonic attempt number and a unique payment-attempt reference while the parent
+keeps the current authoritative attempt pointer. `PaymentRefundRequirement` is a
+generic, one-per-attempt record for excess captures across PPV, subscriptions,
+marketplace, featuring, messaging and private live. It freezes the source,
+amount, currency, liability ledger transaction, eventual compensating reversal
+and provider resolution reference; it is not an entitlement or mutable balance.
 
 
 ## 36.2 Subscription
@@ -94,7 +116,7 @@ requested -> review/queued -> processing -> paid
 The implemented `stories` table owns lifecycle and publication state while referencing the existing `creator_profiles`, `users`, and `media_assets` tables. A row records creator ownership, publishing user, creator-scoped idempotency key, media asset, caption/alt text, access policy, `published_at`, exact `expires_at = published_at + 24 hours`, and the `active`/`expired`/`deleted`/`removed` state timestamps. It does not duplicate storage keys or create a Story-specific media object. The referenced asset is Story-safe and cannot simultaneously inherit another content/post/message/marketplace delivery contract. Expired, deleted, and moderation-removed rows remain durable; consumer queries include only active, unexpired, eligible records. Highlights are not yet represented by a table or inferred from Story state.
 # Phase 3 financial core
 
-The Phase 3 financial tables are `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `commission_rules`, `payment_attempts`, `purchases`, and `payment_webhook_events`. Purchases snapshot their allocation and point to their payment attempt, entitlement, and original ledger transaction. Ledger entries are currency-specific, positive minor-unit postings and must balance by transaction.
+The Phase 3 financial tables are `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `commission_rules`, `payment_attempts`, `purchases`, `purchase_payment_attempts`, `payment_refund_requirements`, and `payment_webhook_events`. A purchase is canonical per buyer/content and snapshots allocation once. `purchase_payment_attempts` preserves each positive, ordered provider attempt so a failed charge can be retried with a new idempotency key without creating another purchase; a replay of any prior key resolves to its original attempt. The first verified success from that history becomes the canonical settlement attempt. Any later successful capture is barred from creating another ledger transaction or entitlement and instead creates one frozen, attempt-unique `payment_refund_requirements` row in `required` state for provider-refund operations. Subscription periods use the corresponding durable attempt history for both initial and renewal retries, and only the current subscription-period attempt may mutate or settle that period. Ledger entries are currency-specific, positive minor-unit postings and must balance by transaction.
 
 # Phase 11 discovery
 

@@ -1,10 +1,15 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import func, select
 
-from app.api.deps import CurrentIdentity, Db
+from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.core.config import get_settings
 from app.creators import service
-from app.models.creator import CreatorProfile, CreatorStatus, CreatorVerification
+from app.models.creator import (
+    CreatorCategory,
+    CreatorLanguage,
+    CreatorProfile,
+    CreatorStatus,
+)
 from app.models.social import Follow
 from app.schemas.creator import (
     CreatorProfileUpdate,
@@ -17,12 +22,34 @@ from app.schemas.creator import (
 router = APIRouter(prefix="/creators", tags=["creators"])
 
 
-async def self_response(db: Db, profile: CreatorProfile) -> CreatorSelfResponse:
-    verification = await db.scalar(
-        select(CreatorVerification)
-        .where(CreatorVerification.creator_profile_id == profile.id)
-        .order_by(CreatorVerification.created_at.desc())
+def development_verification_enabled() -> bool:
+    settings = get_settings()
+    return (
+        settings.environment in {"development", "test"}
+        and settings.kyc_provider == "development"
+        and settings.development_kyc_http_enabled
     )
+
+
+async def self_response(db: Db, profile: CreatorProfile) -> CreatorSelfResponse:
+    verification = await service.latest_verification(db, profile.id)
+    development_verification_available = (
+        profile.status is CreatorStatus.pending_verification and development_verification_enabled()
+    )
+    available_languages = (
+        await db.scalars(
+            select(CreatorLanguage)
+            .where(CreatorLanguage.enabled.is_(True))
+            .order_by(CreatorLanguage.label, CreatorLanguage.code)
+        )
+    ).all()
+    available_categories = (
+        await db.scalars(
+            select(CreatorCategory)
+            .where(CreatorCategory.enabled.is_(True))
+            .order_by(CreatorCategory.position, CreatorCategory.slug)
+        )
+    ).all()
     return CreatorSelfResponse(
         id=profile.id,
         username=profile.username,
@@ -39,12 +66,24 @@ async def self_response(db: Db, profile: CreatorProfile) -> CreatorSelfResponse:
         adult_verified=verification.adult_verified if verification else False,
         rejection_reason=profile.rejection_reason,
         languages=[
-            TaxonomyItem(id=row.id, code=row.code, label=row.label) for row in profile.languages
+            TaxonomyItem(id=row.id, code=row.code, label=row.label)
+            for row in sorted(profile.languages, key=lambda item: item.code)
         ],
         categories=[
-            TaxonomyItem(id=row.id, code=row.slug, label=row.label) for row in profile.categories
+            TaxonomyItem(id=row.id, code=row.slug, label=row.label)
+            for row in sorted(profile.categories, key=lambda item: (item.position, item.slug))
         ],
-        social_links=[SocialLinkInput(label=row.label, url=row.url) for row in profile.links],
+        social_links=[
+            SocialLinkInput(label=row.label, url=row.url)
+            for row in sorted(profile.links, key=lambda item: (item.position, str(item.id)))
+        ],
+        available_languages=[
+            TaxonomyItem(id=row.id, code=row.code, label=row.label) for row in available_languages
+        ],
+        available_categories=[
+            TaxonomyItem(id=row.id, code=row.slug, label=row.label) for row in available_categories
+        ],
+        development_verification_available=development_verification_available,
     )
 
 
@@ -101,27 +140,37 @@ async def submit_application(identity: CurrentIdentity, db: Db) -> CreatorSelfRe
 async def development_verification(
     identity: CurrentIdentity, db: Db, adult: bool = True
 ) -> CreatorSelfResponse:
-    if get_settings().environment == "production":
+    if not development_verification_enabled():
         raise HTTPException(status_code=404, detail="Not found")
     profile = await service.profile_for_user(db, identity[0].id)
     if not profile:
         raise HTTPException(status_code=404, detail="Creator application not found")
-    await service.development_verify(db, profile, adult, identity[0].id)
-    await db.commit()
+    try:
+        await service.development_verify(db, profile, adult, identity[0].id)
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await self_response(db, profile)
 
 
 @router.get("/{username}", response_model=PublicCreatorResponse)
-async def public_profile(username: str, db: Db) -> PublicCreatorResponse:
+async def public_profile(
+    username: str, db: Db, identity: OptionalIdentity
+) -> PublicCreatorResponse:
     profile = await db.scalar(
         select(CreatorProfile).where(
             CreatorProfile.username == username.lower(),
-            CreatorProfile.status == CreatorStatus.approved,
-            CreatorProfile.is_public.is_(True),
         )
     )
     if not profile:
         raise HTTPException(status_code=404, detail="Creator not found")
+    try:
+        await service.require_public_creator_access(
+            db, profile.id, identity[0].id if identity else None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Creator not found") from exc
     location = None
     if profile.show_location:
         location = (
@@ -145,10 +194,15 @@ async def public_profile(username: str, db: Db) -> PublicCreatorResponse:
             or 0
         ),
         languages=[
-            TaxonomyItem(id=row.id, code=row.code, label=row.label) for row in profile.languages
+            TaxonomyItem(id=row.id, code=row.code, label=row.label)
+            for row in sorted(profile.languages, key=lambda item: item.code)
         ],
         categories=[
-            TaxonomyItem(id=row.id, code=row.slug, label=row.label) for row in profile.categories
+            TaxonomyItem(id=row.id, code=row.slug, label=row.label)
+            for row in sorted(profile.categories, key=lambda item: (item.position, item.slug))
         ],
-        social_links=[SocialLinkInput(label=row.label, url=row.url) for row in profile.links],
+        social_links=[
+            SocialLinkInput(label=row.label, url=row.url)
+            for row in sorted(profile.links, key=lambda item: (item.position, str(item.id)))
+        ],
     )

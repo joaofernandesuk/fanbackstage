@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
 import pytest
+from conftest import trusted_self_attested_accounts as accounts
 from fastapi import HTTPException
 from sqlalchemy import case, func, select
 
-from app.accounts import service as accounts
 from app.api.routes import admin as admin_routes
 from app.api.routes import groups as group_routes
 from app.content import service as content_service
@@ -49,6 +49,8 @@ async def approved_creator(db, email):
     await creators.submit(db, profile, user.id)
     await creators.development_verify(db, profile, True, user.id)
     await creators.set_status(db, profile, CreatorStatus.approved, user.id)
+    profile.is_public = True
+    await db.flush()
     return user, profile
 
 
@@ -268,7 +270,11 @@ async def test_contract_acceptance_snapshots_allocation_and_exit_revokes_delegat
         )
     )
     assert refund_ledger and refund_ledger.metadata_json["group_amount_minor"] == "480"
+    assert refund_ledger.metadata_json["group_contract_id"] == str(active.id)
     assert refund_ledger.metadata_json["original_group_contract_id"] == str(active.id)
+    assert refund_ledger.metadata_json["group_contract_version"] == str(active.version)
+    assert refund_ledger.metadata_json["creator_basis_points"] == "7000"
+    assert refund_ledger.metadata_json["group_basis_points"] == "3000"
     # Leave is a future-only boundary: the group keeps its immutable historical
     # earnings, while a later paid event credits the creator's full post-fee pool.
     group_before_exit_sale = await groups.group_financial_dashboard(

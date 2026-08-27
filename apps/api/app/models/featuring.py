@@ -174,6 +174,24 @@ class FeatureBooking(UUIDPrimaryKey, Timestamped, Base):
     idempotency_key: Mapped[str] = mapped_column(String(128))
 
 
+class FeatureBookingPaymentAttempt(UUIDPrimaryKey, Timestamped, Base):
+    """Durable payment-attempt history for one immutable featuring booking."""
+
+    __tablename__ = "feature_booking_payment_attempts"
+    __table_args__ = (
+        CheckConstraint("attempt_number > 0", name="ck_feature_booking_attempt_positive_number"),
+        UniqueConstraint("booking_id", "attempt_number", name="uq_feature_booking_attempt_number"),
+        UniqueConstraint("payment_attempt_id", name="uq_feature_booking_attempt_payment"),
+    )
+    booking_id: Mapped[UUID] = mapped_column(
+        ForeignKey("feature_bookings.id", ondelete="RESTRICT"), index=True
+    )
+    payment_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="RESTRICT"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+
+
 class FeatureRefund(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "feature_refunds"
     __table_args__ = (

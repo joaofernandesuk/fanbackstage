@@ -3,6 +3,7 @@ name: fanbackstage-dev
 x-api-environment: &api-environment
   FANBACKSTAGE_ENVIRONMENT: development
   FANBACKSTAGE_DEMO_SEED_ENABLED: "true"
+  FANBACKSTAGE_DEVELOPMENT_KYC_HTTP_ENABLED: "true"
   FANBACKSTAGE_WEB_ORIGIN: http://localhost:13000
   FANBACKSTAGE_API_ORIGIN: http://localhost:18000
   FANBACKSTAGE_DATABASE_URL: postgresql+asyncpg://fanbackstage:fanbackstage@postgres:5432/fanbackstage

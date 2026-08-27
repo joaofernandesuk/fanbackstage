@@ -574,7 +574,10 @@ async def record_revenue_allocation(
 
 
 async def reversal_entries(
-    db: AsyncSession, source_ledger_transaction_id: UUID
+    db: AsyncSession,
+    source_ledger_transaction_id: UUID,
+    *,
+    released_allocation_held: bool | None = None,
 ) -> tuple[list[tuple[object, object, int]], ReferralCommissionAllocation | None]:
     """Return the exact historical referral entry to reverse, if any.
 
@@ -593,12 +596,30 @@ async def reversal_entries(
     if not allocation or allocation.reversed_at:
         return [], allocation
     from app.finance.service import _account
-    from app.models.finance import LedgerAccountKind, LedgerDirection
+    from app.models.finance import (
+        LedgerAccountKind,
+        LedgerDirection,
+        LedgerTransaction,
+        LedgerTransactionType,
+    )
+
+    dispute_held = released_allocation_held
+    if dispute_held is None:
+        dispute_held = bool(
+            await db.scalar(
+                select(LedgerTransaction.id).where(
+                    LedgerTransaction.transaction_type
+                    == LedgerTransactionType.payment_dispute_hold,
+                    LedgerTransaction.metadata_json["original_ledger_transaction_id"].astext
+                    == str(source_ledger_transaction_id),
+                )
+            )
+        )
 
     if allocation.beneficiary_actor_type is ReferralActorType.affiliate_partner:
         kind = (
             LedgerAccountKind.affiliate_available
-            if allocation.released_at
+            if allocation.released_at and not dispute_held
             else LedgerAccountKind.affiliate_pending
         )
         if not allocation.beneficiary_affiliate_partner_id:
@@ -612,7 +633,7 @@ async def reversal_entries(
     else:
         kind = (
             LedgerAccountKind.referrer_available
-            if allocation.released_at
+            if allocation.released_at and not dispute_held
             else LedgerAccountKind.referrer_pending
         )
         if allocation.beneficiary_creator_id:
@@ -632,6 +653,57 @@ async def reversal_entries(
         else:
             raise ReferralError("Historical referral allocation is incomplete")
     return [(account, LedgerDirection.debit, allocation.amount_minor)], allocation
+
+
+async def dispute_hold_entries(
+    db: AsyncSession, source_ledger_transaction_id: UUID
+) -> list[tuple[object, object, int]]:
+    """Move an already released generic referral allocation back to its held bucket."""
+    allocation = await db.scalar(
+        select(ReferralCommissionAllocation)
+        .where(
+            ReferralCommissionAllocation.source_ledger_transaction_id
+            == source_ledger_transaction_id
+        )
+        .with_for_update()
+    )
+    if not allocation or not allocation.released_at or allocation.reversed_at:
+        return []
+    from app.finance.service import _account
+    from app.models.finance import LedgerAccountKind, LedgerDirection
+
+    if allocation.beneficiary_actor_type is ReferralActorType.affiliate_partner:
+        if not allocation.beneficiary_affiliate_partner_id:
+            raise ReferralError("Historical affiliate allocation is incomplete")
+        pending = await _account(
+            db,
+            LedgerAccountKind.affiliate_pending,
+            allocation.currency,
+            owner_affiliate_partner_id=allocation.beneficiary_affiliate_partner_id,
+        )
+        available = await _account(
+            db,
+            LedgerAccountKind.affiliate_available,
+            allocation.currency,
+            owner_affiliate_partner_id=allocation.beneficiary_affiliate_partner_id,
+        )
+    else:
+        if allocation.beneficiary_creator_id:
+            owner = {"owner_creator_id": allocation.beneficiary_creator_id}
+        elif allocation.beneficiary_user_id:
+            owner = {"owner_user_id": allocation.beneficiary_user_id}
+        else:
+            raise ReferralError("Historical referral allocation is incomplete")
+        pending = await _account(
+            db, LedgerAccountKind.referrer_pending, allocation.currency, **owner
+        )
+        available = await _account(
+            db, LedgerAccountKind.referrer_available, allocation.currency, **owner
+        )
+    return [
+        (available, LedgerDirection.debit, allocation.amount_minor),
+        (pending, LedgerDirection.credit, allocation.amount_minor),
+    ]
 
 
 async def release_entries(
@@ -700,6 +772,68 @@ async def release_entries(
     ], allocation
 
 
+async def active_marketplace_dispute_hold_source_ids(
+    db: AsyncSession, source_ledger_transaction_ids: list[UUID]
+) -> set[UUID]:
+    """Return allocation sources whose Marketplace release is currently held.
+
+    ``released_at`` remains immutable release provenance. Availability is a
+    projection of the linked hold/restore ledger chain, so a temporary dispute
+    never rewrites the historical release or reports held value as available.
+    """
+    if not source_ledger_transaction_ids:
+        return set()
+    from app.models.finance import LedgerTransaction, LedgerTransactionType
+
+    holds = (
+        await db.execute(
+            select(
+                LedgerTransaction.id,
+                LedgerTransaction.metadata_json["original_ledger_transaction_id"].astext,
+            ).where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.payment_dispute_hold,
+                LedgerTransaction.metadata_json["marketplace_order_id"].astext.is_not(None),
+                LedgerTransaction.metadata_json["original_ledger_transaction_id"].astext.in_(
+                    [str(identifier) for identifier in source_ledger_transaction_ids]
+                ),
+            )
+        )
+    ).all()
+    if not holds:
+        return set()
+    restored_hold_ids = set(
+        await db.scalars(
+            select(LedgerTransaction.reversal_of_transaction_id).where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.earnings_release,
+                LedgerTransaction.reversal_of_transaction_id.in_([hold_id for hold_id, _ in holds]),
+                LedgerTransaction.metadata_json["marketplace_dispute_operation"].astext
+                == "restore",
+            )
+        )
+    )
+    active_sources: set[UUID] = set()
+    for hold_id, source_id in holds:
+        if hold_id in restored_hold_ids:
+            continue
+        try:
+            active_sources.add(UUID(source_id))
+        except (TypeError, ValueError) as exc:
+            raise ReferralError("Marketplace dispute hold provenance is invalid") from exc
+    return active_sources
+
+
+def allocation_projection_status(
+    allocation: ReferralCommissionAllocation, active_hold_source_ids: set[UUID]
+) -> str:
+    if allocation.reversed_at:
+        return "reversed"
+    if allocation.source_ledger_transaction_id in active_hold_source_ids:
+        return "pending"
+    if allocation.released_at:
+        return "available"
+    return "pending"
+
+
 async def affiliate_dashboard_allocations(
     db: AsyncSession, authenticated_user_id: UUID
 ) -> list[ReferralCommissionAllocation]:
@@ -761,6 +895,9 @@ async def dashboard(db: AsyncSession, authenticated_user_id: UUID) -> dict[str, 
             .order_by(ReferralCommissionAllocation.allocated_at.desc())
         )
     )
+    active_hold_source_ids = await active_marketplace_dispute_hold_source_ids(
+        db, [row.source_ledger_transaction_id for row in allocations]
+    )
     programs = list(
         await db.scalars(
             select(ReferralProgram)
@@ -799,9 +936,10 @@ async def dashboard(db: AsyncSession, authenticated_user_id: UUID) -> dict[str, 
             allocation.currency,
             {"pending_amount_minor": 0, "available_amount_minor": 0, "reversed_amount_minor": 0},
         )
-        if allocation.reversed_at:
+        projection_status = allocation_projection_status(allocation, active_hold_source_ids)
+        if projection_status == "reversed":
             bucket["reversed_amount_minor"] += allocation.amount_minor
-        elif allocation.released_at:
+        elif projection_status == "available":
             bucket["available_amount_minor"] += allocation.amount_minor
         else:
             bucket["pending_amount_minor"] += allocation.amount_minor
@@ -818,6 +956,7 @@ async def dashboard(db: AsyncSession, authenticated_user_id: UUID) -> dict[str, 
                 "allocated_at": row.allocated_at,
                 "released_at": row.released_at,
                 "reversed_at": row.reversed_at,
+                "availability_status": allocation_projection_status(row, active_hold_source_ids),
             }
             for row in allocations
         ],

@@ -2,6 +2,10 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+IMPLEMENTED_AGE_ASSURANCE_PROVIDERS = {"development_self_attestation"}
+IMPLEMENTED_KYC_PROVIDERS = {"development"}
+IMPLEMENTED_PAYMENT_PROVIDERS = {"development"}
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -32,7 +36,12 @@ class Settings(BaseSettings):
     notification_max_attempts: int = 3
     notification_retry_base_seconds: int = 30
     notification_unsubscribe_ttl_days: int = 30
+    adult_attestation_version: str = "adult-self-attestation-v1"
+    adult_access_cookie_name: str = "fanbackstage_adult_access"
+    adult_access_cookie_ttl_hours: int = 24 * 30
+    age_assurance_provider: str = "development_self_attestation"
     kyc_provider: str = "development"
+    development_kyc_http_enabled: bool = False
     storage_endpoint_url: str = "http://localhost:9000"
     storage_public_endpoint_url: str | None = None
     storage_access_key: str = "fanbackstage"
@@ -66,6 +75,19 @@ class Settings(BaseSettings):
     def validate_production(self) -> None:
         if self.environment not in {"development", "test", "staging", "production"}:
             raise RuntimeError("FANBACKSTAGE_ENVIRONMENT is invalid")
+        if not self.adult_attestation_version.strip() or len(self.adult_attestation_version) > 64:
+            raise RuntimeError("FANBACKSTAGE_ADULT_ATTESTATION_VERSION is invalid")
+        if not self.adult_access_cookie_name.strip() or len(self.adult_access_cookie_name) > 128:
+            raise RuntimeError("FANBACKSTAGE_ADULT_ACCESS_COOKIE_NAME is invalid")
+        if not 1 <= self.adult_access_cookie_ttl_hours <= 24 * 365:
+            raise RuntimeError("FANBACKSTAGE_ADULT_ACCESS_COOKIE_TTL_HOURS is invalid")
+        if self.development_kyc_http_enabled and self.environment not in {
+            "development",
+            "test",
+        }:
+            raise RuntimeError(
+                "FANBACKSTAGE_DEVELOPMENT_KYC_HTTP_ENABLED is limited to development and test"
+            )
         if not 0 <= self.finance_default_commission_basis_points <= 10000:
             raise RuntimeError("FANBACKSTAGE_FINANCE_DEFAULT_COMMISSION_BASIS_POINTS is invalid")
         if self.creator_earnings_settlement_seconds < 0:
@@ -77,13 +99,15 @@ class Settings(BaseSettings):
         ):
             raise RuntimeError("Subscription grace/retry configuration is invalid")
         if self.environment != "production":
+            if self.age_assurance_provider not in IMPLEMENTED_AGE_ASSURANCE_PROVIDERS:
+                raise RuntimeError("FANBACKSTAGE_AGE_ASSURANCE_PROVIDER is not implemented")
+            if self.kyc_provider not in IMPLEMENTED_KYC_PROVIDERS:
+                raise RuntimeError("FANBACKSTAGE_KYC_PROVIDER is not implemented")
+            if self.payment_provider not in IMPLEMENTED_PAYMENT_PROVIDERS:
+                raise RuntimeError("FANBACKSTAGE_PAYMENT_PROVIDER is not implemented")
             return
         if self.session_secret == "change-me-for-development-only":
             raise RuntimeError("FANBACKSTAGE_SESSION_SECRET must be set in production")
-        if self.kyc_provider == "development":
-            raise RuntimeError("The development KYC provider cannot run in production")
-        if self.payment_provider == "development":
-            raise RuntimeError("The development payment provider cannot run in production")
         if self.notification_webhook_secret == "development-notification-webhook-secret":
             raise RuntimeError("FANBACKSTAGE_NOTIFICATION_WEBHOOK_SECRET must be set in production")
         if self.livekit_api_secret == "fanbackstage-livekit-development-secret-2026":
@@ -109,6 +133,18 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Production storage credentials must not use local development values"
             )
+        if self.age_assurance_provider not in IMPLEMENTED_AGE_ASSURANCE_PROVIDERS:
+            raise RuntimeError("FANBACKSTAGE_AGE_ASSURANCE_PROVIDER is not implemented")
+        if self.kyc_provider not in IMPLEMENTED_KYC_PROVIDERS:
+            raise RuntimeError("FANBACKSTAGE_KYC_PROVIDER is not implemented")
+        if self.payment_provider not in IMPLEMENTED_PAYMENT_PROVIDERS:
+            raise RuntimeError("FANBACKSTAGE_PAYMENT_PROVIDER is not implemented")
+        if self.age_assurance_provider == "development_self_attestation":
+            raise RuntimeError("Development self-attested age assurance cannot run in production")
+        if self.kyc_provider == "development":
+            raise RuntimeError("The development KYC provider cannot run in production")
+        if self.payment_provider == "development":
+            raise RuntimeError("The development payment provider cannot run in production")
 
 
 @lru_cache
