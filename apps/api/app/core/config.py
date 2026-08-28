@@ -147,7 +147,10 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 24
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
-    media_rate_limit_attempts: int = 30
+    # A single public surface can legitimately render dozens of separate
+    # authorised preview derivatives. Keep the delivery throttle high enough
+    # for a complete page while retaining a bounded per-client/IP budget.
+    media_rate_limit_attempts: int = 300
     media_rate_limit_window_seconds: int = 60
     social_rate_limit_attempts: int = 60
     social_rate_limit_window_seconds: int = 60

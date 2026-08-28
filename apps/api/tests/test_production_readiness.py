@@ -40,6 +40,13 @@ def _production_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def test_default_media_delivery_budget_supports_media_heavy_public_pages():
+    settings = Settings()
+
+    assert settings.media_rate_limit_attempts == 300
+    assert settings.media_rate_limit_window_seconds == 60
+
+
 def test_production_rejects_unimplemented_payment_provider():
     with pytest.raises(RuntimeError, match="PAYMENT_PROVIDER is not implemented"):
         _production_settings(payment_provider="provider").validate_production()
