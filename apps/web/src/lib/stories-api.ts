@@ -1,3 +1,5 @@
+import type { ComplianceAccess } from "./compliance-api";
+
 export type StoryAccessPolicy = "free" | "followers" | "subscription";
 
 export type StoryCreator = {
@@ -14,7 +16,7 @@ export type StoryMedia = {
   delivery_path: string;
 };
 
-export type PublicStory = {
+export type PublicStory = ComplianceAccess & {
   id: string;
   status: "active";
   creator: StoryCreator;
@@ -25,10 +27,10 @@ export type PublicStory = {
   created_at: string;
   published_at: string;
   expires_at: string;
-  media: StoryMedia;
+  media: StoryMedia | null;
 };
 
-export type StoryRailPage = {
+export type StoryRailPage = ComplianceAccess & {
   items: PublicStory[];
   next_cursor: string | null;
 };
@@ -82,10 +84,11 @@ export function isRenderableStory(story: PublicStory, now = Date.now()): boolean
   if (story.status !== "active") return false;
   const expiresAt = Date.parse(story.expires_at);
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
-  return storyMediaUrl(story) !== undefined;
+  return !story.compliance_allowed || storyMediaUrl(story) !== undefined;
 }
 
 export function storyMediaUrl(story: PublicStory): string | undefined {
+  if (!story.compliance_allowed || !story.media) return undefined;
   const expectedPath = `/stories/${encodeURIComponent(story.id)}/media`;
   if (story.media.delivery_path !== expectedPath) return undefined;
 

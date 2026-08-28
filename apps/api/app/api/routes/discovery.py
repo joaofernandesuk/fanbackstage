@@ -4,12 +4,12 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
-from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
-from app.core.config import get_settings
+from app.compliance.http import resolve_request_compliance_decision
 from app.core.rate_limit import enforce_discovery_rate_limit
 from app.discovery import service
 from app.featuring import service as featuring_service
+from app.models.compliance import ComplianceFeature
 from app.models.discovery import DiscoveryHide
 from app.permissions.policies import Permission, authorize
 from app.schemas.discovery import DiscoveryConfigInput, DiscoveryHideInput, DiscoveryPage
@@ -35,12 +35,41 @@ async def search(
     user = identity[0] if identity else None
     await enforce_discovery_rate_limit(request, str(user.id) if user else "anonymous")
     try:
+        platform_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.platform_access,
+            adult_restricted=False,
+        )
+        adult_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.adult_media,
+            adult_restricted=True,
+        )
+        marketplace_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.marketplace,
+            adult_restricted=False,
+        )
+        live_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.live,
+            adult_restricted=True,
+        )
         items, next_cursor, version = await service.search(
             db,
             user,
-            adult_decision=adult_access.resolve_adult_access(
-                user, request.cookies.get(get_settings().adult_access_cookie_name)
-            ),
+            adult_decision=adult_decision,
+            platform_decision=platform_decision,
+            marketplace_decision=marketplace_decision,
+            live_decision=live_decision,
             query=q,
             entity_types=set(types or []) or None,
             cursor=cursor,
@@ -59,7 +88,15 @@ async def search(
             ranking_version=version,
         )
         await db.commit()
-        return DiscoveryPage(items=items, next_cursor=next_cursor, ranking_version=version)
+        return DiscoveryPage(
+            items=items,
+            next_cursor=next_cursor,
+            ranking_version=version,
+            compliance_allowed=platform_decision.allowed,
+            compliance_code=platform_decision.code,
+            compliance_action=platform_decision.action,
+            compliance_reason=platform_decision.reason,
+        )
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc
@@ -72,12 +109,41 @@ async def discover(
     user = identity[0] if identity else None
     await enforce_discovery_rate_limit(request, str(user.id) if user else "anonymous")
     try:
+        platform_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.platform_access,
+            adult_restricted=False,
+        )
+        adult_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.adult_media,
+            adult_restricted=True,
+        )
+        marketplace_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.marketplace,
+            adult_restricted=False,
+        )
+        live_decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=ComplianceFeature.live,
+            adult_restricted=True,
+        )
         items, next_cursor, version = await service.search(
             db,
             user,
-            adult_decision=adult_access.resolve_adult_access(
-                user, request.cookies.get(get_settings().adult_access_cookie_name)
-            ),
+            adult_decision=adult_decision,
+            platform_decision=platform_decision,
+            marketplace_decision=marketplace_decision,
+            live_decision=live_decision,
             query=None,
             cursor=cursor,
             limit=min(max(limit, 1), 50),
@@ -97,7 +163,15 @@ async def discover(
             ranking_version=version,
         )
         await db.commit()
-        return DiscoveryPage(items=items, next_cursor=next_cursor, ranking_version=version)
+        return DiscoveryPage(
+            items=items,
+            next_cursor=next_cursor,
+            ranking_version=version,
+            compliance_allowed=platform_decision.allowed,
+            compliance_code=platform_decision.code,
+            compliance_action=platform_decision.action,
+            compliance_reason=platform_decision.reason,
+        )
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc

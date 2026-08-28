@@ -1,7 +1,12 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import select
 
 from app.accounts.service import register
+from app.compliance.policy import create_jurisdiction_revision, create_template_revision
+from app.compliance.types import PolicyOverrides, PolicyRules
+from app.models.compliance import CompliancePolicyStatus, CompliancePolicyTemplateRevision
 from app.models.notification import (
     DeliveryStatus,
     InAppNotification,
@@ -11,6 +16,47 @@ from app.models.notification import (
     NotificationPriority,
 )
 from app.notifications import service
+
+
+async def publish_marketing_policy(db, *, enabled: bool) -> None:
+    revision = await db.scalar(
+        select(CompliancePolicyTemplateRevision)
+        .order_by(CompliancePolicyTemplateRevision.version.desc())
+        .limit(1)
+    )
+    assert revision is not None
+    assert revision.reviewed_by_user_id is not None
+    now = datetime.now(UTC)
+    rules = PolicyRules.model_validate(revision.rules_json).model_copy(
+        update={"marketing_email_allowed": enabled}
+    )
+    successor = await create_template_revision(
+        db,
+        template_id=revision.template_id,
+        rules=rules,
+        status=CompliancePolicyStatus.active,
+        effective_from=now - timedelta(seconds=1),
+        effective_until=None,
+        actor_user_id=revision.reviewed_by_user_id,
+        reviewed_at=now,
+        reviewed_by_user_id=revision.reviewed_by_user_id,
+        change_reason="Change marketing-email eligibility for delivery test",
+        is_demo=True,
+    )
+    await create_jurisdiction_revision(
+        db,
+        country_code="PT",
+        template_revision_id=successor.id,
+        overrides=PolicyOverrides(),
+        status=CompliancePolicyStatus.active,
+        effective_from=now - timedelta(seconds=1),
+        effective_until=None,
+        actor_user_id=revision.reviewed_by_user_id,
+        reviewed_at=now,
+        reviewed_by_user_id=revision.reviewed_by_user_id,
+        change_reason="Change marketing-email eligibility for delivery test",
+        is_demo=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -88,6 +134,53 @@ async def test_marketing_send_time_unsubscribe_fails_closed_and_transactional_su
         channels=(NotificationChannel.email,),
     )
     assert await service._eligible(db_session, reset, user)
+
+
+@pytest.mark.asyncio
+async def test_marketing_policy_is_checked_at_delivery_without_blocking_transactional(
+    db_session,
+):
+    user, _ = await register(
+        db_session,
+        "marketing-policy@example.com",
+        "strong-password-123",
+        None,
+        adult_confirmed=True,
+        country_code="PT",
+    )
+    await service.update_preference(db_session, user, "marketing", True, True, consent=True)
+    marketing = await service.create_intent(
+        db_session,
+        recipient_user_id=user.id,
+        notification_type="MARKETING",
+        classification=NotificationClass.marketing,
+        source_domain="campaigns",
+        source_id="policy-disabled",
+        payload={"subject": "News", "body": "News"},
+        channels=(NotificationChannel.email,),
+        priority=NotificationPriority.marketing,
+    )
+    transactional = await service.create_intent(
+        db_session,
+        recipient_user_id=user.id,
+        notification_type="AUTH_PASSWORD_RESET",
+        classification=NotificationClass.transactional,
+        source_domain="accounts",
+        source_id="policy-disabled-reset",
+        payload={"subject": "Reset", "body": "Reset"},
+        channels=(NotificationChannel.email,),
+    )
+    await publish_marketing_policy(db_session, enabled=False)
+
+    assert await service.deliver_intent(db_session, marketing.id) is DeliveryStatus.suppressed
+    attempt = await db_session.scalar(
+        select(NotificationDeliveryAttempt).where(
+            NotificationDeliveryAttempt.intent_id == marketing.id
+        )
+    )
+    assert attempt is not None
+    assert attempt.status is DeliveryStatus.suppressed
+    assert await service._eligible(db_session, transactional, user)
 
 
 @pytest.mark.asyncio

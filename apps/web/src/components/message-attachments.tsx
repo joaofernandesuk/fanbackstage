@@ -3,9 +3,11 @@
 import { useEffect, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import type { ComplianceAccess } from "../lib/compliance-api";
+import { AdultAccessGate } from "./adult-access-gate";
 
 type Attachment = { id: string; message_id: string };
-type Access = {
+type Access = ComplianceAccess & {
   id: string;
   media_type: string;
   locked: boolean;
@@ -40,5 +42,33 @@ export function MessageAttachments({ conversationId }: { conversationId: string 
       setError(requestError instanceof ApiError ? requestError.message : "Unable to unlock media");
     }
   }
-  return <section aria-label="Message attachments">{items.map((item) => { const value = access[item.id]; return value ? <article key={item.id}><p>{value.locked ? `Locked attachment · ${value.amount_minor} ${value.currency}` : "Unlocked attachment"}</p>{value.preview_delivery_path && <img alt="Locked attachment preview" src={`${apiBase}/api/v1${value.preview_delivery_path}`} />}{value.full_delivery_path && <a href={`${apiBase}/api/v1${value.full_delivery_path}`}>Open full media</a>}{value.locked && <button onClick={() => void unlock(item.id)}>Unlock attachment</button>}</article> : null; })}{error && <p className="error">{error}</p>}</section>;
+  return (
+    <section aria-label="Message attachments">
+      {items.map((item) => {
+        const value = access[item.id];
+        if (!value) return null;
+        if (!value.compliance_allowed) {
+          return (
+            <AdultAccessGate
+              access={value}
+              adultRestricted={value.adult_access_required}
+              feature="messaging"
+              key={item.id}
+              onGranted={refresh}
+              title="this message attachment"
+            />
+          );
+        }
+        return (
+          <article key={item.id}>
+            <p>{value.locked ? `Locked attachment · ${value.amount_minor} ${value.currency}` : "Unlocked attachment"}</p>
+            {value.preview_delivery_path && <img alt="Locked attachment preview" src={`${apiBase}/api/v1${value.preview_delivery_path}`} />}
+            {value.full_delivery_path && <a href={`${apiBase}/api/v1${value.full_delivery_path}`}>Open full media</a>}
+            {value.locked && <button onClick={() => void unlock(item.id)}>Unlock attachment</button>}
+          </article>
+        );
+      })}
+      {error && <p className="error">{error}</p>}
+    </section>
+  );
 }

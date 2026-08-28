@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl
@@ -29,6 +30,24 @@ class CreatorProfileUpdate(BaseModel):
     is_public: bool | None = None
 
 
+class CreatorComplianceEligibilityResponse(BaseModel):
+    jurisdiction: str | None
+    policy_version: int | None
+    verification_status: str | None
+    verification_expires_at: datetime | None
+    identity_required: bool
+    identity_allowed: bool
+    age_required: bool
+    age_allowed: bool
+    public_allowed: bool
+    payout_kyc_required: bool
+    payout_kyc_satisfied: bool
+    payout_allowed: bool
+    code: str
+    reason: str
+    payout_code: str
+
+
 class CreatorSelfResponse(BaseModel):
     id: UUID
     username: str | None
@@ -43,6 +62,9 @@ class CreatorSelfResponse(BaseModel):
     is_public: bool
     verification_status: str
     adult_verified: bool
+    creator_compliance: CreatorComplianceEligibilityResponse
+    performer_consent_issue_count: int
+    creator_compliance_action_required: bool
     rejection_reason: str | None
     languages: list[TaxonomyItem]
     categories: list[TaxonomyItem]
@@ -66,3 +88,9 @@ class PublicCreatorResponse(BaseModel):
     languages: list[TaxonomyItem]
     categories: list[TaxonomyItem]
     social_links: list[SocialLinkInput]
+    adult_access_required: bool = True
+    adult_access_granted: bool = False
+    compliance_allowed: bool = False
+    compliance_code: str = "POLICY_UNAVAILABLE"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None

@@ -8,6 +8,8 @@ Settlement rounds in integer minor units as `ceil(rate_minor * authoritative_sec
 
 The LiveKit client receives only API-issued short-lived tokens. Private tokens are session- and user-scoped; uninvited users cannot obtain one. Public viewer tokens cannot publish. Public recording is an egress foundation only; private recording is disabled by design.
 
+LiveKit JWT expiry limits initial/reconnect authority but does not disconnect an established client. FanBackstage therefore uses authenticated RoomService controls for terminal and revocation transitions: `DeleteRoom` for room/session end or creator suspension, and `RemoveParticipant` for bans or viewer authority loss. Signed join callbacks repeat the canonical PostgreSQL compliance/entitlement/ban decision so a cached self-hosted token cannot persistently recreate or rejoin a terminal/denied room; scheduled reconciliation retries provider failures.
+
 Local real-stack validation uses a browser-reachable LiveKit signalling endpoint and a loopback-advertised, published UDP mux port. This avoids Docker bridge ICE candidates being offered to host Chromium. The E2E browser is granted camera/microphone permission and uses Chromium's fake-media device flags; it proves actual creator track publication and viewer subscription without provider or presence mocks.
 # Release hardening update
 

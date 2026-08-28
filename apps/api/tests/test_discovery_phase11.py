@@ -4,9 +4,11 @@ import httpx
 import pytest
 
 from app.accounts import service as accounts
+from app.compliance.types import ComplianceDecision
 from app.creators import service as creators
 from app.discovery import service
 from app.main import app
+from app.models.compliance import AgeAssuranceLevel, ComplianceFeature
 from app.models.content import (
     AccessPolicy,
     ContentItem,
@@ -24,6 +26,26 @@ from app.models.content import (
 from app.models.creator import CreatorStatus
 from app.models.messaging import UserBlock
 from app.social import service as social
+
+
+def denied_adult_decision() -> ComplianceDecision:
+    return ComplianceDecision(
+        allowed=False,
+        code="AGE_VERIFICATION_REQUIRED",
+        action="VERIFY_AGE",
+        reason="Age verification is required",
+        feature=ComplianceFeature.adult_media,
+        jurisdiction="PT",
+        policy_id=None,
+        policy_version=1,
+        required_minimum_age=18,
+        required_assurance_level=AgeAssuranceLevel.self_attested,
+        achieved_assurance_level=AgeAssuranceLevel.none,
+        age_access_allowed=False,
+        feature_allowed=True,
+        country_conflict=False,
+        verification_expires_at=None,
+    )
 
 
 async def creator(db, email: str):
@@ -84,6 +106,44 @@ async def test_discovery_filters_pending_blocked_and_locked_content(db_session):
     assert gallery.locked and gallery.preview_asset_id is None
     assert blocked_profile.id not in {item.id for item in items}
     assert pending_profile.id not in {item.id for item in items}
+
+
+@pytest.mark.asyncio
+async def test_discovery_redacts_unclassified_creator_and_content_copy_before_age(
+    db_session,
+):
+    owner, profile = await creator(db_session, "discovery-redaction@example.com")
+    profile.bio = "Explicit creator bio must not leak"
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Explicit gallery title must not leak",
+        description="Explicit gallery description must not leak",
+        status=ContentStatus.published,
+        access_policy=AccessPolicy.free,
+        moderation_status=ModerationStatus.approved,
+        published_at=datetime.now(UTC),
+    )
+    db_session.add(content)
+    await db_session.flush()
+
+    items, _, _ = await service.search(
+        db_session,
+        None,
+        adult_decision=denied_adult_decision(),
+        query=None,
+        entity_types={"creator", "gallery"},
+    )
+
+    creator_result = next(item for item in items if item.entity_type == "creator")
+    content_result = next(item for item in items if item.entity_type == "gallery")
+    assert creator_result.description is None
+    assert creator_result.compliance_allowed is False
+    assert content_result.title == "Age-restricted content"
+    assert content_result.description is None
+    assert content_result.compliance_allowed is False
+    assert "Explicit" not in str([creator_result, content_result])
 
 
 @pytest.mark.asyncio

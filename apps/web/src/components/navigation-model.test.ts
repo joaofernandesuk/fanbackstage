@@ -49,6 +49,7 @@ describe("consumer navigation model", () => {
       "Subscriptions",
       "Notifications",
       "Settings",
+      "Legal history",
     ]);
     expect(labels(mobileNavigation(fan))).toEqual(["Home", "Discover", "Live", "Messages", "Profile"]);
   });
@@ -90,6 +91,9 @@ describe("consumer navigation model", () => {
         "Discovery Controls",
         "Featuring Admin",
         "Referral Admin",
+        "Compliance",
+        "Legal & Policies",
+        "Site Settings",
       ]),
     );
     expect(labels(primaryNavigation(admin))).not.toContain("Platform Analytics");

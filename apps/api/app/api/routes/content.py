@@ -3,8 +3,9 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
-from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
+from app.compliance.http import resolve_request_compliance_decision
+from app.compliance.types import ComplianceDecision
 from app.content import service
 from app.content.access import (
     can_access_asset,
@@ -13,8 +14,8 @@ from app.content.access import (
     content_requires_adult_access,
     public_content_surface_eligible,
 )
-from app.core.config import get_settings
 from app.media.service import approved_creator
+from app.models.compliance import ComplianceFeature
 from app.models.content import (
     ContentItem,
     ContentStatus,
@@ -42,6 +43,30 @@ from app.schemas.content import (
 from app.worker.tasks import render_video_preview
 
 router = APIRouter(prefix="/content", tags=["content"])
+
+
+async def require_content_authoring(db: Db, request: Request, user) -> None:
+    for feature, restricted in (
+        (ComplianceFeature.platform_access, False),
+        (ComplianceFeature.adult_media, True),
+    ):
+        decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=feature,
+            adult_restricted=restricted,
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                403,
+                {
+                    "message": decision.reason,
+                    "code": decision.code,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                },
+            )
 
 
 def response(
@@ -120,13 +145,23 @@ async def public_response(
     item: ContentItem,
     has_access: bool,
     user=None,
-    adult_decision: adult_access.AdultAccessDecision | None = None,
+    adult_decision: ComplianceDecision | None = None,
 ) -> ContentResponse:
     result = response(item, has_access)
     result.adult_access_required = await content_requires_adult_access(db, item)
     result.adult_access_granted = not result.adult_access_required or bool(
-        adult_decision and adult_decision.allowed
+        adult_decision and adult_decision.age_access_allowed
     )
+    result.compliance_allowed = bool(adult_decision and adult_decision.allowed)
+    if adult_decision:
+        result.compliance_code = adult_decision.code
+        result.compliance_action = adult_decision.action if not adult_decision.allowed else None
+        result.compliance_reason = adult_decision.reason
+        if not adult_decision.allowed:
+            result.title = (
+                "Age-restricted content" if result.adult_access_required else "Content unavailable"
+            )
+            result.description = None
     creator = await db.get(CreatorProfile, item.owner_creator_id)
     if creator:
         result.creator_id = creator.id
@@ -267,9 +302,10 @@ async def public_response(
 
 @router.post("/galleries", response_model=ContentResponse)
 async def create_gallery(
-    payload: GalleryCreate, identity: CurrentIdentity, db: Db
+    payload: GalleryCreate, request: Request, identity: CurrentIdentity, db: Db
 ) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.create_gallery(
             db,
             identity[0],
@@ -291,9 +327,14 @@ async def create_gallery(
 
 @router.post("/galleries/{content_id}/items", response_model=ContentResponse)
 async def add_gallery_item(
-    content_id: UUID, payload: GalleryItemCreate, identity: CurrentIdentity, db: Db
+    content_id: UUID,
+    payload: GalleryItemCreate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.add_gallery_item(
             db, identity[0], content_id, payload.media_asset_id, payload.is_preview
         )
@@ -307,8 +348,11 @@ async def add_gallery_item(
 
 
 @router.post("/videos", response_model=ContentResponse)
-async def create_video(payload: VideoCreate, identity: CurrentIdentity, db: Db) -> ContentResponse:
+async def create_video(
+    payload: VideoCreate, request: Request, identity: CurrentIdentity, db: Db
+) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.create_video(
             db,
             identity[0],
@@ -341,9 +385,14 @@ async def create_video(payload: VideoCreate, identity: CurrentIdentity, db: Db) 
 
 @router.patch("/galleries/{content_id}/preview", response_model=ContentResponse)
 async def configure_preview(
-    content_id: UUID, payload: GalleryPreviewUpdate, identity: CurrentIdentity, db: Db
+    content_id: UUID,
+    payload: GalleryPreviewUpdate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.configure_gallery_preview(
             db, identity[0], content_id, payload.preview_count, set(payload.preview_asset_ids)
         )
@@ -358,9 +407,14 @@ async def configure_preview(
 
 @router.patch("/galleries/{content_id}/cover", response_model=ContentResponse)
 async def configure_cover(
-    content_id: UUID, payload: GalleryCoverUpdate, identity: CurrentIdentity, db: Db
+    content_id: UUID,
+    payload: GalleryCoverUpdate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.configure_gallery_cover(
             db, identity[0], content_id, payload.media_asset_id
         )
@@ -375,9 +429,14 @@ async def configure_cover(
 
 @router.patch("/galleries/{content_id}/order", response_model=ContentResponse)
 async def reorder(
-    content_id: UUID, payload: GalleryOrderUpdate, identity: CurrentIdentity, db: Db
+    content_id: UUID,
+    payload: GalleryOrderUpdate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.reorder_gallery(db, identity[0], content_id, payload.media_asset_ids)
         await db.commit()
         return response(item)
@@ -390,9 +449,14 @@ async def reorder(
 
 @router.patch("/videos/{content_id}/preview", response_model=ContentResponse)
 async def configure_video_preview(
-    content_id: UUID, payload: VideoPreviewUpdate, identity: CurrentIdentity, db: Db
+    content_id: UUID,
+    payload: VideoPreviewUpdate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.configure_video_preview(
             db,
             identity[0],
@@ -419,8 +483,11 @@ async def configure_video_preview(
 
 @router.post("/{content_id}/publish", response_model=ContentResponse, deprecated=True)
 @router.post("/{content_id}/submit", response_model=ContentResponse)
-async def submit_for_review(content_id: UUID, identity: CurrentIdentity, db: Db) -> ContentResponse:
+async def submit_for_review(
+    content_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.submit_for_review(db, identity[0], content_id)
         await db.commit()
         return response(item)
@@ -446,9 +513,14 @@ async def archive(content_id: UUID, identity: CurrentIdentity, db: Db) -> Conten
 
 @router.patch("/{content_id}", response_model=ContentResponse)
 async def update_content(
-    content_id: UUID, payload: ContentUpdate, identity: CurrentIdentity, db: Db
+    content_id: UUID,
+    payload: ContentUpdate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> ContentResponse:
     try:
+        await require_content_authoring(db, request, identity[0])
         item = await service.update_content(
             db, identity[0], content_id, payload.model_dump(exclude_unset=True)
         )
@@ -469,13 +541,17 @@ async def public_content(
     user = identity[0] if identity else None
     if not item or not await public_content_surface_eligible(db, item, user):
         raise HTTPException(status_code=404, detail="Content not found")
-    decision = adult_access.resolve_adult_access(
-        user, request.cookies.get(get_settings().adult_access_cookie_name)
-    )
     requires_adult = await content_requires_adult_access(db, item)
-    has_access = await can_access_content(db, item, user) and (
-        not requires_adult or decision.allowed
+    decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=user,
+        feature=(
+            ComplianceFeature.adult_media if requires_adult else ComplianceFeature.platform_access
+        ),
+        adult_restricted=requires_adult,
     )
+    has_access = await can_access_content(db, item, user) and decision.allowed
     return await public_response(db, item, has_access, user, decision)
 
 
@@ -502,15 +578,25 @@ async def public_creator_content(
     )
     result = []
     user = identity[0] if identity else None
-    decision = adult_access.resolve_adult_access(
-        user, request.cookies.get(get_settings().adult_access_cookie_name)
+    platform_decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=user,
+        feature=ComplianceFeature.platform_access,
+        adult_restricted=False,
+    )
+    adult_decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=user,
+        feature=ComplianceFeature.adult_media,
+        adult_restricted=True,
     )
     for item in items:
         if not await public_content_surface_eligible(db, item, user):
             continue
         requires_adult = await content_requires_adult_access(db, item)
-        has_access = await can_access_content(db, item, user) and (
-            not requires_adult or decision.allowed
-        )
+        decision = adult_decision if requires_adult else platform_decision
+        has_access = await can_access_content(db, item, user) and decision.allowed
         result.append(await public_response(db, item, has_access, user, decision))
     return result

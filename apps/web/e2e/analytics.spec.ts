@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -34,6 +34,7 @@ async function login(page: Page, email: string, password: string) {
 
 async function register(page: Page, email: string, password: string) {
   await page.goto("/register");
+  await completeRegistrationCompliance(page);
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -189,10 +190,10 @@ test("Phase 14 admin BI and attribution dimensions coexist without mutation", as
   expect((await api(denied, "/analytics/platform/overview")).status).toBe(403);
   await deniedContext.close();
   await api(page, "/admin/marketplace/shipping-allowances", "PUT", { country_code: "PT", currency: "EUR", allowed_shipping_minor: 0 });
-  const program = await api(page, "/admin/referrals/programs", "POST", { actor_type: "creator", program_type: "creator_buyer_referral", owner_creator_id: creator.creatorId });
-  const policy = await api(page, `/admin/referrals/programs/${program.body.id}/policies`, "POST", { basis_points: 1000, eligible_revenue_types: ["marketplace"], attribution_window_days: 30, subscription_reward_window_days: 90 });
+  const program = await api(page, "/admin/referrals/programs", "POST", { actor_type: "creator", program_type: "creator_buyer_referral", owner_creator_id: creator.creatorId, reason: "Create the analytics referral programme", confirmed: true });
+  const policy = await api(page, `/admin/referrals/programs/${program.body.id}/policies`, "POST", { basis_points: 1000, eligible_revenue_types: ["marketplace"], attribution_window_days: 30, subscription_reward_window_days: 90, reason: "Create the analytics referral policy", confirmed: true });
   const code = `ANALYTICS-${stamp}`;
-  expect((await api(page, `/admin/referrals/programs/${program.body.id}/links`, "POST", { policy_id: policy.body.id, code, destination_path: "/", source: "playwright" })).status).toBe(200);
+  expect((await api(page, `/admin/referrals/programs/${program.body.id}/links`, "POST", { policy_id: policy.body.id, code, destination_path: "/", source: "playwright", reason: "Create the analytics referral link", confirmed: true })).status).toBe(200);
   await login(page, creator.email, creator.password);
   const item = await listing(page, `BI allocation ${stamp}`, "EUR", 1000);
   await login(page, admin.email, admin.password);

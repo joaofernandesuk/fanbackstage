@@ -1,13 +1,15 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
+from app.compliance.http import resolve_request_compliance_decision
 from app.featuring import service
 from app.groups.service import has_delegated_permission
+from app.models.compliance import ComplianceFeature
 from app.models.creator import CreatorProfile
 from app.models.featuring import (
     FeatureBooking,
@@ -22,6 +24,31 @@ from app.permissions.policies import Permission, authorize
 from app.schemas.featuring import BookingInput, PriceInput, SlotInput, SurfaceInput
 
 router = APIRouter(prefix="/featuring", tags=["featuring"])
+
+
+async def request_featuring_decisions(db: Db, request: Request, user):
+    return {
+        feature: await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=feature,
+            adult_restricted=True,
+        )
+        for feature in (ComplianceFeature.featuring, ComplianceFeature.purchases)
+    }
+
+
+def featuring_error_detail(exc: service.FeaturingError):
+    decision = exc.compliance_decision
+    if decision is None:
+        return str(exc)
+    return {
+        "message": str(exc),
+        "code": decision.code,
+        "action": decision.action,
+        "reason": decision.reason,
+    }
 
 
 def booking_response(row: FeatureBooking) -> dict:
@@ -148,6 +175,7 @@ async def eligible_targets(identity: CurrentIdentity, db: Db) -> list[dict]:
 @router.post("/bookings")
 async def create_booking(
     payload: BookingInput,
+    request: Request,
     identity: CurrentIdentity,
     db: Db,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -179,17 +207,22 @@ async def create_booking(
             starts_at=payload.starts_at,
             duration_seconds=payload.duration_seconds,
             idempotency_key=idempotency_key or "",
+            compliance_decisions=await request_featuring_decisions(db, request, payer),
         )
         await db.commit()
         return booking_response(row)
     except ValueError as exc:
         await db.rollback()
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(
+            403 if isinstance(exc, service.FeaturingError) and exc.compliance_decision else 400,
+            featuring_error_detail(exc) if isinstance(exc, service.FeaturingError) else str(exc),
+        ) from exc
 
 
 @router.post("/bookings/{booking_id}/payment")
 async def start_payment(
     booking_id: UUID,
+    request: Request,
     identity: CurrentIdentity,
     db: Db,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -198,7 +231,13 @@ async def start_payment(
     if not row:
         raise HTTPException(404, "Booking not found")
     try:
-        attempt = await service.initiate_payment(db, row, identity[0], idempotency_key or "")
+        attempt = await service.initiate_payment(
+            db,
+            row,
+            identity[0],
+            idempotency_key or "",
+            compliance_decisions=await request_featuring_decisions(db, request, identity[0]),
+        )
         await db.commit()
         return {
             "payment_attempt_id": str(attempt.id),
@@ -207,7 +246,10 @@ async def start_payment(
         }
     except ValueError as exc:
         await db.rollback()
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(
+            403 if isinstance(exc, service.FeaturingError) and exc.compliance_decision else 400,
+            featuring_error_detail(exc) if isinstance(exc, service.FeaturingError) else str(exc),
+        ) from exc
 
 
 @router.post("/bookings/{booking_id}/cancel")

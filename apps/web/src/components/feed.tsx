@@ -1,11 +1,13 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { contentDeliveryUrl } from "../lib/content-api";
+import type { ComplianceAccess } from "../lib/compliance-api";
 import { formatMoney } from "../lib/public-api";
+import { AdultAccessGate } from "./adult-access-gate";
 import {
   AccessBadge,
   CreatorAvatar,
@@ -15,7 +17,12 @@ import {
 } from "./consumer-ui";
 import styles from "./social-surface.module.css";
 
-type PostMedia = { asset_id: string; alt_text: string | null };
+type PostMedia = {
+  derivative_id: string;
+  delivery_path: string;
+  media_type: "image" | "video";
+  alt_text: string | null;
+};
 type ContentReference = {
   id: string;
   title: string;
@@ -26,7 +33,7 @@ type ContentReference = {
   price_currency: string | null;
 };
 
-type Post = {
+type Post = ComplianceAccess & {
   id: string;
   creator_id: string;
   creator_username: string;
@@ -46,7 +53,7 @@ type Post = {
   content_reference: ContentReference | null;
 };
 
-type Page = { items: Post[]; next_cursor: string | null };
+type Page = ComplianceAccess & { items: Post[]; next_cursor: string | null };
 type Comment = { id: string; user_id: string; body: string; created_at: string };
 
 function relativeTime(value: string | null) {
@@ -100,9 +107,17 @@ function PostCard({
   const [commentBody, setCommentBody] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
-  const creatorRoot = `/demo/creators/${post.creator_username}`;
-  const safeMedia = post.post_type === "video" ? `${creatorRoot}/content.jpg` : `${creatorRoot}/portrait.jpg`;
-  const mediaAlt = post.media[0]?.alt_text || `${post.creator_name} public creator post preview`;
+  const firstMedia = post.media[0];
+  let mediaUrl: string | null = null;
+  if (firstMedia) {
+    try {
+      mediaUrl = contentDeliveryUrl(firstMedia.delivery_path);
+    } catch {
+      mediaUrl = null;
+    }
+  }
+  const mediaAlt = firstMedia?.alt_text || `${post.creator_name} creator post media`;
+  const complianceBlocked = !post.compliance_allowed;
 
   async function react() {
     if (!authenticated) {
@@ -203,27 +218,40 @@ function PostCard({
         </details>
       </header>
 
-      <div className={`${styles.postMedia} ${post.locked ? styles.lockedMedia : ""}`}>
-        <Image alt={post.locked ? "Premium creator preview" : mediaAlt} fill sizes="(max-width: 720px) 100vw, 680px" src={safeMedia} />
-        <div className={styles.mediaBadges}>
-          {post.pinned_at && <span className={styles.pinnedBadge}>Pinned</span>}
-          <AccessBadge locked={post.locked} policy={post.access_policy} />
-        </div>
-        {post.post_type === "video" && !post.locked && <span aria-label="Video preview" className={styles.playButton}>▶</span>}
-        {post.locked && (
-          <div className={styles.lockOverlay}>
-            <span aria-hidden="true" className={styles.lockIcon}>◇</span>
-            <strong>{post.access_policy === "ppv" ? "Premium post" : "Members-only post"}</strong>
-            <span>{post.access_policy === "followers" ? "Follow this creator to view" : "Subscribe or unlock to continue"}</span>
-            <Link href={`/creator/${post.creator_username}`}>View access options</Link>
+      {complianceBlocked ? (
+        <AdultAccessGate
+          access={post}
+          adultRestricted={post.adult_access_required}
+          feature={post.adult_access_required ? "adult_media" : "platform_access"}
+          onGranted={onChanged}
+          title="this post"
+        />
+      ) : (mediaUrl || post.locked) ? (
+        <div className={`${styles.postMedia} ${post.locked ? styles.lockedMedia : ""}`}>
+          {mediaUrl && firstMedia?.media_type === "video" ? (
+            <video aria-label={mediaAlt} controls playsInline preload="metadata" src={mediaUrl} />
+          ) : mediaUrl ? (
+            <img alt={mediaAlt} src={mediaUrl} />
+          ) : null}
+          <div className={styles.mediaBadges}>
+            {post.pinned_at && <span className={styles.pinnedBadge}>Pinned</span>}
+            <AccessBadge locked={post.locked} policy={post.access_policy} />
           </div>
-        )}
-      </div>
+          {post.locked && (
+            <div className={styles.lockOverlay}>
+              <span aria-hidden="true" className={styles.lockIcon}>◇</span>
+              <strong>{post.access_policy === "ppv" ? "Premium post" : "Members-only post"}</strong>
+              <span>{post.access_policy === "followers" ? "Follow this creator to view" : "Subscribe or unlock to continue"}</span>
+              <Link href={`/creator/${post.creator_username}`}>View access options</Link>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       <div className={styles.postBody}>
         {post.body && <p><Link href={`/creator/${post.creator_username}`}><strong>{post.creator_name}</strong></Link> {post.body}</p>}
         {post.content_reference && (
-          <Link className={styles.contentReference} href={`/creator/${post.creator_username}`}>
+          <Link className={styles.contentReference} href={`/content/${encodeURIComponent(post.content_reference.id)}`}>
             <span>{post.content_reference.content_type || "premium content"}</span>
             <strong>{post.content_reference.title}</strong>
             {post.content_reference.price_amount_minor !== null && post.content_reference.price_currency && (
@@ -271,6 +299,7 @@ export function Feed({ creatorId }: { creatorId?: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [initialized, setInitialized] = useState(Boolean(creatorId));
+  const [pageAccess, setPageAccess] = useState<Page | null>(null);
 
   useEffect(() => {
     if (creatorId || authLoading) return;
@@ -287,6 +316,7 @@ export function Feed({ creatorId }: { creatorId?: string }) {
     if (!quiet) setLoading(true);
     try {
       const page = await api<Page>(`${path}${next ? `?cursor=${encodeURIComponent(next)}` : ""}`);
+      setPageAccess(page);
       setItems((old) => next ? [...old, ...page.items] : page.items);
       setCursor(page.next_cursor);
       setError("");
@@ -317,14 +347,23 @@ export function Feed({ creatorId }: { creatorId?: string }) {
       )}
 
       {(loading || !initialized) && !items.length && <><Skeleton lines={2} /><Skeleton lines={2} /></>}
-      {error && !items.length && (
+      {pageAccess && !pageAccess.compliance_allowed && (
+        <AdultAccessGate
+          access={pageAccess}
+          adultRestricted={false}
+          feature="platform_access"
+          onGranted={() => load(null, true)}
+          title="the social feed"
+        />
+      )}
+      {error && !items.length && pageAccess?.compliance_allowed !== false && (
         <EmptyState
           action={!authenticated && <Link className={styles.primaryLink} href="/login?next=%2Ffeed">Log in to see your feed</Link>}
           body={error}
           title="Your social feed starts here"
         />
       )}
-      {!loading && !error && !items.length && (
+      {!loading && !error && !items.length && pageAccess?.compliance_allowed !== false && (
         <EmptyState
           action={<Link className={styles.primaryLink} href="/creators">Discover creators</Link>}
           body={tab === "following" ? "Follow a few creators and their latest posts will appear here." : "Fresh creator posts are on the way."}

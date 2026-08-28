@@ -13,6 +13,7 @@ import {
   storyRailPath,
 } from "../lib/stories-api";
 import { AccessBadge, CreatorAvatar, EmptyState, SectionHeader, Skeleton, VerifiedBadge } from "./consumer-ui";
+import { AdultAccessGate } from "./adult-access-gate";
 import { StoryRail } from "./story-experience";
 import styles from "./stories-browser.module.css";
 
@@ -24,6 +25,7 @@ export function StoriesBrowser() {
   const [error, setError] = useState("");
   const [paginationError, setPaginationError] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [access, setAccess] = useState<StoryRailPage | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -32,6 +34,7 @@ export function StoriesBrowser() {
         if (!active) return;
         setStories(page.items);
         setNextCursor(page.next_cursor);
+        setAccess(page);
       })
       .catch((caught: unknown) => {
         if (active) setError(caught instanceof ApiError ? caught.message : "Unable to load stories");
@@ -86,6 +89,22 @@ export function StoriesBrowser() {
     return <div className={styles.loading}>{[0, 1, 2, 3].map((value) => <Skeleton key={value} />)}</div>;
   }
   if (error) return <EmptyState body={error} title="Stories are unavailable" />;
+  if (access && !access.compliance_allowed) {
+    return (
+      <AdultAccessGate
+        access={access}
+        adultRestricted={false}
+        feature="platform_access"
+        onGranted={async () => {
+          const page = await api<StoryRailPage>(storyRailPath());
+          setStories(page.items);
+          setNextCursor(page.next_cursor);
+          setAccess(page);
+        }}
+        title="Stories"
+      />
+    );
+  }
   if (!groups.length) {
     return (
       <EmptyState

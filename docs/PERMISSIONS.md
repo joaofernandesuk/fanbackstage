@@ -34,6 +34,8 @@ to acknowledge the current policy, but cannot start a paid action, receive a liv
 or access adult-restricted media until they do. This baseline attestation never creates an
 entitlement and must not be described as legal age or identity verification.
 
+The central jurisdiction resolver may require provider-backed age assurance before registration or a protected feature. An anonymous verification can be attached to exactly one newly created or authenticated account, but it does not grant login or entitlement. Frontend gates only explain the server decision.
+
 Only `moderation.access` may classify a media asset as `safe_public` or
 `adult_restricted`; the domain service enforces the capability, row-locks the asset, and
 audits only an actual state change. Creator KYC state is not editable by creators or group
@@ -139,6 +141,25 @@ Use capability-based permissions with object scope where needed. Group-manager p
 Phase 5 feed commands are server-authorized: only an approved creator owns its posts/settings, viewers can react/comment only after post access resolves, and public follows target only approved public creators.
 
 Phase 5 Story commands are likewise server-authorized. Only an approved creator may create a Story, the selected ready media asset must belong to that creator, and it must not already be governed by a content/post/message/marketplace delivery context. Creation requires a creator-scoped idempotency key. A creator may list and soft-delete only their own Stories. Consumer rail, detail, and media delivery fail closed for expired/deleted/removed Stories, two-way blocks, non-public or non-approved creators, unsafe/unready media, and unmet follower/subscription access. Authenticated consumers can file deduplicated Story reports through the existing social-report boundary; moderation access can contain the exact Story with a replay-safe audited removal, after which even owner media delivery is denied. Moderation roles may otherwise inspect eligible active Stories through the existing role boundary, but do not gain original-media URLs. Group-manager Story publication is not implemented without an explicit delegated capability.
+
+## Compliance and legal permissions
+
+| Capability | Moderator | Admin | Super admin |
+| --- | --- | --- | --- |
+| `compliance.view` | Yes | Yes | Yes |
+| `compliance.verification.view` | Yes | Yes | Yes |
+| `compliance.verification.review` | Yes | Yes | Yes |
+| `compliance.policy.manage` | No | No | Yes |
+| `compliance.jurisdiction.manage` | No | No | Yes |
+| `compliance.provider.manage` | No | No | Yes |
+| `feature_flag.manage` | No | No | Yes |
+| `legal.document.edit` | No | Yes | Yes |
+| `legal.document.publish` | No | No | Yes |
+| `site_settings.manage` | No | Yes | Yes |
+
+Policy/jurisdiction/provider/feature and legal publication are deliberately stronger than ordinary admin access. Verification review is bounded by the current policy threshold/assurance and a finite maximum expiry; it cannot invent a permanent approval. Every state-changing operation requires server authorization and an audit reason where applicable.
+
+Compliance decisions are not role bypasses. Moderator/admin access to operational records does not allow restricted-media viewing, purchasing, Live participation, or entitlement unless a separately defined, audited evidence workflow authorizes it. Admin impersonation must use the target user's ordinary compliance decision and cannot silently elevate it.
 # Phase 3 financial permissions
 
 Financial inspection requires `financial.access`; changing the platform commission requires `financial.configure` and remains limited to `super_admin`. Buyer history is limited to the authenticated buyer, and creator balances are limited to the approved creator who owns them.

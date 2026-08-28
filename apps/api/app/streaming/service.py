@@ -6,20 +6,29 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
+from app.compliance.http import compose_legal_acceptance_decision
+from app.compliance.locks import lock_compliance_subject, lock_compliance_subjects
+from app.compliance.policy import resolve_compliance_decision
+from app.compliance.types import (
+    ComplianceDecision,
+    JurisdictionSignals,
+    require_compliance_access,
+)
 from app.core.config import get_settings
 from app.creators.service import (
-    has_current_adult_verification,
     require_public_creator_access,
+    resolve_creator_compliance_eligibility,
 )
 from app.finance import service as finance
 from app.finance.service import currency_code, ppv_commission
 from app.integrations.streaming import LiveKitStreamingProvider, StreamingProviderError
 from app.media.service import approved_creator
+from app.models.compliance import ComplianceFeature
+from app.models.content import ContentEntitlement, EntitlementStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.finance import (
     LedgerAccountKind,
@@ -40,6 +49,8 @@ from app.models.streaming import (
     LiveChatMessage,
     LiveParticipant,
     LiveParticipantRole,
+    LiveProviderControlAction,
+    LiveProviderControlIntent,
     LiveRecording,
     LiveRecordingStatus,
     LiveReport,
@@ -56,10 +67,149 @@ from app.models.streaming import (
     SessionParticipantRole,
 )
 from app.notifications.service import emit_transactional
+from app.streaming.control_outbox import (
+    LiveProviderControlStructuralError,
+    enqueue_live_provider_control_intent,
+)
 
 
 class StreamingError(ValueError):
     pass
+
+
+def livekit_control_provider() -> LiveKitStreamingProvider:
+    """Return the server-side LiveKit control adapter.
+
+    Keeping this boundary separate from token construction lets integration
+    tests replace destructive room controls without weakening production
+    behavior or fabricating browser authority.
+    """
+
+    return LiveKitStreamingProvider()
+
+
+def _authority_expiry(*values: datetime | None) -> datetime | None:
+    normalized = [
+        value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        for value in values
+        if value is not None
+    ]
+    return min(normalized) if normalized else None
+
+
+async def _active_creator_entitlement(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    creator_id: UUID,
+    now: datetime | None = None,
+) -> ContentEntitlement | None:
+    current = now or datetime.now(UTC)
+    return await db.scalar(
+        select(ContentEntitlement)
+        .where(
+            ContentEntitlement.subject_user_id == user_id,
+            ContentEntitlement.creator_id == creator_id,
+            ContentEntitlement.status == EntitlementStatus.active,
+            ContentEntitlement.valid_from <= current,
+            or_(
+                ContentEntitlement.valid_until.is_(None),
+                ContentEntitlement.valid_until > current,
+            ),
+        )
+        .order_by(ContentEntitlement.valid_until.desc().nulls_last())
+    )
+
+
+async def require_live_compliance(
+    db: AsyncSession,
+    user: User,
+    decision: ComplianceDecision | None = None,
+) -> ComplianceDecision:
+    """Apply the same viewer-age authority before every live mutation or read."""
+    # A route-supplied decision carries trusted request-country/legal context,
+    # but it may have been computed before this transaction acquired the
+    # subject authority lock. Preserve any denial, then re-resolve current
+    # evidence under the lock rather than trusting a stale allowance.
+    if decision is not None:
+        require_compliance_access(decision)
+    resolved = await resolve_compliance_decision(
+        db,
+        user=user,
+        feature=ComplianceFeature.live,
+        signals=(
+            JurisdictionSignals(trusted_proxy_country=decision.jurisdiction)
+            if decision is not None and decision.jurisdiction is not None
+            else None
+        ),
+        adult_restricted=True,
+    )
+    resolved, _ = await compose_legal_acceptance_decision(
+        db,
+        user=user,
+        decision=resolved,
+    )
+    return require_compliance_access(resolved)
+
+
+async def require_private_purchase_compliance(db: AsyncSession, user: User) -> ComplianceDecision:
+    return require_compliance_access(
+        await resolve_compliance_decision(
+            db,
+            user=user,
+            feature=ComplianceFeature.purchases,
+            adult_restricted=True,
+        )
+    )
+
+
+async def _private_session_authority_allowed(
+    db: AsyncSession,
+    session: PrivateSession,
+) -> bool:
+    """Re-resolve every authority required to keep a private room connected."""
+
+    creator = await db.get(CreatorProfile, session.creator_id)
+    if (
+        creator is None
+        or creator.status is not CreatorStatus.approved
+        or not creator.is_public
+        or not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed
+    ):
+        return False
+    creator_user = await db.get(User, creator.user_id)
+    if creator_user is None:
+        return False
+    try:
+        await require_live_compliance(db, creator_user)
+    except PermissionError:
+        return False
+
+    participants = (
+        await db.scalars(
+            select(SessionParticipant).where(SessionParticipant.private_session_id == session.id)
+        )
+    ).all()
+    if not participants:
+        return False
+    participant_user_ids = {participant.user_id for participant in participants}
+    participant_user_ids.add(creator.user_id)
+    if await db.scalar(
+        select(UserBlock.id).where(
+            UserBlock.blocker_user_id.in_(participant_user_ids),
+            UserBlock.blocked_user_id.in_(participant_user_ids),
+        )
+    ):
+        return False
+    for participant in participants:
+        user = await db.get(User, participant.user_id)
+        if user is None:
+            return False
+        try:
+            await require_live_compliance(db, user)
+        except PermissionError:
+            return False
+    return True
 
 
 def _opaque(prefix: str) -> str:
@@ -102,8 +252,25 @@ async def start_live(
     title: str,
     access_mode: LiveAccessMode,
     description: str | None = None,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
 ) -> LiveRoom:
-    creator = await approved_creator(db, actor)
+    await lock_compliance_subject(db, actor.id)
+    await require_live_compliance(db, actor, compliance_decision)
+    # Serialize every public/private live creation decision on the creator row.
+    # A FOR UPDATE query over an empty active-set does not protect the
+    # non-existence invariant in PostgreSQL.
+    creator = await db.scalar(
+        select(CreatorProfile)
+        .where(CreatorProfile.user_id == actor.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if creator is None or creator.status is not CreatorStatus.approved or not creator.is_public:
+        raise PermissionError("An approved public creator profile is required")
+    creator_eligibility = await resolve_creator_compliance_eligibility(db, profile=creator)
+    if not creator_eligibility.public_allowed:
+        raise PermissionError(creator_eligibility.reason)
     active = await db.scalar(
         select(LiveRoom)
         .where(
@@ -116,6 +283,23 @@ async def start_live(
     )
     if active:
         raise StreamingError("Creator already has an active public live room")
+    active_private = await db.scalar(
+        select(PrivateSession.id).where(
+            PrivateSession.creator_id == creator.id,
+            PrivateSession.status.in_(
+                [
+                    PrivateSessionStatus.awaiting_payment_authorization,
+                    PrivateSessionStatus.ready,
+                    PrivateSessionStatus.connecting,
+                    PrivateSessionStatus.active,
+                    PrivateSessionStatus.reconnecting,
+                    PrivateSessionStatus.ending,
+                ]
+            ),
+        )
+    )
+    if active_private:
+        raise StreamingError("End the private live before starting a public room")
     room = LiveRoom(
         creator_id=creator.id,
         public_id=_opaque("live"),
@@ -142,6 +326,222 @@ async def start_live(
     return room
 
 
+async def _mark_public_room_ended(
+    db: AsyncSession,
+    room: LiveRoom,
+    *,
+    ended_at: datetime | None = None,
+) -> None:
+    current = ended_at or datetime.now(UTC)
+    room.status, room.ended_at, room.viewer_count = LiveRoomStatus.ended, current, 0
+    participants = (
+        await db.scalars(
+            select(LiveParticipant).where(
+                LiveParticipant.live_room_id == room.id,
+                LiveParticipant.left_at.is_(None),
+            )
+        )
+    ).all()
+    for participant in participants:
+        participant.left_at = current
+
+
+async def _enqueue_public_room_termination(
+    db: AsyncSession,
+    room: LiveRoom,
+    *,
+    reason: str,
+    actor_user_id: UUID | None = None,
+    idempotency_suffix: str | None = None,
+) -> bool:
+    """Persist the deny-first state and its provider control in one transaction."""
+
+    # The first transition atomically records both `ending` and its durable
+    # provider command.  Later authority sweeps may supply a different
+    # diagnostic reason, but must not replace that command or turn a retry
+    # into an idempotency-key collision.
+    if room.status is LiveRoomStatus.ending:
+        return False
+    terminal_reclose = room.status in {LiveRoomStatus.ended, LiveRoomStatus.failed}
+    if not terminal_reclose:
+        room.status = LiveRoomStatus.ending
+    idempotency_key = (
+        f"live-room-reclose:{room.id}:{room.ended_at.isoformat() if room.ended_at else 'terminal'}"
+        if terminal_reclose
+        else f"live-room-close:{room.id}"
+    )
+    if idempotency_suffix:
+        idempotency_key = f"{idempotency_key}:{idempotency_suffix}"
+    intent, created = await enqueue_live_provider_control_intent(
+        db,
+        action=LiveProviderControlAction.delete_room,
+        target_type="live_room",
+        target_id=str(room.id),
+        provider_room_name=room.provider_room_name,
+        reason=reason,
+        actor_user_id=actor_user_id,
+        idempotency_key=idempotency_key,
+    )
+    if created:
+        await record_event(
+            db,
+            "live.termination_enqueued",
+            actor_user_id=actor_user_id,
+            target_type="live_room",
+            target_id=str(room.id),
+            metadata={"reason": reason, "intent_id": str(intent.id)},
+        )
+    return created
+
+
+async def _enqueue_public_participant_eviction(
+    db: AsyncSession,
+    room: LiveRoom,
+    participant: LiveParticipant,
+    *,
+    reason: str,
+    actor_user_id: UUID | None = None,
+) -> bool:
+    """Queue provider removal while the domain authority already denies rejoin."""
+
+    if participant.left_at is not None:
+        return False
+    intent, created = await enqueue_live_provider_control_intent(
+        db,
+        action=LiveProviderControlAction.remove_participant,
+        target_type="live_room_participant",
+        target_id=str(participant.id),
+        provider_room_name=room.provider_room_name,
+        participant_identity=str(participant.user_id),
+        reason=reason,
+        actor_user_id=actor_user_id,
+        idempotency_key=f"live-room-participant-remove:{room.id}:{participant.user_id}",
+    )
+    if created:
+        await record_event(
+            db,
+            "live.participant_eviction_enqueued",
+            actor_user_id=actor_user_id,
+            target_type="live_room",
+            target_id=str(room.id),
+            metadata={
+                "user_id": str(participant.user_id),
+                "reason": reason,
+                "intent_id": str(intent.id),
+            },
+        )
+    return created
+
+
+async def finalize_live_provider_control_success(
+    db: AsyncSession,
+    intent: LiveProviderControlIntent,
+) -> None:
+    """Apply one successful LiveKit command exactly once under the outbox fence."""
+
+    if intent.target_type == "live_room":
+        if intent.action is not LiveProviderControlAction.delete_room:
+            raise LiveProviderControlStructuralError("LIVE_ROOM_ACTION_INVALID")
+        try:
+            room_id = UUID(intent.target_id)
+        except ValueError as exc:
+            raise LiveProviderControlStructuralError("LIVE_ROOM_TARGET_INVALID") from exc
+        room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+        if room is None:
+            raise LiveProviderControlStructuralError("LIVE_ROOM_TARGET_MISSING")
+        if room.provider_room_name != intent.provider_room_name:
+            raise LiveProviderControlStructuralError("LIVE_ROOM_PROVIDER_MISMATCH")
+        if room.status is LiveRoomStatus.ending:
+            await _mark_public_room_ended(db, room)
+            await record_event(
+                db,
+                "live.termination_completed",
+                actor_user_id=intent.actor_user_id,
+                target_type="live_room",
+                target_id=str(room.id),
+                metadata={"reason": intent.reason, "intent_id": str(intent.id)},
+            )
+        return
+
+    if intent.target_type == "live_room_participant":
+        if intent.action is not LiveProviderControlAction.remove_participant:
+            raise LiveProviderControlStructuralError("LIVE_PARTICIPANT_ACTION_INVALID")
+        try:
+            participant_id = UUID(intent.target_id)
+            participant_user_id = UUID(intent.participant_identity or "")
+        except ValueError as exc:
+            raise LiveProviderControlStructuralError("LIVE_PARTICIPANT_TARGET_INVALID") from exc
+        participant = await db.scalar(
+            select(LiveParticipant).where(LiveParticipant.id == participant_id).with_for_update()
+        )
+        if participant is None:
+            raise LiveProviderControlStructuralError("LIVE_PARTICIPANT_TARGET_MISSING")
+        if participant.user_id != participant_user_id:
+            raise LiveProviderControlStructuralError("LIVE_PARTICIPANT_IDENTITY_MISMATCH")
+        room = await db.scalar(
+            select(LiveRoom).where(LiveRoom.id == participant.live_room_id).with_for_update()
+        )
+        if room is None or room.provider_room_name != intent.provider_room_name:
+            raise LiveProviderControlStructuralError("LIVE_PARTICIPANT_PROVIDER_MISMATCH")
+        if participant.left_at is None:
+            participant.left_at = datetime.now(UTC)
+            if participant.role is LiveParticipantRole.viewer:
+                room.viewer_count = max(0, room.viewer_count - 1)
+        return
+
+    if intent.target_type == "live_room_identity":
+        if intent.action is not LiveProviderControlAction.remove_participant:
+            raise LiveProviderControlStructuralError("LIVE_IDENTITY_ACTION_INVALID")
+        try:
+            room_id = UUID(intent.target_id)
+            participant_user_id = UUID(intent.participant_identity or "")
+        except ValueError as exc:
+            raise LiveProviderControlStructuralError("LIVE_IDENTITY_TARGET_INVALID") from exc
+        room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+        if room is None or room.provider_room_name != intent.provider_room_name:
+            raise LiveProviderControlStructuralError("LIVE_IDENTITY_PROVIDER_MISMATCH")
+        participant = await db.scalar(
+            select(LiveParticipant)
+            .where(
+                LiveParticipant.live_room_id == room.id,
+                LiveParticipant.user_id == participant_user_id,
+            )
+            .with_for_update()
+        )
+        if participant is not None and participant.left_at is None:
+            participant.left_at = datetime.now(UTC)
+            if participant.role is LiveParticipantRole.viewer:
+                room.viewer_count = max(0, room.viewer_count - 1)
+        return
+
+    if intent.target_type == "private_session":
+        if intent.action is not LiveProviderControlAction.delete_room:
+            raise LiveProviderControlStructuralError("PRIVATE_SESSION_ACTION_INVALID")
+        try:
+            session_id = UUID(intent.target_id)
+        except ValueError as exc:
+            raise LiveProviderControlStructuralError("PRIVATE_SESSION_TARGET_INVALID") from exc
+        session = await db.scalar(
+            select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+        )
+        if session is None:
+            raise LiveProviderControlStructuralError("PRIVATE_SESSION_TARGET_MISSING")
+        if session.provider_room_name != intent.provider_room_name:
+            raise LiveProviderControlStructuralError("PRIVATE_SESSION_PROVIDER_MISMATCH")
+        if session.status is PrivateSessionStatus.ending:
+            await end_private_session(
+                db,
+                None,
+                session.id,
+                session.end_reason or intent.reason,
+                session.ended_at,
+                provider_room_closed=True,
+            )
+        return
+
+    raise LiveProviderControlStructuralError("LIVE_PROVIDER_CONTROL_TARGET_UNSUPPORTED")
+
+
 async def end_live(db: AsyncSession, actor: User, room_id: UUID) -> LiveRoom:
     room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
     if room is None or room.creator_id != (await approved_creator(db, actor)).id:
@@ -150,10 +550,10 @@ async def end_live(db: AsyncSession, actor: User, room_id: UUID) -> LiveRoom:
         return room
     if room.status is not LiveRoomStatus.live:
         raise StreamingError("Live room cannot be ended from its current state")
-    room.status = LiveRoomStatus.ended
-    room.ended_at = datetime.now(UTC)
-    await record_event(
-        db, "live.ended", actor_user_id=actor.id, target_type="live_room", target_id=str(room.id)
+    # Commit ``ending`` and the outbox command before LiveKit is contacted.
+    # The worker owns provider I/O and finalizes this row only after success.
+    await _enqueue_public_room_termination(
+        db, room, reason="ended_by_creator", actor_user_id=actor.id
     )
     return room
 
@@ -169,35 +569,31 @@ async def terminate_live_for_moderation(
         return room
     if room.status is not LiveRoomStatus.live:
         raise StreamingError("Live room cannot be terminated from its current state")
-    room.status, room.ended_at = LiveRoomStatus.ended, datetime.now(UTC)
-    await record_event(
-        db,
-        "live.moderation_terminated",
-        actor_user_id=actor.id,
-        target_type="live_room",
-        target_id=str(room.id),
-        metadata={"reason": reason},
-    )
+    await _enqueue_public_room_termination(db, room, reason=reason, actor_user_id=actor.id)
     return room
 
 
-async def can_join_live(db: AsyncSession, viewer: User, room: LiveRoom) -> bool:
+async def can_join_live(
+    db: AsyncSession,
+    viewer: User,
+    room: LiveRoom,
+    compliance_decision: ComplianceDecision | None = None,
+) -> bool:
+    try:
+        await require_live_compliance(db, viewer, compliance_decision)
+    except PermissionError:
+        return False
     if room.status is not LiveRoomStatus.live:
         return False
     creator = await db.get(CreatorProfile, room.creator_id)
-    if (
-        creator is None
-        or not await has_current_adult_verification(db, creator.id)
-        or await is_blocked(db, viewer.id, creator.user_id)
-    ):
+    if creator is None or await is_blocked(db, viewer.id, creator.user_id):
         return False
-    if creator.user_id != viewer.id and (
-        creator.status is not CreatorStatus.approved or not creator.is_public
-    ):
+    if not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed:
+        return False
+    if creator.status is not CreatorStatus.approved or not creator.is_public:
         return False
     if room.access_mode is LiveAccessMode.public:
         return True
-    from app.messaging.service import is_active_subscriber
     from app.models.social import Follow
 
     if room.access_mode is LiveAccessMode.followers:
@@ -208,12 +604,32 @@ async def can_join_live(db: AsyncSession, viewer: User, room: LiveRoom) -> bool:
                 )
             )
         )
-    return await is_active_subscriber(db, viewer.id, room.creator_id)
+    return (
+        await _active_creator_entitlement(
+            db,
+            user_id=viewer.id,
+            creator_id=room.creator_id,
+        )
+        is not None
+    )
 
 
-async def join_live(db: AsyncSession, viewer: User, room_id: UUID) -> LiveParticipant:
-    room = await db.get(LiveRoom, room_id)
-    if room is None or not await can_join_live(db, viewer, room):
+async def join_live(
+    db: AsyncSession,
+    viewer: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> LiveParticipant:
+    # Serialize token/join authority with verification revoke/review/expiry.
+    # This lock must precede the room lock everywhere a fresh provider
+    # capability can be created.
+    await lock_compliance_subject(db, viewer.id)
+    decision = await require_live_compliance(db, viewer, compliance_decision)
+    # Standard lock order for public presence is room -> participant. Provider
+    # callbacks, bans, joins, and enforcement all follow this order.
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    if room is None or not await can_join_live(db, viewer, room, decision):
         raise PermissionError("Live room is unavailable")
     if await db.scalar(
         select(LiveBan).where(LiveBan.live_room_id == room.id, LiveBan.user_id == viewer.id)
@@ -242,27 +658,75 @@ async def join_live(db: AsyncSession, viewer: User, room_id: UUID) -> LivePartic
     return participant
 
 
-async def issue_live_token(db: AsyncSession, viewer: User, room_id: UUID) -> tuple[LiveRoom, str]:
-    require_current_self_attestation(viewer)
+async def issue_live_token(
+    db: AsyncSession,
+    viewer: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> tuple[LiveRoom, str]:
+    await lock_compliance_subject(db, viewer.id)
+    decision = await require_live_compliance(db, viewer, compliance_decision)
     room = await db.get(LiveRoom, room_id)
     if room is None:
         raise PermissionError("Live room not found")
-    participant = await join_live(db, viewer, room_id)
+    participant = await join_live(db, viewer, room_id, compliance_decision=decision)
     creator = await db.get(CreatorProfile, room.creator_id)
     can_publish = bool(creator and creator.user_id == viewer.id)
+    if creator is None:
+        raise PermissionError("Live room is unavailable")
+    creator_eligibility = await resolve_creator_compliance_eligibility(db, profile=creator)
+    entitlement_expiry = None
+    if room.access_mode is LiveAccessMode.subscribers and not can_publish:
+        entitlement = await _active_creator_entitlement(
+            db,
+            user_id=viewer.id,
+            creator_id=room.creator_id,
+        )
+        if entitlement is None:
+            raise PermissionError("Live room is unavailable")
+        entitlement_expiry = entitlement.valid_until
     token = await LiveKitStreamingProvider().participant_token(
-        room.provider_room_name, str(viewer.id), can_publish=can_publish, can_subscribe=True
+        room.provider_room_name,
+        str(viewer.id),
+        can_publish=can_publish,
+        can_subscribe=True,
+        authority_expires_at=_authority_expiry(
+            decision.verification_expires_at,
+            # A route decision may carry a shorter trusted request-scoped
+            # authority lifetime. It can never restore access (the decision
+            # above is freshly re-resolved under the subject lock), but it
+            # must still cap the issued bearer capability.
+            compliance_decision.verification_expires_at if compliance_decision else None,
+            (
+                creator_eligibility.verification_expires_at
+                if creator_eligibility.identity_required or creator_eligibility.age_required
+                else None
+            ),
+            entitlement_expiry,
+        ),
     )
     participant.left_at = None
     return room, token
 
 
-async def post_chat(db: AsyncSession, actor: User, room_id: UUID, body: str) -> LiveChatMessage:
+async def post_chat(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    body: str,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> LiveChatMessage:
+    await require_live_compliance(db, actor, compliance_decision)
     participant = await db.scalar(
-        select(LiveParticipant).where(
+        select(LiveParticipant)
+        .join(LiveRoom, LiveRoom.id == LiveParticipant.live_room_id)
+        .where(
             LiveParticipant.live_room_id == room_id,
             LiveParticipant.user_id == actor.id,
             LiveParticipant.left_at.is_(None),
+            LiveRoom.status == LiveRoomStatus.live,
         )
     )
     if participant is None or not body.strip():
@@ -273,6 +737,36 @@ async def post_chat(db: AsyncSession, actor: User, room_id: UUID, body: str) -> 
     db.add(message)
     await db.flush()
     return message
+
+
+async def live_chat_history(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> list[LiveChatMessage]:
+    """Read chat without implicitly joining or mutating viewer counters."""
+    await require_live_compliance(db, actor, compliance_decision)
+    participant = await db.scalar(
+        select(LiveParticipant)
+        .join(LiveRoom, LiveRoom.id == LiveParticipant.live_room_id)
+        .where(
+            LiveParticipant.live_room_id == room_id,
+            LiveParticipant.user_id == actor.id,
+            LiveParticipant.left_at.is_(None),
+            LiveRoom.status == LiveRoomStatus.live,
+        )
+    )
+    if participant is None:
+        raise PermissionError("Live chat requires active room membership")
+    return list(
+        await db.scalars(
+            select(LiveChatMessage)
+            .where(LiveChatMessage.live_room_id == room_id)
+            .order_by(LiveChatMessage.created_at)
+        )
+    )
 
 
 async def ban_live_viewer(
@@ -287,19 +781,29 @@ async def ban_live_viewer(
         .where(LiveBan.live_room_id == room_id, LiveBan.user_id == viewer_id)
         .with_for_update()
     )
+    created = ban is None
     if ban is None:
         ban = LiveBan(
             live_room_id=room_id, user_id=viewer_id, actor_user_id=actor.id, reason=reason
         )
         db.add(ban)
-        participant = await db.scalar(
-            select(LiveParticipant).where(
-                LiveParticipant.live_room_id == room_id, LiveParticipant.user_id == viewer_id
-            )
+    participant = await db.scalar(
+        select(LiveParticipant)
+        .where(
+            LiveParticipant.live_room_id == room_id,
+            LiveParticipant.user_id == viewer_id,
         )
-        if participant and participant.left_at is None:
-            participant.left_at = datetime.now(UTC)
-            room.viewer_count = max(0, room.viewer_count - 1)
+        .with_for_update()
+    )
+    if participant is not None and participant.left_at is None:
+        await _enqueue_public_participant_eviction(
+            db,
+            room,
+            participant,
+            reason="live_viewer_banned",
+            actor_user_id=actor.id,
+        )
+    if created:
         await record_event(
             db,
             "live.viewer_banned",
@@ -309,6 +813,471 @@ async def ban_live_viewer(
             metadata={"viewer_user_id": str(viewer_id), "reason": reason},
         )
     return ban
+
+
+async def _record_livekit_control_failure(
+    db: AsyncSession,
+    *,
+    operation: str,
+    target_type: str,
+    target_id: UUID,
+    user_id: UUID | None = None,
+) -> None:
+    await record_event(
+        db,
+        "live.provider_control_failed",
+        target_type=target_type,
+        target_id=str(target_id),
+        metadata={
+            "operation": operation,
+            "user_id": str(user_id) if user_id else None,
+            "retry_required": True,
+        },
+    )
+
+
+async def _end_public_room_for_authority(
+    db: AsyncSession,
+    room: LiveRoom,
+    *,
+    reason: str,
+) -> bool:
+    if room.status not in {LiveRoomStatus.live, LiveRoomStatus.ending}:
+        return False
+    return await _enqueue_public_room_termination(db, room, reason=reason)
+
+
+async def _evict_public_participant_for_authority(
+    db: AsyncSession,
+    room: LiveRoom,
+    participant: LiveParticipant,
+    *,
+    reason: str,
+) -> bool:
+    if participant.left_at is not None:
+        return False
+    return await _enqueue_public_participant_eviction(db, room, participant, reason=reason)
+
+
+async def evict_user_from_active_live(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    reason: str = "compliance_authority_revoked",
+    force: bool = False,
+) -> int:
+    """Best-effort immediate eviction after an authority lifecycle change.
+
+    A provider failure is audited and leaves the product state active so the
+    scheduled reconciliation can retry. The compliance revocation transaction
+    itself is never rolled back merely because LiveKit is unavailable.
+    """
+
+    user = await db.get(User, user_id)
+    if user is None:
+        return 0
+    if not force:
+        try:
+            await require_live_compliance(db, user)
+        except PermissionError:
+            pass
+        else:
+            return 0
+
+    affected = 0
+    public_targets = (
+        await db.execute(
+            select(LiveParticipant.live_room_id, LiveParticipant.id)
+            .join(LiveRoom, LiveRoom.id == LiveParticipant.live_room_id)
+            .where(
+                LiveParticipant.user_id == user_id,
+                LiveParticipant.left_at.is_(None),
+                LiveRoom.status.in_([LiveRoomStatus.live, LiveRoomStatus.ending]),
+            )
+            .order_by(LiveParticipant.live_room_id, LiveParticipant.id)
+        )
+    ).all()
+    for room_id, participant_id in public_targets:
+        room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+        if room is None or room.status not in {
+            LiveRoomStatus.live,
+            LiveRoomStatus.ending,
+        }:
+            continue
+        participant = await db.scalar(
+            select(LiveParticipant)
+            .where(
+                LiveParticipant.id == participant_id,
+                LiveParticipant.left_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if participant is None:
+            continue
+        creator = await db.get(CreatorProfile, room.creator_id)
+        if creator and creator.user_id == user_id:
+            affected += int(await _end_public_room_for_authority(db, room, reason=reason))
+        else:
+            affected += int(
+                await _evict_public_participant_for_authority(
+                    db,
+                    room,
+                    participant,
+                    reason=reason,
+                )
+            )
+
+    private_sessions = (
+        await db.scalars(
+            select(PrivateSession)
+            .join(
+                SessionParticipant,
+                SessionParticipant.private_session_id == PrivateSession.id,
+            )
+            .where(
+                SessionParticipant.user_id == user_id,
+                PrivateSession.status.in_(
+                    [
+                        PrivateSessionStatus.ready,
+                        PrivateSessionStatus.connecting,
+                        PrivateSessionStatus.active,
+                        PrivateSessionStatus.reconnecting,
+                        PrivateSessionStatus.ending,
+                    ]
+                ),
+            )
+        )
+    ).all()
+    for session in private_sessions:
+        try:
+            ended_session = await end_private_session(db, None, session.id, reason)
+        except StreamingProviderError:
+            await _record_livekit_control_failure(
+                db,
+                operation="delete_room",
+                target_type="private_session",
+                target_id=session.id,
+                user_id=user_id,
+            )
+        else:
+            if ended_session.status is not PrivateSessionStatus.ending:
+                affected += 1
+                await record_event(
+                    db,
+                    "private_session.authority_terminated",
+                    target_type="private_session",
+                    target_id=str(session.id),
+                    metadata={"user_id": str(user_id), "reason": reason},
+                )
+    return affected
+
+
+async def enforce_user_block_on_active_live(
+    db: AsyncSession,
+    first_user_id: UUID,
+    second_user_id: UUID,
+) -> int:
+    """Immediately remove delivery shared by a newly blocked user pair."""
+
+    if first_user_id == second_user_id:
+        return 0
+    affected = 0
+    pair = {first_user_id, second_user_id}
+    public_rows = (
+        await db.execute(
+            select(LiveRoom.id, CreatorProfile.user_id, LiveParticipant.id)
+            .join(CreatorProfile, CreatorProfile.id == LiveRoom.creator_id)
+            .join(LiveParticipant, LiveParticipant.live_room_id == LiveRoom.id)
+            .where(
+                LiveRoom.status.in_([LiveRoomStatus.live, LiveRoomStatus.ending]),
+                CreatorProfile.user_id.in_(pair),
+                LiveParticipant.user_id.in_(pair),
+                LiveParticipant.user_id != CreatorProfile.user_id,
+                LiveParticipant.left_at.is_(None),
+            )
+            .order_by(LiveRoom.id, LiveParticipant.id)
+        )
+    ).all()
+    for room_id, _creator_user_id, participant_id in public_rows:
+        room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+        participant = await db.scalar(
+            select(LiveParticipant)
+            .where(
+                LiveParticipant.id == participant_id,
+                LiveParticipant.left_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if room is None or participant is None:
+            continue
+        affected += int(
+            await _evict_public_participant_for_authority(
+                db,
+                room,
+                participant,
+                reason="user_block_created",
+            )
+        )
+
+    first_participation = select(SessionParticipant.private_session_id).where(
+        SessionParticipant.user_id == first_user_id
+    )
+    second_participation = select(SessionParticipant.private_session_id).where(
+        SessionParticipant.user_id == second_user_id
+    )
+    private_sessions = (
+        await db.scalars(
+            select(PrivateSession).where(
+                PrivateSession.id.in_(first_participation),
+                PrivateSession.id.in_(second_participation),
+                PrivateSession.status.in_(
+                    [
+                        PrivateSessionStatus.ready,
+                        PrivateSessionStatus.connecting,
+                        PrivateSessionStatus.active,
+                        PrivateSessionStatus.reconnecting,
+                        PrivateSessionStatus.ending,
+                    ]
+                ),
+            )
+        )
+    ).all()
+    for session in private_sessions:
+        ended_session = await end_private_session(
+            db,
+            None,
+            session.id,
+            "user_block_created",
+        )
+        if ended_session.status is not PrivateSessionStatus.ending:
+            affected += 1
+    return affected
+
+
+async def terminate_creator_active_live(
+    db: AsyncSession,
+    creator_id: UUID,
+    *,
+    reason: str,
+) -> int:
+    """Best-effort provider enforcement after creator KYC/status revocation."""
+
+    affected = 0
+    room_ids = (
+        await db.scalars(
+            select(LiveRoom.id)
+            .where(
+                LiveRoom.creator_id == creator_id,
+                LiveRoom.status.in_([LiveRoomStatus.live, LiveRoomStatus.ending]),
+            )
+            .order_by(LiveRoom.id)
+        )
+    ).all()
+    for room_id in room_ids:
+        room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+        if room is None:
+            continue
+        affected += int(await _end_public_room_for_authority(db, room, reason=reason))
+    sessions = (
+        await db.scalars(
+            select(PrivateSession).where(
+                PrivateSession.creator_id == creator_id,
+                PrivateSession.status.in_(
+                    [
+                        PrivateSessionStatus.ready,
+                        PrivateSessionStatus.connecting,
+                        PrivateSessionStatus.active,
+                        PrivateSessionStatus.reconnecting,
+                        PrivateSessionStatus.ending,
+                    ]
+                ),
+            )
+        )
+    ).all()
+    for session in sessions:
+        try:
+            ended_session = await end_private_session(db, None, session.id, reason)
+        except StreamingProviderError:
+            await _record_livekit_control_failure(
+                db,
+                operation="delete_room",
+                target_type="private_session",
+                target_id=session.id,
+            )
+        else:
+            if ended_session.status is not PrivateSessionStatus.ending:
+                affected += 1
+                await record_event(
+                    db,
+                    "private_session.authority_terminated",
+                    target_type="private_session",
+                    target_id=str(session.id),
+                    metadata={"reason": reason},
+                )
+    return affected
+
+
+async def reconcile_live_compliance_authority(
+    db: AsyncSession,
+    *,
+    limit: int = 100,
+    commit_each: bool = True,
+) -> int:
+    """Evict clients after authority changes without starving later rows.
+
+    ``limit`` is a keyset page size, not a total-run cap. Each target is locked
+    and committed independently. Signed join callbacks take the same
+    room/session lock first, so a cached token cannot race between provider
+    enforcement and the durable terminal state.
+    """
+
+    affected = 0
+    page_size = max(1, limit)
+
+    async def release_row() -> None:
+        if commit_each:
+            await db.commit()
+
+    last_room_id: UUID | None = None
+    enforceable_room_statuses = [LiveRoomStatus.live, LiveRoomStatus.ending]
+    while True:
+        query = select(LiveRoom.id).where(LiveRoom.status.in_(enforceable_room_statuses))
+        if last_room_id is not None:
+            query = query.where(LiveRoom.id > last_room_id)
+        room_ids = (await db.scalars(query.order_by(LiveRoom.id).limit(page_size))).all()
+        if not room_ids:
+            break
+        last_room_id = room_ids[-1]
+        for room_id in room_ids:
+            room = await db.scalar(
+                select(LiveRoom)
+                .where(
+                    LiveRoom.id == room_id,
+                    LiveRoom.status.in_(enforceable_room_statuses),
+                )
+                .with_for_update()
+            )
+            if room is None:
+                await release_row()
+                continue
+            if room.status is LiveRoomStatus.ending:
+                affected += int(
+                    await _end_public_room_for_authority(
+                        db,
+                        room,
+                        reason="pending_provider_termination",
+                    )
+                )
+                await release_row()
+                continue
+            creator = await db.get(CreatorProfile, room.creator_id)
+            if creator is None:
+                affected += int(
+                    await _end_public_room_for_authority(
+                        db,
+                        room,
+                        reason="creator_unavailable",
+                    )
+                )
+                await release_row()
+                continue
+            creator_user = await db.get(User, creator.user_id)
+            creator_eligibility = await resolve_creator_compliance_eligibility(
+                db,
+                profile=creator,
+            )
+            try:
+                creator_decision = (
+                    await require_live_compliance(db, creator_user) if creator_user else None
+                )
+            except PermissionError:
+                creator_decision = None
+            if (
+                creator.status is not CreatorStatus.approved
+                or not creator.is_public
+                or not creator_eligibility.public_allowed
+                or creator_decision is None
+                or not creator_decision.allowed
+            ):
+                affected += int(
+                    await _end_public_room_for_authority(
+                        db,
+                        room,
+                        reason="creator_authority_unavailable",
+                    )
+                )
+                await release_row()
+                continue
+            participants = (
+                await db.scalars(
+                    select(LiveParticipant)
+                    .where(
+                        LiveParticipant.live_room_id == room.id,
+                        LiveParticipant.left_at.is_(None),
+                        LiveParticipant.user_id != creator.user_id,
+                    )
+                    .with_for_update()
+                )
+            ).all()
+            for participant in participants:
+                viewer = await db.get(User, participant.user_id)
+                allowed = bool(viewer and await can_join_live(db, viewer, room))
+                banned = bool(
+                    await db.scalar(
+                        select(LiveBan.id).where(
+                            LiveBan.live_room_id == room.id,
+                            LiveBan.user_id == participant.user_id,
+                        )
+                    )
+                )
+                if allowed and not banned:
+                    continue
+                affected += int(
+                    await _evict_public_participant_for_authority(
+                        db,
+                        room,
+                        participant,
+                        reason="viewer_authority_unavailable",
+                    )
+                )
+            await release_row()
+
+    active_private_statuses = [
+        PrivateSessionStatus.ready,
+        PrivateSessionStatus.connecting,
+        PrivateSessionStatus.active,
+        PrivateSessionStatus.reconnecting,
+        PrivateSessionStatus.ending,
+    ]
+    last_session_id: UUID | None = None
+    while True:
+        query = select(PrivateSession.id).where(PrivateSession.status.in_(active_private_statuses))
+        if last_session_id is not None:
+            query = query.where(PrivateSession.id > last_session_id)
+        session_ids = (await db.scalars(query.order_by(PrivateSession.id).limit(page_size))).all()
+        if not session_ids:
+            break
+        last_session_id = session_ids[-1]
+        for session_id in session_ids:
+            session = await db.scalar(
+                select(PrivateSession)
+                .where(
+                    PrivateSession.id == session_id,
+                    PrivateSession.status.in_(active_private_statuses),
+                )
+                .with_for_update()
+            )
+            if session is None or (
+                session.status is not PrivateSessionStatus.ending
+                and await _private_session_authority_allowed(db, session)
+            ):
+                await release_row()
+                continue
+            terminal_reason = session.end_reason or "compliance_authority_unavailable"
+            if await _enqueue_private_session_termination(db, session, reason=terminal_reason):
+                affected += 1
+            await release_row()
+    return affected
 
 
 async def report_live(
@@ -424,8 +1393,10 @@ async def request_private_session(
     mode: PrivateSessionMode,
     invited_user_id: UUID | None = None,
     note: str | None = None,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
 ) -> PrivateSessionRequest:
-    require_current_self_attestation(requester)
+    await require_live_compliance(db, requester, compliance_decision)
     try:
         creator = await require_public_creator_access(db, creator_id, requester.id)
     except ValueError as exc:
@@ -441,6 +1412,11 @@ async def request_private_session(
         raise StreamingError("A specific second viewer is required for a 2-to-1 session")
     if mode is PrivateSessionMode.one_to_one and invited_user_id:
         raise StreamingError("A 1-to-1 session cannot include an invited viewer")
+    if invited_user_id:
+        invited = await db.get(User, invited_user_id)
+        if invited is None:
+            raise StreamingError("The invited viewer is unavailable")
+        await require_live_compliance(db, invited)
     rate = (
         settings.one_to_one_price_minor
         if mode is PrivateSessionMode.one_to_one
@@ -512,8 +1488,28 @@ async def participant_private_sessions(db: AsyncSession, actor: User) -> list[Pr
     ).all()
 
 
-async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID) -> PrivateSession:
-    creator = await approved_creator(db, actor)
+async def accept_private_request(
+    db: AsyncSession,
+    actor: User,
+    request_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> PrivateSession:
+    # The creator-side decision is independent from the payer's verification
+    # and must pass before any request/session/payment state is mutated.
+    await lock_compliance_subject(db, actor.id)
+    await require_live_compliance(db, actor, compliance_decision)
+    creator = await db.scalar(
+        select(CreatorProfile)
+        .where(CreatorProfile.user_id == actor.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if creator is None or creator.status is not CreatorStatus.approved or not creator.is_public:
+        raise PermissionError("Private session request not found")
+    creator_eligibility = await resolve_creator_compliance_eligibility(db, profile=creator)
+    if not creator_eligibility.public_allowed:
+        raise PermissionError("Private session request not found")
     request = await db.scalar(
         select(PrivateSessionRequest)
         .where(PrivateSessionRequest.id == request_id)
@@ -548,6 +1544,7 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
                     PrivateSessionStatus.connecting,
                     PrivateSessionStatus.active,
                     PrivateSessionStatus.reconnecting,
+                    PrivateSessionStatus.ending,
                 ]
             ),
         )
@@ -558,7 +1555,9 @@ async def accept_private_request(db: AsyncSession, actor: User, request_id: UUID
     payer = await db.get(User, request.requester_user_id)
     if not payer:
         raise PermissionError("Private session requester is unavailable")
-    require_current_self_attestation(payer)
+    await lock_compliance_subject(db, payer.id)
+    await require_live_compliance(db, payer)
+    await require_private_purchase_compliance(db, payer)
     try:
         await require_public_creator_access(db, creator.id, payer.id)
     except ValueError as exc:
@@ -691,12 +1690,6 @@ async def private_participant_connected(
         PrivateSessionStatus.disputed,
     }:
         return session
-    if session.status not in (
-        PrivateSessionStatus.ready,
-        PrivateSessionStatus.connecting,
-        PrivateSessionStatus.reconnecting,
-    ):
-        raise PermissionError("Private session is unavailable")
     participant = await db.scalar(
         select(SessionParticipant)
         .where(
@@ -707,6 +1700,20 @@ async def private_participant_connected(
     )
     if participant is None:
         raise PermissionError("You are not invited to this private session")
+    last_transition = max(
+        (value for value in (participant.joined_at, participant.left_at) if value),
+        default=None,
+    )
+    if last_transition is not None and now < last_transition:
+        return session
+    if participant.joined_at is not None and participant.left_at is None:
+        return session
+    if session.status not in (
+        PrivateSessionStatus.ready,
+        PrivateSessionStatus.connecting,
+        PrivateSessionStatus.reconnecting,
+    ):
+        raise PermissionError("Private session is unavailable")
     participant.joined_at, participant.left_at = now, None
     required = await db.scalars(
         select(SessionParticipant).where(SessionParticipant.private_session_id == session.id)
@@ -757,7 +1764,18 @@ async def private_participant_disconnected(
     )
     if participant is None:
         raise PermissionError("You are not a private-session participant")
+    last_transition = max(
+        (value for value in (participant.joined_at, participant.left_at) if value),
+        default=None,
+    )
+    if last_transition is not None and now < last_transition:
+        return session
     if participant.left_at:
+        return session
+    # LiveKit emits participant_connection_aborted before media becomes ACTIVE.
+    # Persist/dedupe the signed event, but an actor who never joined has no
+    # billable interval and must not move READY/CONNECTING into reconnecting.
+    if participant.joined_at is None:
         return session
     if session.status is PrivateSessionStatus.active and session.active_started_at:
         session.billable_seconds += max(0, int((now - session.active_started_at).total_seconds()))
@@ -770,12 +1788,32 @@ async def private_participant_disconnected(
 
 
 async def issue_private_token(
-    db: AsyncSession, actor: User, session_id: UUID
+    db: AsyncSession,
+    actor: User,
+    session_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
 ) -> tuple[PrivateSession, str]:
     """Issue a short-lived token only to a named, authorized participant."""
-    require_current_self_attestation(actor)
+    session_probe = await db.get(PrivateSession, session_id)
+    if session_probe is None:
+        raise PermissionError("Private session is unavailable")
+    required_user_ids = (
+        await db.scalars(
+            select(SessionParticipant.user_id).where(
+                SessionParticipant.private_session_id == session_id
+            )
+        )
+    ).all()
+    if actor.id not in required_user_ids:
+        raise PermissionError("You are not invited to this private session")
+    await lock_compliance_subjects(db, required_user_ids)
+    decision = await require_live_compliance(db, actor, compliance_decision)
     session = await db.scalar(
-        select(PrivateSession).where(PrivateSession.id == session_id).with_for_update()
+        select(PrivateSession)
+        .where(PrivateSession.id == session_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if session is None or session.status not in (
         PrivateSessionStatus.ready,
@@ -792,14 +1830,128 @@ async def issue_private_token(
     )
     if participant is None:
         raise PermissionError("You are not invited to this private session")
+    all_participants = (
+        await db.scalars(
+            select(SessionParticipant).where(SessionParticipant.private_session_id == session.id)
+        )
+    ).all()
+    all_participant_ids = {item.user_id for item in all_participants}
+    if await db.scalar(
+        select(UserBlock.id).where(
+            UserBlock.blocker_user_id.in_(all_participant_ids),
+            UserBlock.blocked_user_id.in_(all_participant_ids),
+        )
+    ):
+        raise PermissionError("Private session is unavailable")
+    participant_expiries: list[datetime | None] = []
+    for required_participant in all_participants:
+        required_user = await db.get(User, required_participant.user_id)
+        if required_user is None:
+            raise PermissionError("Private session is unavailable")
+        required_decision = (
+            decision
+            if required_user.id == actor.id
+            else await require_live_compliance(db, required_user)
+        )
+        participant_expiries.append(required_decision.verification_expires_at)
+    creator = await db.get(CreatorProfile, session.creator_id)
+    if creator is None or creator.status is not CreatorStatus.approved or not creator.is_public:
+        raise PermissionError("Private session is unavailable")
+    creator_eligibility = await resolve_creator_compliance_eligibility(db, profile=creator)
+    if not creator_eligibility.public_allowed:
+        raise PermissionError("Private session is unavailable")
     token = await LiveKitStreamingProvider().participant_token(
-        session.provider_room_name, str(actor.id), can_publish=True, can_subscribe=True
+        session.provider_room_name,
+        str(actor.id),
+        can_publish=True,
+        can_subscribe=True,
+        authority_expires_at=_authority_expiry(
+            *participant_expiries,
+            (
+                creator_eligibility.verification_expires_at
+                if creator_eligibility.identity_required or creator_eligibility.age_required
+                else None
+            ),
+        ),
     )
     return session, token
 
 
+async def block_private_session_for_dispute(
+    db: AsyncSession,
+    session: PrivateSession,
+    *,
+    reason: str,
+) -> PrivateSession:
+    """Deny private delivery and enqueue a durable close before dispute settlement."""
+
+    if session.status not in {
+        PrivateSessionStatus.cancelled,
+        PrivateSessionStatus.failed,
+        PrivateSessionStatus.disputed,
+    }:
+        await _enqueue_private_session_termination(db, session, reason=reason)
+    return session
+
+
+async def _enqueue_private_session_termination(
+    db: AsyncSession,
+    session: PrivateSession,
+    *,
+    reason: str,
+    actor_user_id: UUID | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Persist a private-room ending intent before any LiveKit control call."""
+
+    current = now or datetime.now(UTC)
+    pending_intent = session.status is PrivateSessionStatus.ending
+    if pending_intent:
+        intent_at = session.ended_at or current
+        intent_reason = session.end_reason or reason
+        intent_actor_id = session.ended_by_user_id
+    else:
+        intent_at, intent_reason, intent_actor_id = current, reason, actor_user_id
+        if session.status is PrivateSessionStatus.active and session.active_started_at:
+            session.billable_seconds += max(
+                0,
+                int((intent_at - session.active_started_at).total_seconds()),
+            )
+        session.status = PrivateSessionStatus.ending
+        session.ended_at = intent_at
+        session.end_reason = intent_reason
+        session.ended_by_user_id = intent_actor_id
+    intent, created = await enqueue_live_provider_control_intent(
+        db,
+        action=LiveProviderControlAction.delete_room,
+        target_type="private_session",
+        target_id=str(session.id),
+        provider_room_name=session.provider_room_name,
+        reason=intent_reason,
+        actor_user_id=intent_actor_id,
+        idempotency_key=f"private-session-close:{session.id}",
+    )
+    if created:
+        await record_event(
+            db,
+            "private_session.termination_enqueued",
+            actor_user_id=intent_actor_id,
+            target_type="private_session",
+            target_id=str(session.id),
+            metadata={"reason": intent_reason, "intent_id": str(intent.id)},
+        )
+    return created
+
+
 async def end_private_session(
-    db: AsyncSession, actor: User | None, session_id: UUID, reason: str, now: datetime | None = None
+    db: AsyncSession,
+    actor: User | None,
+    session_id: UUID,
+    reason: str,
+    now: datetime | None = None,
+    *,
+    provider_room_closed: bool = False,
+    propagate_provider_failure: bool = False,
 ) -> PrivateSession:
     now = now or datetime.now(UTC)
     session = await db.scalar(
@@ -807,51 +1959,94 @@ async def end_private_session(
     )
     if session is None:
         raise PermissionError("Private session is unavailable")
-    if actor and actor.id not in {
-        session.payer_user_id,
-        (await db.get(CreatorProfile, session.creator_id)).user_id,
-    }:
-        raise PermissionError("Only the creator or payer can end this private session")
-    if session.status in {
+    if actor:
+        creator = await db.get(CreatorProfile, session.creator_id)
+        if creator is None or actor.id not in {
+            session.payer_user_id,
+            creator.user_id,
+        }:
+            raise PermissionError("Only the creator or payer can end this private session")
+    terminal_statuses = {
         PrivateSessionStatus.settled,
         PrivateSessionStatus.cancelled,
         PrivateSessionStatus.failed,
         PrivateSessionStatus.disputed,
-    }:
+    }
+    if session.status in terminal_statuses:
         return session
-    if session.status is PrivateSessionStatus.active and session.active_started_at:
-        session.billable_seconds += max(0, int((now - session.active_started_at).total_seconds()))
+    if reason != "provider_room_finished" and not provider_room_closed:
+        await _enqueue_private_session_termination(
+            db,
+            session,
+            reason=reason,
+            actor_user_id=actor.id if actor else None,
+            now=now,
+        )
+        return session
+    pending_intent = session.status is PrivateSessionStatus.ending
+    intent_at = session.ended_at if pending_intent and session.ended_at else now
+    intent_reason = session.end_reason if pending_intent and session.end_reason else reason
+    intent_actor_id = session.ended_by_user_id if pending_intent else actor.id if actor else None
+    # A signed room-finished event is already authoritative provider control,
+    # so it bypasses the outbox but must still close the final active billing
+    # interval exactly once.
+    if (
+        not pending_intent
+        and session.status is PrivateSessionStatus.active
+        and session.active_started_at is not None
+    ):
+        session.billable_seconds += max(
+            0,
+            int((intent_at - session.active_started_at).total_seconds()),
+        )
     # No required participants reached ACTIVE, so no service was delivered and
     # the configured minimum must not be charged.
     if session.billable_seconds == 0 and session.active_started_at is None:
         session.status, session.ended_at, session.end_reason = (
             PrivateSessionStatus.cancelled,
-            now,
-            reason,
+            intent_at,
+            intent_reason,
         )
-        session.ended_by_user_id = actor.id if actor else None
+        session.ended_by_user_id = intent_actor_id
         return session
-    session.status, session.ended_at, session.end_reason = PrivateSessionStatus.ended, now, reason
-    session.ended_by_user_id = actor.id if actor else None
+    session.status, session.ended_at, session.end_reason = (
+        PrivateSessionStatus.ended,
+        intent_at,
+        intent_reason,
+    )
+    session.ended_by_user_id = intent_actor_id
     return await settle_private_session(db, session)
 
 
-async def expire_reconnect_grace(db: AsyncSession, now: datetime | None = None) -> int:
+async def expire_reconnect_grace(
+    db: AsyncSession,
+    now: datetime | None = None,
+    *,
+    limit: int = 100,
+) -> int:
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(seconds=get_settings().streaming_reconnect_grace_seconds)
-    sessions = (
-        await db.scalars(
+    processed = 0
+    # Process and commit one row at a time. A LiveKit outage must not hold an
+    # entire expiry cohort locked across serial provider timeouts, and SKIP
+    # LOCKED prevents overlapping workers from queueing behind the same row.
+    for _ in range(max(1, limit)):
+        session = await db.scalar(
             select(PrivateSession)
             .where(
                 PrivateSession.status == PrivateSessionStatus.reconnecting,
                 PrivateSession.disconnected_at <= cutoff,
             )
-            .with_for_update()
+            .order_by(PrivateSession.disconnected_at, PrivateSession.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
         )
-    ).all()
-    for session in sessions:
+        if session is None:
+            break
         await end_private_session(db, None, session.id, "reconnect_grace_expired", now)
-    return len(sessions)
+        processed += 1
+        await db.commit()
+    return processed
 
 
 async def reconcile_private_authorizations(db: AsyncSession, limit: int = 100) -> int:
@@ -874,7 +2069,12 @@ async def reconcile_private_authorizations(db: AsyncSession, limit: int = 100) -
     return len(sessions)
 
 
-async def reconcile_private_provider_presence(db: AsyncSession, limit: int = 100) -> int:
+async def reconcile_private_provider_presence(
+    db: AsyncSession,
+    limit: int = 100,
+    *,
+    now: datetime | None = None,
+) -> int:
     """Repair delayed LiveKit lifecycle callbacks from authoritative room membership.
 
     The provider list is intentionally the only repair authority here.  It can
@@ -882,35 +2082,52 @@ async def reconcile_private_provider_presence(db: AsyncSession, limit: int = 100
     and it can freeze billing for a previously connected participant that is
     no longer present.  Browser UI state is never used for either transition.
     """
-    sessions = (
-        await db.scalars(
-            select(PrivateSession)
-            .where(
-                PrivateSession.status.in_(
-                    [
-                        PrivateSessionStatus.ready,
-                        PrivateSessionStatus.connecting,
-                        PrivateSessionStatus.active,
-                        PrivateSessionStatus.reconnecting,
-                    ]
-                )
-            )
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
-    ).all()
     repaired = 0
     provider = LiveKitStreamingProvider()
-    for session in sessions:
+    checked_at = now or datetime.now(UTC)
+    active_statuses = [
+        PrivateSessionStatus.ready,
+        PrivateSessionStatus.connecting,
+        PrivateSessionStatus.active,
+        PrivateSessionStatus.reconnecting,
+    ]
+    # ``last_heartbeat_at`` is the durable provider-presence check cursor. Each
+    # bounded run advances checked rows to the back of the queue, so later
+    # sessions are never starved and overlapping 10-second tasks stay bounded.
+    session_ids = (
+        await db.scalars(
+            select(PrivateSession.id)
+            .where(PrivateSession.status.in_(active_statuses))
+            .order_by(
+                PrivateSession.last_heartbeat_at.asc().nulls_first(),
+                PrivateSession.id,
+            )
+            .limit(max(1, limit))
+        )
+    ).all()
+    for session_id in session_ids:
+        session = await db.scalar(
+            select(PrivateSession)
+            .where(
+                PrivateSession.id == session_id,
+                PrivateSession.status.in_(active_statuses),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        if session is None:
+            await db.commit()
+            continue
         try:
             identities = await provider.list_participant_identities(session.provider_room_name)
         except StreamingProviderError:
+            session.last_heartbeat_at = checked_at
+            await db.commit()
             continue
         participants = (
             await db.scalars(
-                select(SessionParticipant).where(
-                    SessionParticipant.private_session_id == session.id,
-                )
+                select(SessionParticipant)
+                .where(SessionParticipant.private_session_id == session.id)
+                .with_for_update()
             )
         ).all()
         for participant in participants:
@@ -919,14 +2136,16 @@ async def reconcile_private_provider_presence(db: AsyncSession, limit: int = 100
                 continue
             if str(participant.user_id) in identities:
                 if participant.left_at is not None or participant.joined_at is None:
-                    await private_participant_connected(db, actor, session.id)
+                    await private_participant_connected(db, actor, session.id, checked_at)
                     repaired += 1
-            # A participant who has never joined is not a disconnect.  In
+            # A participant who has never joined is not a disconnect. In
             # particular, do not move an authorized READY session into the
             # reconnecting state merely because its room is still empty.
             elif participant.joined_at is not None and participant.left_at is None:
-                await private_participant_disconnected(db, actor, session.id)
+                await private_participant_disconnected(db, actor, session.id, checked_at)
                 repaired += 1
+        session.last_heartbeat_at = checked_at
+        await db.commit()
     return repaired
 
 
@@ -951,7 +2170,9 @@ async def process_private_provider_event(
         external_event_id=event_id,
         event_type=event_type,
         private_session_id=session_id,
-        processed_at=now or datetime.now(UTC),
+        # Keep receipt/processing time distinct from the signed provider
+        # occurrence used for lifecycle and billing calculations.
+        processed_at=datetime.now(UTC),
     )
     db.add(event)
     # The uniqueness record is deliberately flushed before participant state or
@@ -964,7 +2185,122 @@ async def process_private_provider_event(
         return await private_participant_connected(db, actor, session_id, now)
     if event_type == "participant_left":
         return await private_participant_disconnected(db, actor, session_id, now)
+    if event_type == "participant_connection_aborted":
+        return await private_participant_disconnected(db, actor, session_id, now)
     raise StreamingError("Unsupported provider event")
+
+
+async def _process_public_provider_participant_event(
+    db: AsyncSession,
+    *,
+    room: LiveRoom,
+    event_id: str,
+    event_type: str,
+    participant_identity: str | None,
+) -> None:
+    if event_type not in {
+        "participant_joined",
+        "participant_left",
+        "participant_connection_aborted",
+    }:
+        return
+    if not participant_identity:
+        raise StreamingError("LiveKit participant event is incomplete")
+    try:
+        user_id = UUID(participant_identity)
+    except ValueError as exc:
+        raise StreamingError("LiveKit participant identity is invalid") from exc
+    participant = await db.scalar(
+        select(LiveParticipant)
+        .where(
+            LiveParticipant.live_room_id == room.id,
+            LiveParticipant.user_id == user_id,
+        )
+        .with_for_update()
+    )
+    if event_type != "participant_joined":
+        if participant is not None and participant.left_at is None:
+            participant.left_at = datetime.now(UTC)
+            if participant.role is LiveParticipantRole.viewer:
+                room.viewer_count = max(0, room.viewer_count - 1)
+        return
+
+    # DeleteRoom does not invalidate a cached self-hosted LiveKit token. If a
+    # client recreates an ended room, delete it again on the signed join event.
+    if room.status is not LiveRoomStatus.live:
+        await _enqueue_public_room_termination(
+            db,
+            room,
+            reason="cached_token_rejoin_after_termination",
+            idempotency_suffix=event_id,
+        )
+        return
+
+    user = await db.get(User, user_id)
+    banned = bool(
+        await db.scalar(
+            select(LiveBan.id).where(
+                LiveBan.live_room_id == room.id,
+                LiveBan.user_id == user_id,
+            )
+        )
+    )
+    allowed = bool(
+        participant is not None
+        and user is not None
+        and not banned
+        and await can_join_live(db, user, room)
+    )
+    if not allowed:
+        # A previously evicted participant can reconnect with a cached
+        # self-hosted token. Use the signed provider-event id as the durable
+        # command generation; a completed earlier eviction must never suppress
+        # a later provider-side rejoin removal.
+        await enqueue_live_provider_control_intent(
+            db,
+            action=LiveProviderControlAction.remove_participant,
+            target_type="live_room_identity",
+            target_id=str(room.id),
+            provider_room_name=room.provider_room_name,
+            participant_identity=participant_identity,
+            reason="cached_token_join_denied",
+            idempotency_key=f"live-room-identity-remove:{room.id}:{event_id}",
+        )
+        return
+    if participant.left_at is not None:
+        participant.left_at = None
+        participant.joined_at = datetime.now(UTC)
+        if participant.role is LiveParticipantRole.viewer:
+            room.viewer_count += 1
+            room.peak_viewer_count = max(room.peak_viewer_count, room.viewer_count)
+
+
+def _private_provider_event_time(
+    event: dict,
+    *,
+    session: PrivateSession,
+    received_at: datetime,
+) -> datetime:
+    """Normalize LiveKit's signed protobuf ``createdAt`` Unix-second string."""
+
+    raw = event.get("createdAt")
+    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+        raise StreamingError("LiveKit participant event timestamp is invalid")
+    if isinstance(raw, str) and (not raw.isascii() or not raw.isdecimal()):
+        raise StreamingError("LiveKit participant event timestamp is invalid")
+    try:
+        seconds = int(raw)
+        if seconds <= 0:
+            raise ValueError
+        occurred_at = datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise StreamingError("LiveKit participant event timestamp is invalid") from exc
+    floor = session.ready_at or session.accepted_at
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=UTC)
+    # Never bill before authorization or into the future because of provider
+    # clock skew. Signed occurrence remains authoritative inside those bounds.
+    return max(floor, min(occurred_at, received_at))
 
 
 async def process_livekit_webhook(db: AsyncSession, event: dict) -> PrivateSession | None:
@@ -974,13 +2310,33 @@ async def process_livekit_webhook(db: AsyncSession, event: dict) -> PrivateSessi
     event_type = event.get("event")
     if not room_name or not event_type:
         raise StreamingError("LiveKit event is incomplete")
+    participant_user_id: UUID | None = None
+    if event_type in {
+        "participant_joined",
+        "participant_left",
+        "participant_connection_aborted",
+    }:
+        if not participant_identity:
+            raise StreamingError("LiveKit participant event is incomplete")
+        try:
+            participant_user_id = UUID(participant_identity)
+        except ValueError as exc:
+            raise StreamingError("LiveKit participant identity is invalid") from exc
+        # Signed cached-token joins are provider-capability mutations too.
+        # Acquire the authority lock before any room/session row lock so a
+        # concurrent revocation cannot miss or race the rejoin.
+        await lock_compliance_subject(db, participant_user_id)
     session = await db.scalar(
-        select(PrivateSession).where(PrivateSession.provider_room_name == room_name)
+        select(PrivateSession)
+        .where(PrivateSession.provider_room_name == room_name)
+        .with_for_update()
     )
     if session is None:
         # Public room lifecycle has no billable participant transitions. Record
         # it for audit/replay safety without allowing a provider event to reopen it.
-        room = await db.scalar(select(LiveRoom).where(LiveRoom.provider_room_name == room_name))
+        room = await db.scalar(
+            select(LiveRoom).where(LiveRoom.provider_room_name == room_name).with_for_update()
+        )
         if room is None:
             raise PermissionError("LiveKit room is unknown")
         existing = await db.scalar(
@@ -1001,10 +2357,26 @@ async def process_livekit_webhook(db: AsyncSession, event: dict) -> PrivateSessi
             )
         )
         await db.flush()
-        if event_type == "room_finished" and room.status is LiveRoomStatus.live:
-            room.status, room.ended_at = LiveRoomStatus.ended, datetime.now(UTC)
+        if event_type == "room_finished" and room.status in {
+            LiveRoomStatus.live,
+            LiveRoomStatus.ending,
+        }:
+            await _mark_public_room_ended(db, room)
+        await _process_public_provider_participant_event(
+            db,
+            room=room,
+            event_id=event["id"],
+            event_type=event_type,
+            participant_identity=participant_identity,
+        )
         return None
     if event_type == "room_finished":
+        received_at = datetime.now(UTC)
+        occurred_at = _private_provider_event_time(
+            event,
+            session=session,
+            received_at=received_at,
+        )
         existing = await db.scalar(
             select(ProviderLiveEvent).where(
                 ProviderLiveEvent.provider == "livekit",
@@ -1019,29 +2391,77 @@ async def process_livekit_webhook(db: AsyncSession, event: dict) -> PrivateSessi
                 external_event_id=event["id"],
                 event_type=event_type,
                 private_session_id=session.id,
-                processed_at=datetime.now(UTC),
+                processed_at=received_at,
             )
         )
         await db.flush()
-        return await end_private_session(db, None, session.id, "provider_room_finished")
+        return await end_private_session(
+            db,
+            None,
+            session.id,
+            "provider_room_finished",
+            occurred_at,
+        )
     if event_type not in {
         "participant_joined",
         "participant_left",
         "participant_connection_aborted",
     }:
         return None
-    if not participant_identity:
-        raise StreamingError("LiveKit participant event is incomplete")
-    try:
-        user_id = UUID(participant_identity)
-    except ValueError as exc:
-        raise StreamingError("LiveKit participant identity is invalid") from exc
+    assert participant_user_id is not None
+    user_id = participant_user_id
+    occurred_at = _private_provider_event_time(
+        event,
+        session=session,
+        received_at=datetime.now(UTC),
+    )
+    if event_type == "participant_joined" and session.status in {
+        PrivateSessionStatus.ending,
+        PrivateSessionStatus.ended,
+        PrivateSessionStatus.settled,
+        PrivateSessionStatus.cancelled,
+        PrivateSessionStatus.failed,
+        PrivateSessionStatus.disputed,
+    }:
+        await enqueue_live_provider_control_intent(
+            db,
+            action=LiveProviderControlAction.delete_room,
+            target_type="private_session",
+            target_id=str(session.id),
+            provider_room_name=session.provider_room_name,
+            reason=session.end_reason or "cached_token_rejoin_after_termination",
+            actor_user_id=session.ended_by_user_id,
+            idempotency_key=f"private-session-reclose:{session.id}:{event['id']}",
+        )
+    elif event_type == "participant_joined":
+        participant = await db.scalar(
+            select(SessionParticipant.id).where(
+                SessionParticipant.private_session_id == session.id,
+                SessionParticipant.user_id == user_id,
+            )
+        )
+        if participant is None or not await _private_session_authority_allowed(
+            db,
+            session,
+        ):
+            # A cached token must not reopen private delivery between an
+            # authority change and the periodic sweep. Delete first; if the
+            # provider call fails, propagate so the signed event is not
+            # acknowledged/deduplicated and LiveKit can retry it.
+            await end_private_session(
+                db,
+                None,
+                session.id,
+                "compliance_authority_unavailable",
+                propagate_provider_failure=True,
+            )
     return await process_private_provider_event(
         db,
         event_id=event["id"],
-        event_type="participant_left" if event_type != "participant_joined" else event_type,
+        event_type=event_type,
         session_id=session.id,
         user_id=user_id,
+        now=occurred_at,
     )
 
 
@@ -1181,6 +2601,20 @@ async def reverse_private_session_payment(
     )
     if session is None:
         return None
+
+    if session.status in {
+        PrivateSessionStatus.awaiting_payment_authorization,
+        PrivateSessionStatus.ready,
+        PrivateSessionStatus.connecting,
+        PrivateSessionStatus.active,
+        PrivateSessionStatus.reconnecting,
+        PrivateSessionStatus.ending,
+        PrivateSessionStatus.ended,
+    }:
+        # A refund/chargeback denies future API/token access immediately and
+        # commits a room-close command with the financial transition. LiveKit
+        # is invoked only by the post-commit outbox processor.
+        await _enqueue_private_session_termination(db, session, reason=reason)
 
     settlement = await db.scalar(
         select(PrivateSessionSettlement)

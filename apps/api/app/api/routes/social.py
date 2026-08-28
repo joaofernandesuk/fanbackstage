@@ -6,9 +6,12 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
-from app.content.access import can_access_content
+from app.compliance.http import resolve_request_compliance_decision
+from app.compliance.types import ComplianceDecision
+from app.content.access import can_access_content, content_requires_adult_access
 from app.core.rate_limit import enforce_social_rate_limit
-from app.models.content import ContentItem
+from app.models.compliance import ComplianceFeature
+from app.models.content import ContentItem, DerivativeType, MediaAsset, MediaDerivative, MediaStatus
 from app.models.creator import CreatorProfile
 from app.models.social import (
     FeedPost,
@@ -35,8 +38,23 @@ from app.stories import service as story_service
 router = APIRouter(prefix="/feed", tags=["feed"])
 
 
-async def post_response(db: Db, post: FeedPost, user) -> FeedPostResponse:
-    allowed = await service.can_access_post(db, post, user)
+async def post_response(
+    db: Db,
+    post: FeedPost,
+    user,
+    compliance_decision: ComplianceDecision | None = None,
+    platform_decision: ComplianceDecision | None = None,
+) -> FeedPostResponse:
+    requires_adult = await service.post_requires_adult_access(db, post)
+    adult_granted = not requires_adult or bool(
+        compliance_decision and compliance_decision.age_access_allowed
+    )
+    decision = compliance_decision if requires_adult else platform_decision
+    allowed = bool(
+        decision
+        and decision.allowed
+        and await service.can_access_post(db, post, user, compliance_decision)
+    )
     creator = await db.get(CreatorProfile, post.creator_id)
     reactions = (
         await db.scalar(
@@ -73,15 +91,51 @@ async def post_response(db: Db, post: FeedPost, user) -> FeedPostResponse:
                 .order_by(FeedPostMedia.position)
             )
         ).all()
-        media = [{"asset_id": str(x.media_asset_id), "alt_text": x.alt_text} for x in entries]
+        for entry in entries:
+            asset = await db.get(MediaAsset, entry.media_asset_id)
+            if not asset:
+                continue
+            derivative_type = (
+                DerivativeType.playback
+                if asset.media_type.value == "video"
+                else DerivativeType.display
+            )
+            derivative = await db.scalar(
+                select(MediaDerivative).where(
+                    MediaDerivative.media_asset_id == asset.id,
+                    MediaDerivative.derivative_type == derivative_type,
+                    MediaDerivative.status == MediaStatus.ready,
+                )
+            )
+            if derivative:
+                media.append(
+                    {
+                        "derivative_id": str(derivative.id),
+                        "delivery_path": f"/media/derivatives/{derivative.id}",
+                        "media_type": asset.media_type.value,
+                        "alt_text": entry.alt_text,
+                    }
+                )
     reference = None
     if post.source_content_id:
         content = await db.get(ContentItem, post.source_content_id)
         if content:
-            content_allowed = await can_access_content(db, content, user)
+            content_requires_adult = await content_requires_adult_access(db, content)
+            content_age_allowed = not content_requires_adult or bool(
+                compliance_decision and compliance_decision.age_access_allowed
+            )
+            content_decision = compliance_decision if content_requires_adult else platform_decision
+            content_compliance_allowed = bool(content_decision and content_decision.allowed)
+            content_allowed = (
+                await can_access_content(db, content, user)
+                and content_age_allowed
+                and content_compliance_allowed
+            )
             reference = {
                 "id": str(content.id),
-                "title": content.title,
+                "title": (
+                    content.title if content_compliance_allowed else "Age-restricted content"
+                ),
                 "content_type": content.content_type.value,
                 "access_policy": content.access_policy.value,
                 "locked": not content_allowed,
@@ -111,12 +165,72 @@ async def post_response(db: Db, post: FeedPost, user) -> FeedPostResponse:
         viewer_reaction=viewer_reaction,
         media=media,
         content_reference=reference,
+        adult_access_required=requires_adult,
+        adult_access_granted=adult_granted,
+        compliance_allowed=bool(decision and decision.allowed),
+        compliance_code=decision.code if decision else "POLICY_UNAVAILABLE",
+        compliance_action=(decision.action if decision and not decision.allowed else None),
+        compliance_reason=decision.reason if decision else None,
+    )
+
+
+async def request_feed_decision(db: Db, request: Request, user) -> ComplianceDecision:
+    return await resolve_request_compliance_decision(
+        db,
+        request,
+        user=user,
+        feature=ComplianceFeature.adult_media,
+        adult_restricted=True,
+    )
+
+
+async def request_platform_decision(db: Db, request: Request, user) -> ComplianceDecision:
+    return await resolve_request_compliance_decision(
+        db,
+        request,
+        user=user,
+        feature=ComplianceFeature.platform_access,
+        adult_restricted=False,
+    )
+
+
+def require_feed_authoring(*decisions: ComplianceDecision) -> None:
+    for decision in decisions:
+        if not decision.allowed:
+            raise HTTPException(
+                403,
+                {
+                    "message": decision.reason,
+                    "code": decision.code,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                },
+            )
+
+
+def feed_page_response(
+    items: list[FeedPostResponse],
+    next_cursor: str | None,
+    platform_decision: ComplianceDecision,
+) -> FeedPage:
+    allowed = platform_decision.allowed
+    return FeedPage(
+        items=items if allowed else [],
+        next_cursor=next_cursor if allowed else None,
+        compliance_allowed=allowed,
+        compliance_code=platform_decision.code,
+        compliance_action=platform_decision.action if not allowed else None,
+        compliance_reason=platform_decision.reason,
     )
 
 
 @router.post("/creator/{creator_id}/follow")
 async def follow(creator_id: UUID, request: Request, identity: CurrentIdentity, db: Db):
     try:
+        require_feed_authoring(
+            await request_platform_decision(db, request, identity[0]),
+            await request_feed_decision(db, request, identity[0]),
+        )
         await enforce_social_rate_limit(request, str(identity[0].id), "follow")
         created = await service.follow(db, identity[0], creator_id)
         await db.commit()
@@ -151,34 +265,49 @@ async def follow_state(creator_id: UUID, identity: OptionalIdentity, db: Db):
 @router.post("/posts", response_model=FeedPostResponse)
 async def create(payload: FeedPostInput, request: Request, identity: CurrentIdentity, db: Db):
     try:
+        adult_decision = await request_feed_decision(db, request, identity[0])
+        platform_decision = await request_platform_decision(db, request, identity[0])
+        require_feed_authoring(platform_decision, adult_decision)
         await enforce_social_rate_limit(request, str(identity[0].id), "post")
         post = await service.create_post(db, identity[0], payload.model_dump())
         await db.commit()
-        return await post_response(db, post, identity[0])
+        return await post_response(db, post, identity[0], adult_decision, platform_decision)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
 @router.patch("/posts/{post_id}", response_model=FeedPostResponse)
-async def update(post_id: UUID, payload: FeedPostUpdate, identity: CurrentIdentity, db: Db):
+async def update(
+    post_id: UUID,
+    payload: FeedPostUpdate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+):
     try:
+        adult_decision = await request_feed_decision(db, request, identity[0])
+        platform_decision = await request_platform_decision(db, request, identity[0])
+        require_feed_authoring(platform_decision, adult_decision)
         post = await service.own_post(db, identity[0], post_id)
         for key, value in payload.model_dump(exclude_unset=True).items():
             setattr(post, key, value)
         await db.commit()
-        return await post_response(db, post, identity[0])
+        return await post_response(db, post, identity[0], adult_decision, platform_decision)
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(403, str(exc)) from exc
 
 
 @router.post("/posts/{post_id}/publish", response_model=FeedPostResponse)
-async def publish(post_id: UUID, identity: CurrentIdentity, db: Db):
+async def publish(post_id: UUID, request: Request, identity: CurrentIdentity, db: Db):
     try:
+        adult_decision = await request_feed_decision(db, request, identity[0])
+        platform_decision = await request_platform_decision(db, request, identity[0])
+        require_feed_authoring(platform_decision, adult_decision)
         post = await service.publish(db, identity[0], post_id)
         await db.commit()
-        return await post_response(db, post, identity[0])
+        return await post_response(db, post, identity[0], adult_decision, platform_decision)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
@@ -220,20 +349,36 @@ async def unpin(post_id: UUID, identity: CurrentIdentity, db: Db):
 
 
 @router.get("/following", response_model=FeedPage)
-async def following(identity: CurrentIdentity, db: Db, cursor: str | None = None, limit: int = 20):
+async def following(
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = 20,
+):
     try:
         rows, next_cursor = await service.feed_posts(
             db, identity[0], "following", None, cursor, min(max(limit, 1), 50)
         )
-        return FeedPage(
-            items=[await post_response(db, x, identity[0]) for x in rows], next_cursor=next_cursor
+        decision = await request_feed_decision(db, request, identity[0])
+        platform_decision = await request_platform_decision(db, request, identity[0])
+        return feed_page_response(
+            [await post_response(db, x, identity[0], decision, platform_decision) for x in rows],
+            next_cursor,
+            platform_decision,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/mine", response_model=FeedPage)
-async def mine(identity: CurrentIdentity, db: Db, cursor: str | None = None, limit: int = 20):
+async def mine(
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = 20,
+):
     creator = await service.approved_creator(db, identity[0])
     rows = (
         await db.scalars(
@@ -243,18 +388,34 @@ async def mine(identity: CurrentIdentity, db: Db, cursor: str | None = None, lim
             .limit(min(max(limit, 1), 50))
         )
     ).all()
-    return FeedPage(items=[await post_response(db, x, identity[0]) for x in rows], next_cursor=None)
+    decision = await request_feed_decision(db, request, identity[0])
+    platform_decision = await request_platform_decision(db, request, identity[0])
+    return feed_page_response(
+        [await post_response(db, x, identity[0], decision, platform_decision) for x in rows],
+        None,
+        platform_decision,
+    )
 
 
 @router.get("/discover", response_model=FeedPage)
-async def discover(identity: OptionalIdentity, db: Db, cursor: str | None = None, limit: int = 20):
+async def discover(
+    request: Request,
+    identity: OptionalIdentity,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = 20,
+):
     try:
         rows, next_cursor = await service.feed_posts(
             db, identity[0] if identity else None, "discover", None, cursor, min(max(limit, 1), 50)
         )
-        return FeedPage(
-            items=[await post_response(db, x, identity[0] if identity else None) for x in rows],
-            next_cursor=next_cursor,
+        user = identity[0] if identity else None
+        decision = await request_feed_decision(db, request, user)
+        platform_decision = await request_platform_decision(db, request, user)
+        return feed_page_response(
+            [await post_response(db, x, user, decision, platform_decision) for x in rows],
+            next_cursor,
+            platform_decision,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -262,7 +423,12 @@ async def discover(identity: OptionalIdentity, db: Db, cursor: str | None = None
 
 @router.get("/creator/{creator_id}", response_model=FeedPage)
 async def profile_feed(
-    creator_id: UUID, identity: OptionalIdentity, db: Db, cursor: str | None = None, limit: int = 20
+    creator_id: UUID,
+    request: Request,
+    identity: OptionalIdentity,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = 20,
 ):
     try:
         rows, next_cursor = await service.feed_posts(
@@ -273,16 +439,20 @@ async def profile_feed(
             cursor,
             min(max(limit, 1), 50),
         )
-        return FeedPage(
-            items=[await post_response(db, x, identity[0] if identity else None) for x in rows],
-            next_cursor=next_cursor,
+        user = identity[0] if identity else None
+        adult_decision = await request_feed_decision(db, request, user)
+        platform_decision = await request_platform_decision(db, request, user)
+        return feed_page_response(
+            [await post_response(db, x, user, adult_decision, platform_decision) for x in rows],
+            next_cursor,
+            platform_decision,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/posts/{post_id}", response_model=FeedPostResponse)
-async def detail(post_id: UUID, identity: OptionalIdentity, db: Db):
+async def detail(post_id: UUID, request: Request, identity: OptionalIdentity, db: Db):
     post = await db.get(FeedPost, post_id)
     if not post or post.status is not FeedPostStatus.published:
         raise HTTPException(404, "Post not found")
@@ -290,7 +460,25 @@ async def detail(post_id: UUID, identity: OptionalIdentity, db: Db):
         await service.public_creator(db, post.creator_id)
     except PermissionError as exc:
         raise HTTPException(404, "Post not found") from exc
-    return await post_response(db, post, identity[0] if identity else None)
+    user = identity[0] if identity else None
+    platform_decision = await request_platform_decision(db, request, user)
+    if not platform_decision.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": platform_decision.reason,
+                "code": platform_decision.code,
+                "action": platform_decision.action,
+                "reason": platform_decision.reason,
+            },
+        )
+    return await post_response(
+        db,
+        post,
+        user,
+        await request_feed_decision(db, request, user),
+        platform_decision,
+    )
 
 
 @router.put("/posts/{post_id}/reaction")
@@ -299,9 +487,17 @@ async def react(
 ):
     await enforce_social_rate_limit(request, str(identity[0].id), "reaction")
     post = await db.get(FeedPost, post_id)
+    adult_decision = await request_feed_decision(db, request, identity[0])
+    platform_decision = await request_platform_decision(db, request, identity[0])
+    decision = (
+        adult_decision
+        if post and await service.post_requires_adult_access(db, post)
+        else platform_decision
+    )
     if (
         not post
-        or not await service.can_access_post(db, post, identity[0])
+        or not decision.allowed
+        or not await service.can_access_post(db, post, identity[0], adult_decision)
         or not post.reactions_enabled
     ):
         raise HTTPException(403, "Reactions are unavailable")
@@ -342,10 +538,18 @@ async def comment(
 ):
     await enforce_social_rate_limit(request, str(identity[0].id), "comment")
     post = await db.get(FeedPost, post_id)
+    adult_decision = await request_feed_decision(db, request, identity[0])
+    platform_decision = await request_platform_decision(db, request, identity[0])
+    decision = (
+        adult_decision
+        if post and await service.post_requires_adult_access(db, post)
+        else platform_decision
+    )
     if (
         not post
         or not post.comments_enabled
-        or not await service.can_access_post(db, post, identity[0])
+        or not decision.allowed
+        or not await service.can_access_post(db, post, identity[0], adult_decision)
     ):
         raise HTTPException(403, "Comments are unavailable")
     if payload.parent_id:
@@ -365,10 +569,21 @@ async def comment(
 
 
 @router.get("/posts/{post_id}/comments")
-async def comments(post_id: UUID, identity: OptionalIdentity, db: Db):
+async def comments(post_id: UUID, request: Request, identity: OptionalIdentity, db: Db):
     post = await db.get(FeedPost, post_id)
     user = identity[0] if identity else None
-    if not post or not await service.can_access_post(db, post, user):
+    adult_decision = await request_feed_decision(db, request, user)
+    platform_decision = await request_platform_decision(db, request, user)
+    decision = (
+        adult_decision
+        if post and await service.post_requires_adult_access(db, post)
+        else platform_decision
+    )
+    if (
+        not post
+        or not decision.allowed
+        or not await service.can_access_post(db, post, user, adult_decision)
+    ):
         raise HTTPException(404, "Post not found")
     rows = (
         await db.scalars(

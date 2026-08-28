@@ -28,6 +28,10 @@ limited to the known demo manifest and never backfills arbitrary users. Demo med
 for anonymous browsing is explicitly moderator-classified `safe_public`; the fail-closed
 model default remains `adult_restricted`.
 
+The compliance seed is explicitly marked demo and is not legal policy. It creates a reusable reviewed template plus three fictional operational scenarios: PT is the local baseline using the deterministic `test` age provider; GB requires stronger `medium` assurance with a short re-verification interval; US disables purchases and Marketplace. These scenarios test inheritance, overrides, expiry, stronger-policy decisions, and feature denial only. Production readiness rejects every active demo template, jurisdiction, feature revision, and legal version.
+
+To exercise the provider browser flow manually, run the API in development with both `FANBACKSTAGE_AGE_ASSURANCE_PROVIDER=test` and `FANBACKSTAGE_AGE_TEST_PROVIDER_ENABLED=true`. The switch is deliberately off in the ordinary `.env.example`; staging and production reject it. The E2E harness enables it only inside its isolated test process.
+
 | Persona | Email | What to test |
 | --- | --- | --- |
 | Admin | admin@demo.fanbackstage.local | administration, moderation, and Featuring configuration |
@@ -47,6 +51,18 @@ model default remains `adult_restricted`.
 
 `fan01` through `fan16` also exist at `fanNN@demo.fanbackstage.local` for denser social, subscription, PPV, and marketplace examples.
 
+Compliance persona details:
+
+| Persona | Country/state | Recommended test |
+| --- | --- | --- |
+| `newfan` | PT, no provider record; current legacy self-attestation | provider-start/account-link flow while preserving the distinction from provider verification |
+| `subscriber` | PT, current medium provider result | verified fan remains independently subject to subscription/PPV entitlement |
+| `socialfan` | PT, expired provider result | expiry/re-verification UI and fail-closed restricted surfaces |
+| `marketing-out` | PT, failed provider result | failed/retry status without changing marketing preference truth |
+| `reya-restricted` | PT, latest creator verification pending | fan-age status remains separate from suspended creator KYC/public eligibility |
+
+Every demo account retains the local self-attested compatibility baseline. Under the PT demo rules the resolver may accept that configured `self_attested` level; it must never be described as provider-backed verification. Provider history, expiry, revocation, and any stronger current policy are still evaluated independently. Use the admin Policy Simulator to test GB stronger-assurance and US feature-denial outcomes without treating those fictional policies as law.
+
 ## Deterministic dataset
 
 The validator expects exactly:
@@ -60,6 +76,8 @@ The validator expects exactly:
 - 24 active authoritative Stories across eight creators, plus at least four expired historical Stories.
 
 It also requires a dense follow/reaction/comment graph, at least three conversations with message history, settled subscriptions and PPV purchases, three marketplace orders in varied states, balanced ledger transactions, one signup referral attribution and reward allocation, transactional notifications, an active paid Featuring example, and safely ended live-room history. Financial entitlements, immutable ledger entries, group allocation snapshots, referral allocations, and Featuring settlement are produced through their owning domain services and signed development payment webhooks; the seed never inserts them directly.
+
+The validator also requires enabled country registry rows, the reviewed demo compliance template and PT/GB/US revisions, the four age-verification persona states above, published demo Terms/Privacy/Age Policy with exact acceptance rows for all 40 accounts, draft review-required placeholders for the remaining legal-document types, one current demo site-settings/banner version, and one private Zara co-performer example with current identity, age, linked release, and content association. No private performer identity or provider evidence is exposed through public content payloads.
 
 The `marketing-in` and `marketing-out` personas have real notification-domain marketing preference rows. `marketing-in` has explicit email consent and no suppression; `marketing-out` has marketing email disabled with no consent while in-app notifications remain enabled. The seed reaches both states through the audited notification preference service and skips an already-converged state, so a second seed pass neither moves the consent timestamp nor adds another audit event.
 

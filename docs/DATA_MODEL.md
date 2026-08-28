@@ -20,7 +20,7 @@ communication controls, never alternative identity stores.
 | Promotion | Promotion, PromotionTarget, PromotionEligibility, Redemption |
 | Commerce | Order, OrderItem, MarketplaceProduct, Shipment |
 | Messaging | Conversation, Message, MessageAttachment, PaidMessageOffer |
-| Streaming | LiveRoom, LiveSession, PrivateSession, Participant, TipMenuItem |
+| Streaming | LiveRoom, LiveSession, PrivateSession, Participant, TipMenuItem, LiveProviderControlIntent |
 | Groups | Group, Membership, Contract, ContractVersion, PermissionGrant |
 | Finance | LedgerAccount, LedgerEntry, Transaction, Payout, Refund, Dispute |
 | Featuring | PlacementSurface, Slot, Booking, PromotionPurchase |
@@ -28,6 +28,9 @@ communication controls, never alternative identity stores.
 | Moderation | Report, ModerationCase, ModerationAction, Appeal |
 | Audit | AuditEvent |
 | Social | Follow, CreatorFeedSettings, FeedPost, FeedPostMedia, PostReaction, PostComment, PostMention, Hashtag, SocialReport |
+| Compliance | CountryRegistry, CompliancePolicyTemplate/Revision, JurisdictionPolicyRevision, FeatureFlagRevision, AnonymousComplianceSession, AgeVerificationRecord, AgeProviderCallbackEvent, AgeProviderProbe |
+| Performer | PerformerIdentity, PerformerIdentityVerification, PerformerAgeVerification, VerifiedContentPerformer, ConsentRelease |
+| Legal | LegalDocument, LegalDocumentVersion, LegalAcceptance, SiteSettingsVersion |
 
 `User.adult_attested_at` and `adult_attestation_version` are a paired record of the
 platform's current baseline 18+ self-attestation. They are not a date of birth,
@@ -39,8 +42,23 @@ or adult-restricted delivery is authorised.
 `adult_restricted` until an authorised reviewer explicitly classifies them
 `safe_public`. Actual classification changes are audited; replaying the same decision
 does not create another event. Creator verification remains separate: every public
-creator-owned projection requires the latest `CreatorVerification` outcome to be
-`verified` with `adult_verified = true`.
+creator-owned projection requires the latest current `CreatorVerification` outcome to
+satisfy normalized identity and adult requirements. Fan age assurance never supplies
+creator KYC.
+
+## Compliance and legal authority
+
+`CountryRegistry` provides canonical ISO identifiers and an operational enabled state; it contains no legal rule. Full `CompliancePolicyTemplateRevision` rows are immutable reusable rule sets. `JurisdictionPolicyRevision` inherits one exact template revision and stores only explicit country overrides. `FeatureFlagRevision` is a global/country append-only overlay. Each revision has an effective window, version, demo marker, actor/reason, and review evidence where applicable. Higher effective successor versions win without rewriting history.
+
+`AgeVerificationRecord` belongs to either a user or durable `AnonymousComplianceSession` and snapshots the country, exact jurisdiction-policy ID/version, provider, required/achieved threshold and assurance, lifecycle status/times, safe failure code, retryability, and minimal normalized result. It stores no DOB, document image, access token, or whole provider payload. Callback events and provider probes provide replay/operational evidence without credentials. Anonymous attachment is one-user-only and row-locked.
+
+`PerformerIdentity` is private and separate from a creator profile. Identity and age verification are independent append-oriented records. `VerifiedContentPerformer` links each required private performer to content and its own consent release; all linked performers must independently satisfy the current requirements.
+
+`LegalDocument` is stable scope (type, slug, audience, language, optional country). Draft `LegalDocumentVersion` bodies are editable; published/retired bodies are immutable. `LegalAcceptance` references one exact version. `SiteSettingsVersion` is an append-only current/superseded public configuration record rather than a general executable CMS.
+
+`LiveProviderControlIntent` is the durable DB-to-LiveKit control boundary. It stores one exact `delete_room` or `remove_participant` command, source target, provider room/identity, reason, actor, unique idempotency key, attempt/lease schedule, safe error evidence, and pending/processing/succeeded/structurally-failed state. Provider and network errors return to retryable pending state with capped backoff; they never become terminal merely because an attempt limit was reached. A processing lease is committed before the provider call, and the attempt-fenced domain-success hook commits related room/session finalization together with outbox success.
+
+`User.country_code` is an account signal, not the sole jurisdiction authority. Current KYC/billing/trusted-request/account authorities must agree or access fails closed. A valid provider record's country remains immutable evidence provenance and supplies jurisdiction only when current authority is absent; after a current country change, its threshold/assurance is evaluated against the new policy and may require stronger re-verification. The earlier paired `adult_attested_at`/version remains only a compatibility `self_attested` assurance and is never upgraded into provider, creator, or performer verification.
 
 # 37. Important State Machines
 

@@ -1,19 +1,24 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
-from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
+from app.compliance.http import resolve_request_compliance_decision
+from app.compliance.types import ComplianceDecision
 from app.core.config import get_settings
 from app.core.rate_limit import (
     enforce_discovery_rate_limit,
     enforce_media_rate_limit,
     enforce_social_rate_limit,
 )
+from app.media.contexts import has_single_media_context
+from app.media.projection import safe_public_profile_media_reference
 from app.media.storage import storage_provider
-from app.models.content import MediaAsset, MediaAudience, MediaStatus
+from app.models.compliance import ComplianceFeature
+from app.models.content import MediaAsset, MediaStatus
 from app.models.creator import CreatorProfile, CreatorVerification, VerificationStatus
 from app.models.story import Story, StoryStatus
 from app.schemas.story import (
@@ -28,14 +33,30 @@ from app.stories import service
 router = APIRouter(prefix="/stories", tags=["stories"])
 
 
-def request_adult_access(request: Request, identity) -> adult_access.AdultAccessDecision:
-    return adult_access.resolve_adult_access(
-        identity[0] if identity else None,
-        request.cookies.get(get_settings().adult_access_cookie_name),
+async def request_adult_access(
+    db: Db,
+    request: Request,
+    identity,
+    *,
+    adult_restricted: bool = True,
+) -> ComplianceDecision:
+    return await resolve_request_compliance_decision(
+        db,
+        request,
+        user=identity[0] if identity else None,
+        feature=(
+            ComplianceFeature.adult_media if adult_restricted else ComplianceFeature.platform_access
+        ),
+        adult_restricted=adult_restricted,
     )
 
 
-async def story_response(db: Db, story: Story) -> StoryResponse:
+async def story_response(
+    db: Db,
+    story: Story,
+    compliance_decision: ComplianceDecision | None = None,
+    platform_decision: ComplianceDecision | None = None,
+) -> StoryResponse:
     creator = await db.get(CreatorProfile, story.creator_id)
     asset = await db.get(MediaAsset, story.media_asset_id)
     if (
@@ -43,10 +64,17 @@ async def story_response(db: Db, story: Story) -> StoryResponse:
         or not creator.username
         or not asset
         or asset.owner_creator_id != story.creator_id
+        or not await has_single_media_context(db, story.media_asset_id)
     ):
         raise HTTPException(status_code=404, detail="Story not found")
-    derivative = await service.delivery_derivative(db, asset)
-    if not derivative:
+    # Story captions/alt text are creator-authored and have no independently
+    # reviewed safe-public classification. The whole consumer Story therefore
+    # remains age-restricted even when the underlying asset is marked safe.
+    requires_adult = True
+    decision = compliance_decision if requires_adult else platform_decision
+    compliance_allowed = decision is None or decision.allowed
+    derivative = await service.delivery_derivative(db, asset) if compliance_allowed else None
+    if compliance_allowed and not derivative:
         raise HTTPException(status_code=404, detail="Story media not found")
     verification = await db.scalar(
         select(CreatorVerification)
@@ -61,7 +89,7 @@ async def story_response(db: Db, story: Story) -> StoryResponse:
             id=creator.id,
             username=creator.username,
             display_name=creator.display_name or creator.username,
-            avatar_reference=creator.avatar_reference,
+            avatar_reference=safe_public_profile_media_reference(creator.avatar_reference),
             verified=bool(
                 verification
                 and verification.status is VerificationStatus.verified
@@ -69,17 +97,28 @@ async def story_response(db: Db, story: Story) -> StoryResponse:
             ),
         ),
         media_type=asset.media_type.value,
-        caption=story.caption,
-        alt_text=story.alt_text,
+        caption=story.caption if compliance_allowed else None,
+        alt_text=story.alt_text if compliance_allowed else None,
         access_policy=story.access_policy.value,
         created_at=story.created_at,
         published_at=story.published_at,
         expires_at=story.expires_at,
-        media=StoryMediaResponse(
-            derivative_id=derivative.id,
-            mime_type=derivative.mime_type,
-            delivery_path=f"/stories/{story.id}/media",
+        media=(
+            StoryMediaResponse(
+                derivative_id=derivative.id,
+                mime_type=derivative.mime_type,
+                delivery_path=f"/stories/{story.id}/media",
+            )
+            if derivative
+            else None
         ),
+        adult_access_required=requires_adult,
+        adult_access_granted=not requires_adult
+        or bool(decision is None or decision.age_access_allowed),
+        compliance_allowed=compliance_allowed,
+        compliance_code=decision.code if decision else "ALLOWED",
+        compliance_action=(decision.action if decision and not compliance_allowed else None),
+        compliance_reason=decision.reason if decision else None,
     )
 
 
@@ -92,6 +131,21 @@ async def create_story(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> StoryResponse:
     try:
+        decision = await request_adult_access(db, request, identity)
+        platform_decision = await request_adult_access(
+            db, request, identity, adult_restricted=False
+        )
+        for access in (platform_decision, decision):
+            if not access.allowed:
+                raise HTTPException(
+                    403,
+                    {
+                        "message": access.reason,
+                        "code": access.code,
+                        "action": access.action,
+                        "reason": access.reason,
+                    },
+                )
         await enforce_social_rate_limit(request, str(identity[0].id), "story_create")
         story = await service.create_story(
             db,
@@ -103,7 +157,7 @@ async def create_story(
             idempotency_key or "",
         )
         await db.commit()
-        return await story_response(db, story)
+        return await story_response(db, story, decision, platform_decision)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(
@@ -114,6 +168,7 @@ async def create_story(
 
 @router.get("/mine", response_model=list[StoryResponse])
 async def own_stories(
+    request: Request,
     identity: CurrentIdentity,
     db: Db,
     status: StoryStatus | None = None,
@@ -123,7 +178,11 @@ async def own_stories(
         await service.expire_due_stories(db)
         rows = await service.own_stories(db, identity[0], status, limit)
         await db.commit()
-        return [await story_response(db, story) for story in rows]
+        decision = await request_adult_access(db, request, identity)
+        platform_decision = await request_adult_access(
+            db, request, identity, adult_restricted=False
+        )
+        return [await story_response(db, story, decision, platform_decision) for story in rows]
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -144,17 +203,28 @@ async def public_rail(
         await enforce_discovery_rate_limit(
             request, str(identity[0].id) if identity else "anonymous"
         )
-        rows, next_cursor = await service.public_rail(
-            db,
-            identity[0] if identity else None,
-            cursor,
-            limit,
-            creator_username,
-            access_decision=request_adult_access(request, identity),
+        decision = await request_adult_access(db, request, identity)
+        platform_decision = await request_adult_access(
+            db, request, identity, adult_restricted=False
         )
+        if platform_decision.allowed:
+            rows, next_cursor = await service.public_rail(
+                db,
+                identity[0] if identity else None,
+                cursor,
+                limit,
+                creator_username,
+                access_decision=decision,
+            )
+        else:
+            rows, next_cursor = [], None
         return StoryRailResponse(
-            items=[await story_response(db, story) for story in rows],
+            items=[await story_response(db, story, decision, platform_decision) for story in rows],
             next_cursor=next_cursor,
+            compliance_allowed=platform_decision.allowed,
+            compliance_code=platform_decision.code,
+            compliance_action=platform_decision.action,
+            compliance_reason=platform_decision.reason,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -169,16 +239,22 @@ async def story_media(
 ) -> RedirectResponse:
     await enforce_media_rate_limit(request, str(identity[0].id) if identity else "anonymous")
     story = await db.get(Story, story_id)
-    access_decision = request_adult_access(request, identity)
-    owner_allowed = False
+    raw_asset = await db.get(MediaAsset, story.media_asset_id) if story else None
+    if raw_asset and not await has_single_media_context(db, raw_asset.id):
+        raise HTTPException(status_code=404, detail="Story not found")
+    # A Story-level safe-public authority does not exist yet. Do not infer safe
+    # caption/alt text from the media asset's audience label.
+    restricted = bool(raw_asset)
+    access_decision = await request_adult_access(db, request, identity, adult_restricted=restricted)
+    owner_entitled = False
     if story and identity:
         creator = await db.get(CreatorProfile, story.creator_id)
-        owner_allowed = bool(
+        owner_entitled = bool(
             creator
             and creator.user_id == identity[0].id
             and story.status not in {StoryStatus.deleted, StoryStatus.removed}
         )
-    if not owner_allowed:
+    if not owner_entitled:
         story = await service.public_story(
             db,
             story_id,
@@ -196,34 +272,49 @@ async def story_media(
         or asset.moderation_status in service.UNSAFE_MODERATION_STATUSES
     ):
         raise HTTPException(status_code=404, detail="Story media not found")
+    # Ownership and subscription resolve entitlement only. The current
+    # jurisdiction/age decision applies to every viewer, including the creator
+    # and staff accounts, before a signed media location can be minted.
+    if not access_decision.allowed:
+        raise HTTPException(status_code=404, detail="Story not found")
     derivative = await service.delivery_derivative(db, asset)
     if not derivative:
         raise HTTPException(status_code=404, detail="Story media not found")
     configured_ttl = get_settings().media_url_ttl_seconds
     try:
         ttl = (
-            configured_ttl if owner_allowed else service.public_delivery_ttl(story, configured_ttl)
+            configured_ttl if owner_entitled else service.public_delivery_ttl(story, configured_ttl)
         )
-        if not owner_allowed and asset.audience is MediaAudience.adult_restricted:
-            ttl = adult_access.restricted_delivery_ttl(access_decision, ttl)
+        if restricted and access_decision.verification_expires_at is not None:
+            remaining = int(
+                (access_decision.verification_expires_at - datetime.now(UTC)).total_seconds()
+            )
+            ttl = min(ttl, remaining)
+            if ttl <= 0:
+                raise ValueError("Adult Story access has expired")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Story not found") from exc
-    return RedirectResponse(storage_provider().create_download_url(derivative.storage_key, ttl))
+    return RedirectResponse(
+        storage_provider().create_download_url(derivative.storage_key, ttl),
+        headers={"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"},
+    )
 
 
 @router.get("/{story_id}", response_model=StoryResponse)
 async def public_detail(
     story_id: UUID, request: Request, identity: OptionalIdentity, db: Db
 ) -> StoryResponse:
+    decision = await request_adult_access(db, request, identity)
+    platform_decision = await request_adult_access(db, request, identity, adult_restricted=False)
     story = await service.public_story(
         db,
         story_id,
         identity[0] if identity else None,
-        access_decision=request_adult_access(request, identity),
+        access_decision=decision,
     )
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
-    return await story_response(db, story)
+    return await story_response(db, story, decision, platform_decision)
 
 
 @router.delete("/{story_id}", response_model=StoryResponse)
@@ -234,7 +325,11 @@ async def delete_story(
         await enforce_social_rate_limit(request, str(identity[0].id), "story_delete")
         story = await service.delete_story(db, identity[0], story_id)
         await db.commit()
-        return await story_response(db, story)
+        decision = await request_adult_access(db, request, identity)
+        platform_decision = await request_adult_access(
+            db, request, identity, adult_restricted=False
+        )
+        return await story_response(db, story, decision, platform_decision)
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc

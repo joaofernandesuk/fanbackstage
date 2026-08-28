@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -15,7 +15,7 @@ async function api(page: import("@playwright/test").Page, path: string, method =
 
 async function login(page: import("@playwright/test").Page, email: string, password: string) { await page.goto("/login"); await page.getByLabel("Email").fill(email); await page.getByRole("textbox", { name: /^Password\b/ }).fill(password); await page.getByRole("button", { name: "Log in" }).click(); await expectAuthenticatedAs(page, email); }
 async function logout(page: import("@playwright/test").Page) { await page.goto("/account"); await page.getByRole("button", { name: "Log out" }).click(); }
-async function register(page: import("@playwright/test").Page, email: string, password: string) { await page.goto("/register"); await page.getByLabel("Email").fill(email); await page.getByRole("textbox", { name: /^Password\b/ }).fill(password); await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check(); await page.getByRole("button", { name: "Create account" }).click(); await page.goto(await securityLink(email, "/verify-email")); await page.getByRole("button", { name: "Verify email" }).click(); await login(page, email, password); }
+async function register(page: import("@playwright/test").Page, email: string, password: string) { await page.goto("/register"); await completeRegistrationCompliance(page); await page.getByLabel("Email").fill(email); await page.getByRole("textbox", { name: /^Password\b/ }).fill(password); await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check(); await page.getByRole("button", { name: "Create account" }).click(); await page.goto(await securityLink(email, "/verify-email")); await page.getByRole("button", { name: "Verify email" }).click(); await login(page, email, password); }
 
 test("Phase 6 messaging uses the real payment, inbox, campaign, and moderation stack", async ({ browser, page }) => {
   const stamp = Date.now(); const password = "phase6-messaging-password"; const creatorEmail = `phase6-creator-${stamp}@example.com`; const viewerEmail = `phase6-viewer-${stamp}@example.com`; const username = `message${stamp}`;

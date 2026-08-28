@@ -22,12 +22,12 @@ smoke:
 dev-backup:
 	./scripts/dev-backup.sh
 api:
-	cd apps/api && uv run uvicorn app.main:app --reload --port 8000
+	cd apps/api && uv run uvicorn app.main:app --reload --port 8000 --no-access-log --no-proxy-headers
 web:
 	cd apps/web && pnpm dev
 worker:
 	cd apps/api && uv run celery -A app.worker.celery_app worker --loglevel=INFO
-e2e: dev
+e2e:
 	cd apps/web && pnpm test:e2e
 migrate:
 	cd apps/api && uv run alembic upgrade head

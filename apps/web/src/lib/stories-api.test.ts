@@ -7,9 +7,18 @@ import {
   storyReportPath,
   storyRailPath,
   type PublicStory,
+  type StoryMedia,
 } from "./stories-api";
 
 const NOW = Date.parse("2026-08-26T12:00:00Z");
+
+function media(id = "00000000-0000-0000-0000-000000000001"): StoryMedia {
+  return {
+    derivative_id: "00000000-0000-0000-0000-000000000020",
+    mime_type: "image/jpeg",
+    delivery_path: `/stories/${id}/media`,
+  };
+}
 
 function story(overrides: Partial<PublicStory> = {}): PublicStory {
   return {
@@ -29,11 +38,11 @@ function story(overrides: Partial<PublicStory> = {}): PublicStory {
     created_at: "2026-08-26T10:59:00Z",
     published_at: "2026-08-26T11:00:00Z",
     expires_at: "2026-08-27T11:00:00Z",
-    media: {
-      derivative_id: "00000000-0000-0000-0000-000000000020",
-      mime_type: "image/jpeg",
-      delivery_path: "/stories/00000000-0000-0000-0000-000000000001/media",
-    },
+    media: media(),
+    compliance_allowed: true,
+    compliance_code: "ALLOWED",
+    compliance_action: null,
+    compliance_reason: "Policy allows access",
     ...overrides,
   };
 }
@@ -56,13 +65,14 @@ describe("Story public API helpers", () => {
     expect(storyMediaUrl(story())).toBe(
       "http://localhost:8000/api/v1/stories/00000000-0000-0000-0000-000000000001/media",
     );
-    expect(storyMediaUrl(story({ media: { ...story().media, delivery_path: "https://files.example/original.jpg" } }))).toBeUndefined();
+    expect(storyMediaUrl(story({ media: { ...media(), delivery_path: "https://files.example/original.jpg" } }))).toBeUndefined();
     expect(storyMediaUrl(story({ media_type: "video" }))).toBeUndefined();
+    expect(storyMediaUrl(story({ compliance_allowed: false, media: null }))).toBeUndefined();
   });
 
   it("groups accessible active records without fabricating expired cards", () => {
-    const second = story({ id: "00000000-0000-0000-0000-000000000002", media: { ...story().media, delivery_path: "/stories/00000000-0000-0000-0000-000000000002/media" } });
-    const expired = story({ id: "00000000-0000-0000-0000-000000000003", expires_at: "2026-08-26T11:59:59Z", media: { ...story().media, delivery_path: "/stories/00000000-0000-0000-0000-000000000003/media" } });
+    const second = story({ id: "00000000-0000-0000-0000-000000000002", media: media("00000000-0000-0000-0000-000000000002") });
+    const expired = story({ id: "00000000-0000-0000-0000-000000000003", expires_at: "2026-08-26T11:59:59Z", media: media("00000000-0000-0000-0000-000000000003") });
     const groups = groupStoriesByCreator([story(), second, expired], NOW);
     expect(groups).toHaveLength(1);
     expect(groups[0].stories.map((item) => item.id)).toEqual([

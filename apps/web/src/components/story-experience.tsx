@@ -17,11 +17,13 @@ import {
   StoryRailPage,
   groupStoriesByCreator,
   storyAgeLabel,
+  storyDetailPath,
   storyMediaUrl,
   storyProfilePath,
   storyRailPath,
   storyReportPath,
 } from "../lib/stories-api";
+import { AdultAccessGate } from "./adult-access-gate";
 import { AccessBadge, CreatorAvatar, EmptyState, VerifiedBadge, useLoginGate } from "./consumer-ui";
 import styles from "./story-experience.module.css";
 
@@ -37,6 +39,7 @@ export function StoryRailSource({
   const [stories, setStories] = useState<PublicStory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [access, setAccess] = useState<StoryRailPage | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -45,7 +48,10 @@ export function StoryRailSource({
     setStories([]);
     api<StoryRailPage>(storyRailPath({ limit: 50, creatorUsername }))
       .then((page) => {
-        if (active) setStories(page.items);
+        if (active) {
+          setStories(page.items);
+          setAccess(page);
+        }
       })
       .catch((caught: unknown) => {
         if (active) {
@@ -68,6 +74,21 @@ export function StoryRailSource({
     );
   }
   if (error) return <EmptyState body={error} title="Stories are unavailable" />;
+  if (access && !access.compliance_allowed) {
+    return (
+      <AdultAccessGate
+        access={access}
+        adultRestricted={false}
+        feature="platform_access"
+        onGranted={async () => {
+          const page = await api<StoryRailPage>(storyRailPath({ limit: 50, creatorUsername }));
+          setStories(page.items);
+          setAccess(page);
+        }}
+        title="Stories"
+      />
+    );
+  }
   return <StoryRail emptyBody={emptyBody} limit={creatorUsername ? 1 : limit} stories={stories} />;
 }
 
@@ -381,9 +402,28 @@ function StoryReport({ storyId }: { storyId: string }) {
 }
 
 function StoryMedia({ story }: { story: PublicStory }) {
-  const media = storyMediaUrl(story);
+  const [resolvedStory, setResolvedStory] = useState(story);
+  const media = storyMediaUrl(resolvedStory);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+
+  useEffect(() => {
+    setResolvedStory(story);
+    setLoaded(false);
+    setError(false);
+  }, [story]);
+
+  if (!resolvedStory.compliance_allowed) {
+    return (
+      <AdultAccessGate
+        access={resolvedStory}
+        adultRestricted={resolvedStory.adult_access_required}
+        feature={resolvedStory.adult_access_required ? "adult_media" : "platform_access"}
+        onGranted={async () => setResolvedStory(await api<PublicStory>(storyDetailPath(story.id)))}
+        title="this Story"
+      />
+    );
+  }
 
   if (!media || error) {
     return <div className={styles.mediaState} role="status"><strong>Story media unavailable</strong><span>You can move to another story or try again later.</span></div>;
@@ -391,9 +431,9 @@ function StoryMedia({ story }: { story: PublicStory }) {
   return (
     <>
       {!loaded && <div aria-label="Loading story media" aria-busy="true" className={styles.mediaLoading} role="status" />}
-      {story.media_type === "video" ? (
+      {resolvedStory.media_type === "video" ? (
         <video
-          aria-label={story.alt_text ?? `${story.creator.display_name} story video`}
+          aria-label={resolvedStory.alt_text ?? `${resolvedStory.creator.display_name} story video`}
           className={loaded ? "" : styles.mediaHidden}
           controls
           onError={() => setError(true)}
@@ -404,7 +444,7 @@ function StoryMedia({ story }: { story: PublicStory }) {
         />
       ) : (
         <img
-          alt={story.alt_text ?? `${story.creator.display_name} story`}
+          alt={resolvedStory.alt_text ?? `${resolvedStory.creator.display_name} story`}
           className={loaded ? "" : styles.mediaHidden}
           onError={() => setError(true)}
           onLoad={() => setLoaded(true)}

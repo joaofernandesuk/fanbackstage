@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 test("complete real authentication lifecycle", async ({ page }) => {
@@ -8,10 +8,11 @@ test("complete real authentication lifecycle", async ({ page }) => {
   const old = "original-password-123";
   const fresh = "replacement-password-123";
   await page.goto("/register?next=%2Faccount%3Ffrom%3Dregistration");
+  await completeRegistrationCompliance(page);
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(old);
   const adultConfirmation = page.getByRole("checkbox", {
-    name: "I confirm I am at least 18 years old and agree to the Terms.",
+    name: "I confirm I am at least 18 years old.",
   });
   await expect(adultConfirmation).not.toBeChecked();
   await adultConfirmation.check();
@@ -89,20 +90,25 @@ test("global dialog preserves a deep link when login switches to join", async ({
   await loginDialog.getByRole("button", { name: "Join", exact: true }).click();
   const joinDialog = page.getByRole("dialog", { name: "Join FanBackstage" });
   await expect(joinDialog).toBeVisible();
-  await joinDialog.getByLabel("Email address").fill(email);
-  await joinDialog.getByLabel("Password", { exact: true }).fill("modal-join-password-123");
-  const adultConfirmation = joinDialog.getByRole("checkbox", {
-    name: "I confirm I am at least 18 years old and agree to the Terms.",
+  await joinDialog.getByLabel("Country or jurisdiction").selectOption("PT");
+  await joinDialog.getByRole("button", { name: "Verify age to continue" }).click();
+  await expect(page).toHaveURL(/\/register\?next=%2Fdiscover%3Fsort%3Dlatest$/);
+  await completeRegistrationCompliance(page, false);
+  await page.getByLabel("Email address").fill(email);
+  await page.getByLabel("Password", { exact: true }).fill("modal-join-password-123");
+  const adultConfirmation = page.getByRole("checkbox", {
+    name: "I confirm I am at least 18 years old.",
   });
   await expect(adultConfirmation).not.toBeChecked();
   await adultConfirmation.check();
-  await joinDialog.locator("form").getByRole("button", { name: "Create account", exact: true }).click();
+  await page.locator("form").getByRole("button", { name: "Create account", exact: true }).click();
 
   await expect(page).toHaveURL(/\/verify-email\?next=%2Fdiscover%3Fsort%3Dlatest$/);
 });
 
 test("logged-out discovery Subscribe opens canonical login and returns to the creator profile", async ({ page }) => {
   await page.goto("/discover");
+  await page.getByRole("button", { name: "Verify age" }).click();
   const subscribe = page.getByRole("link", { name: /^Subscribe(?:\s|$)/ }).first();
   await expect(subscribe).toBeVisible();
   await expect(subscribe).toHaveAttribute("aria-haspopup", "dialog");

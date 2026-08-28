@@ -9,13 +9,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import trusted_self_attested_accounts as accounts
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import func, select
 
 from app.accounts import adult_access
 from app.analytics import service as analytics
 from app.api.routes import admin as admin_routes
 from app.api.routes import marketplace as marketplace_routes
+from app.compliance.policy import create_jurisdiction_revision, create_template_revision
+from app.compliance.types import PolicyOverrides, PolicyRules
 from app.content.access import can_access_preview
 from app.core.config import Settings, get_settings
 from app.creators import service as creators
@@ -24,6 +26,7 @@ from app.finance import service as finance
 from app.groups import service as groups
 from app.marketplace import service as marketplace
 from app.models.audit import AuditEvent
+from app.models.compliance import CompliancePolicyStatus, CompliancePolicyTemplateRevision
 from app.models.content import (
     AccessPolicy,
     ContentItem,
@@ -61,6 +64,7 @@ from app.models.marketplace import (
     MarketplaceListing,
     MarketplaceListingMedia,
     MarketplaceListingStatus,
+    MarketplaceOrder,
     MarketplaceOrderStatus,
     MarketplaceSellerTier,
     MarketplaceShippingAllowance,
@@ -94,6 +98,64 @@ async def approved_creator(db, email: str):
     await creators.set_status(db, profile, CreatorStatus.approved, user.id)
     await creators.update_profile(db, profile, {"is_public": True}, user.id)
     return user, profile
+
+
+def route_request(path: str = "/marketplace/listings") -> Request:
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+    )
+
+
+async def publish_marketplace_age_policy(db) -> None:
+    revision = await db.scalar(
+        select(CompliancePolicyTemplateRevision)
+        .order_by(CompliancePolicyTemplateRevision.version.desc())
+        .limit(1)
+    )
+    assert revision is not None
+    assert revision.reviewed_by_user_id is not None
+    now = datetime.now(UTC)
+    rules = PolicyRules.model_validate(revision.rules_json).model_copy(
+        update={"fan_age_verification_required": True}
+    )
+    successor = await create_template_revision(
+        db,
+        template_id=revision.template_id,
+        rules=rules,
+        status=CompliancePolicyStatus.active,
+        effective_from=now - timedelta(seconds=1),
+        effective_until=None,
+        actor_user_id=revision.reviewed_by_user_id,
+        reviewed_at=now,
+        reviewed_by_user_id=revision.reviewed_by_user_id,
+        change_reason="Require fan age assurance for marketplace checkout test",
+        is_demo=True,
+    )
+    await create_jurisdiction_revision(
+        db,
+        country_code="PT",
+        template_revision_id=successor.id,
+        overrides=PolicyOverrides(),
+        status=CompliancePolicyStatus.active,
+        effective_from=now - timedelta(seconds=1),
+        effective_until=None,
+        actor_user_id=revision.reviewed_by_user_id,
+        reviewed_at=now,
+        reviewed_by_user_id=revision.reviewed_by_user_id,
+        change_reason="Require fan age assurance for marketplace checkout test",
+        is_demo=True,
+    )
 
 
 async def listing(db, creator, user, *, shipping: int) -> MarketplaceListing:
@@ -284,9 +346,10 @@ async def test_checkout_snapshots_allowance_and_applies_group_only_to_shipping_e
     configured_allowance = await allowance(db_session, 700, "AA")
     row = await listing(db_session, creator, creator_user, shipping=3_000)
 
+    await publish_marketplace_age_policy(db_session)
     buyer.adult_attested_at = None
     buyer.adult_attestation_version = None
-    with pytest.raises(marketplace.MarketplaceError, match="adult self-attestation"):
+    with pytest.raises(marketplace.MarketplaceError, match="Age verification"):
         await marketplace.initiate_order(
             db_session, buyer, row.id, 1, "AA", "marketplace-unattested"
         )
@@ -334,6 +397,50 @@ async def test_checkout_snapshots_allowance_and_applies_group_only_to_shipping_e
     await db_session.flush()
     assert order.shipping_allowance_minor == 700
     assert ledger.metadata_json["shipping_allowance_minor"] == "700"
+
+
+@pytest.mark.asyncio
+async def test_checkout_destination_country_conflict_creates_no_order_or_payment_attempt(
+    db_session,
+):
+    creator_user, creator = await approved_creator(
+        db_session, "market-country-conflict-creator@example.com"
+    )
+    buyer, _ = await accounts.register(
+        db_session,
+        "market-country-conflict-buyer@example.com",
+        "strong-password-123",
+        None,
+    )
+    buyer.country_code = "PT"
+    row = await listing(db_session, creator, creator_user, shipping=100)
+    payload = MarketplaceCheckoutInput(
+        quantity=1,
+        destination_country_code="GB",
+        shipping_address=MarketplaceShippingAddressInput(
+            recipient_name="Country Conflict",
+            line1="1 Conflict Road",
+            city="London",
+            postal_code="SW1A 1AA",
+            country_code="GB",
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await marketplace_routes.checkout(
+            row.public_id,
+            payload,
+            route_request(f"/marketplace/listings/{row.public_id}/checkout"),
+            (buyer, None),
+            db_session,
+            "market-country-conflict",
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "COUNTRY_SIGNAL_CONFLICT"
+    assert row.quantity_available == 10
+    assert await db_session.scalar(select(MarketplaceOrder.id)) is None
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
 
 
 @pytest.mark.asyncio
@@ -1174,7 +1281,12 @@ async def test_checkout_route_identifies_canonical_terminal_payment_for_safe_key
     )
     with pytest.raises(HTTPException) as terminal:
         await marketplace_routes.checkout(
-            public_id, checkout, (buyer, None), db_session, "terminal-route"
+            public_id,
+            checkout,
+            route_request(f"/marketplace/listings/{public_id}/checkout"),
+            (buyer, None),
+            db_session,
+            "terminal-route",
         )
     assert terminal.value.status_code == 409
     assert terminal.value.detail == {
@@ -2284,10 +2396,15 @@ async def test_direct_marketplace_surfaces_apply_two_way_blocks(db_session, crea
     )
     await db_session.flush()
 
-    anonymous = await marketplace_routes.public_listings(db_session, None)
+    anonymous = await marketplace_routes.public_listings(route_request(), db_session, None)
     assert row.id in {item.id for item in anonymous}
-    blocked = await marketplace_routes.public_listings(db_session, (viewer, None))
+    blocked = await marketplace_routes.public_listings(route_request(), db_session, (viewer, None))
     assert row.id not in {item.id for item in blocked}
     with pytest.raises(HTTPException) as exc:
-        await marketplace_routes.public_listing(row.public_id, db_session, (viewer, None))
+        await marketplace_routes.public_listing(
+            row.public_id,
+            route_request(f"/marketplace/listings/{row.public_id}"),
+            db_session,
+            (viewer, None),
+        )
     assert exc.value.status_code == 404

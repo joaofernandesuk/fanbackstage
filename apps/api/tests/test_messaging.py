@@ -9,8 +9,11 @@ from conftest import trusted_self_attested_accounts as accounts
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from starlette.requests import Request
+from surface_policy_helpers import publish_creator_identity_policy
 
 from app.accounts import adult_access
+from app.api.routes import messaging as messaging_routes
+from app.compliance.types import ComplianceDecision
 from app.content.access import can_access_asset
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_messaging_rate_limit
@@ -19,6 +22,7 @@ from app.finance import service as finance
 from app.main import app
 from app.messaging import service as messaging
 from app.models.audit import AuditEvent
+from app.models.compliance import AgeAssuranceLevel, ComplianceFeature
 from app.models.content import (
     AccessPolicy,
     ContentEntitlement,
@@ -26,7 +30,10 @@ from app.models.content import (
     ContentStatus,
     ContentType,
     DerivativeType,
+    Gallery,
+    GalleryItem,
     MediaAsset,
+    MediaAudience,
     MediaDerivative,
     MediaStatus,
     MediaType,
@@ -44,10 +51,12 @@ from app.models.finance import (
 from app.models.messaging import (
     AudienceSegment,
     CampaignStatus,
+    Conversation,
     ConversationParticipant,
     MassMessageCampaign,
     MassMessageRecipient,
     Message,
+    MessageAttachment,
     MessageReport,
     MessageUnlockPurchase,
     MessagingPermission,
@@ -61,6 +70,26 @@ from app.models.subscription import (
     SubscriptionPlan,
     SubscriptionStatus,
 )
+
+
+def denied_messaging_decision() -> ComplianceDecision:
+    return ComplianceDecision(
+        allowed=False,
+        code="AGE_VERIFICATION_REQUIRED",
+        action="VERIFY_AGE",
+        reason="Age verification is required",
+        feature=ComplianceFeature.messaging,
+        jurisdiction="PT",
+        policy_id=None,
+        policy_version=1,
+        required_minimum_age=18,
+        required_assurance_level=AgeAssuranceLevel.self_attested,
+        achieved_assurance_level=AgeAssuranceLevel.none,
+        age_access_allowed=False,
+        feature_allowed=True,
+        country_conflict=False,
+        verification_expires_at=None,
+    )
 
 
 async def creator(db, email):
@@ -376,6 +405,63 @@ async def test_previous_customer_requires_settled_purchase_and_respects_block(db
 
 
 @pytest.mark.asyncio
+async def test_ppv_content_asset_cannot_be_reused_as_message_attachment(db_session):
+    owner, profile = await creator(db_session, "message-media-isolation@example.com")
+    viewer, _ = await accounts.register(
+        db_session,
+        "message-media-isolation-viewer@example.com",
+        "strong-password-123",
+        None,
+    )
+    initiated = await messaging.send_message(db_session, viewer, profile.id, "hello")
+    sent = await messaging.send_in_conversation(
+        db_session, owner, initiated.conversation_id, "attachment"
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Paid message source",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=700,
+        price_currency="EUR",
+    )
+    content.gallery = Gallery(preview_count=0)
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        moderation_status=ModerationStatus.approved,
+        audience=MediaAudience.adult_restricted,
+        storage_key="original/message-isolation",
+        original_filename="message-isolation.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add_all([content, asset])
+    await db_session.flush()
+    db_session.add(
+        GalleryItem(
+            gallery_id=content.gallery.id,
+            media_asset_id=asset.id,
+            position=0,
+        )
+    )
+    await db_session.flush()
+
+    with pytest.raises(messaging.MessagingError, match="dedicated to one content"):
+        await messaging.attach_media(db_session, owner, sent.id, asset.id, 700, "EUR")
+
+    assert (
+        await db_session.scalar(
+            select(MessageAttachment.id).where(MessageAttachment.media_asset_id == asset.id)
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_paid_attachment_unlocks_only_after_settlement(db_session):
     owner, profile = await creator(db_session, "attachment-owner@example.com")
     buyer, _ = await accounts.register(
@@ -452,6 +538,7 @@ async def test_messaging_commands_require_current_public_creator_access(db_sessi
     elif containment == "status":
         profile.status = CreatorStatus.suspended
     elif containment == "kyc":
+        await publish_creator_identity_policy(db_session)
         db_session.add(
             CreatorVerification(
                 creator_profile_id=profile.id,
@@ -579,6 +666,159 @@ async def test_attachment_access_exposes_preview_but_not_full_media_before_unloc
 
 
 @pytest.mark.asyncio
+async def test_attachment_compliance_denial_is_structured_and_leaks_no_media_path(
+    db_session, monkeypatch, reviewed_pt_compliance_policy
+):
+    owner, profile = await creator(db_session, "attachment-denial-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session,
+        "attachment-denial-buyer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    initiated = await messaging.send_message(db_session, buyer, profile.id, "hello")
+    sent = await messaging.send_in_conversation(
+        db_session, owner, initiated.conversation_id, "restricted attachment"
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        audience=MediaAudience.adult_restricted,
+        storage_key="private/restricted-message-original",
+        original_filename="restricted.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    preview = MediaDerivative(
+        media_asset_id=asset.id,
+        derivative_type=DerivativeType.blurred_preview,
+        status=MediaStatus.ready,
+        storage_key="derivative/restricted-message-preview",
+        mime_type="image/webp",
+    )
+    full = MediaDerivative(
+        media_asset_id=asset.id,
+        derivative_type=DerivativeType.display,
+        status=MediaStatus.ready,
+        storage_key="derivative/restricted-message-full",
+        mime_type="image/webp",
+    )
+    db_session.add_all([preview, full])
+    attachment = await messaging.attach_media(db_session, owner, sent.id, asset.id, 700, "EUR")
+    await db_session.flush()
+
+    async def denied(*_args, **_kwargs):
+        return denied_messaging_decision()
+
+    monkeypatch.setattr(messaging_routes, "request_attachment_decision", denied)
+    response = await messaging_routes.attachment_access(
+        attachment.id,
+        Request({"type": "http", "client": ("127.0.0.1", 50000), "headers": []}),
+        (buyer, None),
+        db_session,
+    )
+    payload = response.model_dump(mode="json")
+    assert payload["compliance_allowed"] is False
+    assert payload["compliance_code"] == "AGE_VERIFICATION_REQUIRED"
+    assert payload["compliance_action"] == "VERIFY_AGE"
+    assert payload["compliance_reason"] == "Age verification is required"
+    assert payload["preview_delivery_path"] is None
+    assert payload["full_delivery_path"] is None
+    assert str(preview.id) not in str(payload)
+    assert str(full.id) not in str(payload)
+    assert asset.storage_key not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_corrupt_content_message_asset_hides_preview_and_access(db_session, monkeypatch):
+    owner, profile = await creator(db_session, "ambiguous-message-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session,
+        "ambiguous-message-buyer@example.com",
+        "strong-password-123",
+        None,
+    )
+    initiated = await messaging.send_message(db_session, buyer, profile.id, "hello")
+    sent = await messaging.send_in_conversation(
+        db_session, owner, initiated.conversation_id, "ambiguous attachment"
+    )
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        audience=MediaAudience.safe_public,
+        storage_key="private/ambiguous-message-original",
+        original_filename="ambiguous-message.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    db_session.add(
+        MediaDerivative(
+            media_asset_id=asset.id,
+            derivative_type=DerivativeType.blurred_preview,
+            status=MediaStatus.ready,
+            storage_key="derivative/ambiguous-message-preview",
+            mime_type="image/webp",
+        )
+    )
+    attachment = await messaging.attach_media(db_session, owner, sent.id, asset.id, None, None)
+    corrupt_content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.free,
+        title="Corrupt duplicate context",
+    )
+    corrupt_content.gallery = Gallery(
+        items=[GalleryItem(media_asset_id=asset.id, position=0, is_preview=True)]
+    )
+    db_session.add(corrupt_content)
+    await db_session.flush()
+
+    class Storage:
+        def create_download_url(self, *_args, **_kwargs):
+            raise AssertionError("Ambiguous message media must not mint a storage URL")
+
+    monkeypatch.setattr(messaging_routes, "storage_provider", lambda: Storage())
+    request = Request({"type": "http", "client": ("127.0.0.1", 50000), "headers": []})
+    for handler in (messaging_routes.attachment_access, messaging_routes.attachment_preview):
+        with pytest.raises(HTTPException) as blocked:
+            await handler(attachment.id, request, (buyer, None), db_session)
+        assert blocked.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_messaging_policy_denial_creates_no_conversation_or_message(db_session, monkeypatch):
+    _owner, profile = await creator(db_session, "message-policy-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session, "message-policy-viewer@example.com", "strong-password-123", None
+    )
+    conversation_count = await db_session.scalar(select(func.count()).select_from(Conversation))
+    message_count = await db_session.scalar(select(func.count()).select_from(Message))
+
+    async def denied(*_args, **_kwargs):
+        return denied_messaging_decision()
+
+    monkeypatch.setattr(messaging, "resolve_compliance_decision", denied)
+    with pytest.raises(messaging.MessagingError) as exc:
+        await messaging.send_message(db_session, viewer, profile.id, "must not be persisted")
+
+    assert exc.value.code == "AGE_VERIFICATION_REQUIRED"
+    assert exc.value.action == "VERIFY_AGE"
+    assert (
+        await db_session.scalar(select(func.count()).select_from(Conversation))
+        == conversation_count
+    )
+    assert await db_session.scalar(select(func.count()).select_from(Message)) == message_count
+
+
+@pytest.mark.asyncio
 async def test_campaign_snapshots_recipients_and_replay_respects_later_blocks(db_session):
     owner, profile = await creator(db_session, "campaign-owner@example.com")
     follower, _ = await accounts.register(
@@ -627,6 +867,56 @@ async def test_campaign_snapshots_recipients_and_replay_respects_later_blocks(db
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_campaign_policy_denial_preserves_schedule_and_delivers_nothing(
+    db_session, monkeypatch
+):
+    owner, profile = await creator(db_session, "campaign-policy-owner@example.com")
+    recipient, _ = await accounts.register(
+        db_session, "campaign-policy-recipient@example.com", "strong-password-123", None
+    )
+    db_session.add(Follow(user_id=recipient.id, creator_id=profile.id))
+    campaign = MassMessageCampaign(
+        creator_id=profile.id,
+        created_by_user_id=owner.id,
+        audience_segment=AudienceSegment.followers,
+        body="Policy-denied campaign",
+        status=CampaignStatus.scheduled,
+        scheduled_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    db_session.add(campaign)
+    await db_session.flush()
+    assert await messaging.snapshot_campaign_recipients(db_session, campaign) == 1
+
+    async def denied(*_args, **_kwargs):
+        return denied_messaging_decision()
+
+    monkeypatch.setattr(messaging, "resolve_compliance_decision", denied)
+    with pytest.raises(messaging.MessagingError) as exc:
+        await messaging.execute_campaign(db_session, campaign.id)
+
+    assert exc.value.code == "AGE_VERIFICATION_REQUIRED"
+    assert campaign.status is CampaignStatus.scheduled
+    assert campaign.started_at is None
+    assert campaign.completed_at is None
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(Message)
+            .where(Message.body == "Policy-denied campaign")
+        )
+        == 0
+    )
+    campaign_recipient = await db_session.scalar(
+        select(MassMessageRecipient).where(
+            MassMessageRecipient.campaign_id == campaign.id,
+            MassMessageRecipient.recipient_user_id == recipient.id,
+        )
+    )
+    assert campaign_recipient and campaign_recipient.message_id is None
+    assert campaign_recipient.delivered_at is None
 
 
 @pytest.mark.asyncio

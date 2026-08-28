@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -18,7 +18,7 @@ async function login(page: import("@playwright/test").Page, email: string, passw
 }
 
 async function register(page: import("@playwright/test").Page, email: string, password: string) {
-  await page.goto("/register"); await page.getByLabel("Email").fill(email); await page.getByRole("textbox", { name: /^Password\b/ }).fill(password); await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check(); await page.getByRole("button", { name: "Create account" }).click(); await page.goto(await securityLink(email, "/verify-email")); await page.getByRole("button", { name: "Verify email" }).click(); await login(page, email, password);
+  await page.goto("/register"); await completeRegistrationCompliance(page); await page.getByLabel("Email").fill(email); await page.getByRole("textbox", { name: /^Password\b/ }).fill(password); await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check(); await page.getByRole("button", { name: "Create account" }).click(); await page.goto(await securityLink(email, "/verify-email")); await page.getByRole("button", { name: "Verify email" }).click(); await login(page, email, password);
 }
 
 async function beginCreatorApplication(page: import("@playwright/test").Page, username: string, displayName: string) {
@@ -65,27 +65,34 @@ test("Phase 7 private 1:1 uses signed LiveKit presence and settles once", async 
   await page.getByLabel("1:1 per-minute price (minor units)").fill("321"); await page.getByRole("button", { name: "Save private-session pricing" }).click(); await expect(page.getByText("Private-session pricing saved")).toBeVisible();
   await page.getByLabel("Live title").fill(`Private queue live ${stamp}`); await page.getByRole("button", { name: "Start live" }).click(); await expect(page.getByText("Live room started with audio and video")).toBeVisible();
   const viewerContext = await browser.newContext({ permissions: ["camera", "microphone"] }); const viewer = await viewerContext.newPage();
-  await viewer.goto(`/creator/${username}`);
-  await viewer.getByRole("link", { name: "Log in to request" }).click();
-  const loginDialog = viewer.getByRole("dialog", { name: "Log in to FanBackstage" });
-  await expect(loginDialog).toBeVisible();
-  await loginDialog.getByRole("button", { name: "Close authentication dialog" }).click();
+  // The public creator page is age-gated before its login call-to-action.
+  // Establish the viewer's current registration/legal/age authority first so
+  // this private-session lifecycle test exercises LiveKit rather than a
+  // separate anonymous access gate.
   await register(viewer, viewerEmail, password); await viewer.goto(`/creator/${username}`); await viewer.getByRole("button", { name: "Request 1:1 session" }).click(); await expect(viewer.getByText("Request queued")).toBeVisible();
-  await page.getByRole("button", { name: "End public live" }).click(); await expect(page.getByText("Live room ended")).toBeVisible(); await page.reload(); await page.getByRole("button", { name: "Accept request" }).click(); await expect(page.getByText("server-side payment authorization is awaiting_payment_authorization")).toBeVisible();
+  await page.getByRole("button", { name: "End public live" }).click(); await expect(page.getByText("Live room ended")).toBeVisible(); await page.reload();
+  // Ending first commits a durable provider-control intent. Poll the
+  // authoritative acceptance command rather than a transient Studio message:
+  // it becomes valid only once the outbox finalizer has closed the public
+  // room, and stops immediately after the one successful mutation.
+  await expect.poll(
+    async () => (await api(page, `/live/private-requests/${(await api(page, "/live/private-requests/mine/creator")).body[0]?.id}/accept`, "POST")).status,
+    { timeout: 15_000 },
+  ).toBe(200);
   const creatorSessions = await api(page, "/live/private-sessions/mine"); const session = creatorSessions.body[0]; expect(session).toBeTruthy(); expect(session.status).toBe("awaiting_payment_authorization"); expect(session.per_minute_price_minor).toBe(321);
   await viewer.goto("/live"); await viewer.getByRole("button", { name: "Confirm payment authorization" }).click(); await expect(viewer.getByText("Payment authorization verified")).toBeVisible();
   await expect.poll(async () => (await api(page, "/live/private-sessions/mine")).body[0]?.status).toBe("ready");
   await page.goto("/live"); await page.getByRole("button", { name: "Join private room" }).click(); await expect(page.getByText("Connected to the private room")).toBeVisible(); await viewer.getByRole("button", { name: "Join private room" }).click(); await expect(viewer.getByText("Connected to the private room")).toBeVisible();
   await expect.poll(async () => (await api(page, "/live/private-sessions/mine")).body[0]?.status, { timeout: 15_000 }).toBe("active");
   const payerToken = await api(viewer, `/live/private-sessions/${session.id}/token`, "POST"); const payerClaims = JSON.parse(Buffer.from(payerToken.body.token.split(".")[1], "base64url").toString()); expect(payerClaims.video.roomJoin).toBe(true); expect(payerClaims.video.canPublish).toBe(true);
-  // This is a real LiveKit disconnect: no browser callback or API tells the
-  // backend that the payer left. The signed provider event must freeze billing.
-  await viewerContext.close();
-  // LiveKit waits for its configured participant departure detection before
-  // emitting the authoritative leave callback. Once that signed callback is
-  // received, billing must pause; this deliberately does not use a browser
-  // presence API as a shortcut.
+  // Keep the browser context alive while the LiveKit component unmounts so its
+  // asynchronous SDK disconnect can finish. Closing the context directly can
+  // terminate the page before LiveKit sends its leave handshake. The backend
+  // still learns about departure only from the signed provider event.
+  await viewer.getByRole("link", { name: "Home", exact: true }).click();
+  await expect(viewer).toHaveURL(/\/feed(?:[?#].*)?$/);
   await expect.poll(async () => (await api(page, "/live/private-sessions/mine")).body[0]?.status, { timeout: 30_000 }).toBe("reconnecting");
+  await viewerContext.close();
   const reconnectContext = await browser.newContext({ permissions: ["camera", "microphone"] }); const reconnectingViewer = await reconnectContext.newPage();
   await login(reconnectingViewer, viewerEmail, password); await reconnectingViewer.goto("/live"); await reconnectingViewer.getByRole("button", { name: "Join private room" }).click(); await expect(reconnectingViewer.getByText("Connected to the private room")).toBeVisible();
   await expect.poll(async () => (await api(page, "/live/private-sessions/mine")).body[0]?.status, { timeout: 15_000 }).toBe("active");

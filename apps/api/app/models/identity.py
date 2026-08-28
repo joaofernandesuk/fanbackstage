@@ -42,6 +42,9 @@ class User(UUIDPrimaryKey, Timestamped, Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     adult_attested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     adult_attestation_version: Mapped[str | None] = mapped_column(String(64))
+    country_code: Mapped[str | None] = mapped_column(
+        ForeignKey("country_registry.code", ondelete="RESTRICT"), index=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     roles: Mapped[list["Role"]] = relationship(secondary="user_roles", lazy="selectin")
     creator_profile: Mapped["CreatorProfile | None"] = relationship(

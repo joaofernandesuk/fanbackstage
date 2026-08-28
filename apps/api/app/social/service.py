@@ -6,10 +6,12 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
+from app.compliance.types import ComplianceDecision
 from app.creators.service import (
-    current_adult_verification_predicate,
-    has_current_adult_verification,
+    resolve_creator_compliance_eligibilities,
+    resolve_creator_compliance_eligibility,
 )
+from app.media.contexts import require_media_context_available
 from app.media.service import approved_creator
 from app.models.content import (
     AccessPolicy,
@@ -39,12 +41,9 @@ HASHTAG = re.compile(r"(?<!\w)#([\w]{1,80})", re.UNICODE)
 
 async def public_creator(db: AsyncSession, creator_id: UUID) -> CreatorProfile:
     creator = await db.get(CreatorProfile, creator_id)
-    if (
-        not creator
-        or creator.status is not CreatorStatus.approved
-        or not creator.is_public
-        or not await has_current_adult_verification(db, creator.id)
-    ):
+    if not creator or creator.status is not CreatorStatus.approved or not creator.is_public:
+        raise PermissionError("Creator not found")
+    if not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed:
         raise PermissionError("Creator not found")
     return creator
 
@@ -95,17 +94,21 @@ async def _index_text(db: AsyncSession, post: FeedPost) -> None:
         return
     usernames = {item.lower() for item in MENTION.findall(post.body)}
     if usernames:
-        creators = (
+        creators = list(
             await db.scalars(
                 select(CreatorProfile).where(
                     CreatorProfile.username.in_(usernames),
                     CreatorProfile.status == CreatorStatus.approved,
                     CreatorProfile.is_public.is_(True),
-                    current_adult_verification_predicate(CreatorProfile.id),
                 )
             )
-        ).all()
-        db.add_all(PostMention(post_id=post.id, mentioned_creator_id=item.id) for item in creators)
+        )
+        eligibility = await resolve_creator_compliance_eligibilities(db, profiles=creators)
+        db.add_all(
+            PostMention(post_id=post.id, mentioned_creator_id=item.id)
+            for item in creators
+            if eligibility[item.id].public_allowed
+        )
     for tag in {item.casefold() for item in HASHTAG.findall(post.body)}:
         hashtag = await db.scalar(select(Hashtag).where(Hashtag.normalized == tag))
         if not hashtag:
@@ -132,9 +135,20 @@ async def create_post(db: AsyncSession, user: User, values: dict) -> FeedPost:
     if asset_ids:
         assets = (await db.scalars(select(MediaAsset).where(MediaAsset.id.in_(asset_ids)))).all()
         if len(assets) != len(set(asset_ids)) or any(
-            a.owner_creator_id != creator.id or a.status is not MediaStatus.ready for a in assets
+            a.owner_creator_id != creator.id
+            or a.status is not MediaStatus.ready
+            or a.deleted_at is not None
+            or a.moderation_status
+            in {
+                ModerationStatus.flagged,
+                ModerationStatus.rejected,
+                ModerationStatus.removed,
+            }
+            for a in assets
         ):
-            raise ValueError("Only creator-owned ready media may be attached")
+            raise ValueError("Only creator-owned, ready, eligible media may be attached")
+        for asset in assets:
+            await require_media_context_available(db, asset.id, context_type="feed")
     if content_id:
         content = await db.get(ContentItem, content_id)
         if not content or content.owner_creator_id != creator.id:
@@ -194,7 +208,15 @@ async def publish_due_posts(db: AsyncSession) -> int:
             .with_for_update(skip_locked=True)
         )
     ).all()
+    creator_ids = {post.creator_id for post in posts}
+    profiles = list(
+        await db.scalars(select(CreatorProfile).where(CreatorProfile.id.in_(creator_ids)))
+    )
+    eligibility = await resolve_creator_compliance_eligibilities(db, profiles=profiles)
+    published = 0
     for post in posts:
+        if not eligibility.get(post.creator_id) or not eligibility[post.creator_id].public_allowed:
+            continue
         post.status, post.published_at, post.scheduled_at = FeedPostStatus.published, now, None
         await record_event(
             db,
@@ -203,34 +225,50 @@ async def publish_due_posts(db: AsyncSession) -> int:
             target_type="feed_post",
             target_id=str(post.id),
         )
-    return len(posts)
+        published += 1
+    return published
 
 
-async def can_access_post(db: AsyncSession, post: FeedPost, user: User | None) -> bool:
+async def post_requires_adult_access(db: AsyncSession, post: FeedPost) -> bool:
+    """Treat creator-authored Feed copy as restricted until it has audited classification.
+
+    Media audience labels cover the asset, not the post body, caption, mentions,
+    or referenced-content framing. FeedPost currently has no reviewed safe-public
+    classification authority, so absence of an adult attachment cannot be used as
+    evidence that the surrounding creator-authored post is safe.
+    """
+
+    return True
+
+
+async def can_access_post(
+    db: AsyncSession,
+    post: FeedPost,
+    user: User | None,
+    compliance_decision: ComplianceDecision | None = None,
+) -> bool:
     if post.status is not FeedPostStatus.published or post.moderation_status in {
         ModerationStatus.flagged,
         ModerationStatus.rejected,
         ModerationStatus.removed,
     }:
         return False
+    entitlement_allowed = False
     if user:
         owner = await db.scalar(select(CreatorProfile.id).where(CreatorProfile.user_id == user.id))
-        if owner == post.creator_id or {role.name for role in user.roles} & {
-            "admin",
-            "moderator",
-            "super_admin",
-        }:
-            return True
-    try:
-        await public_creator(db, post.creator_id)
-    except PermissionError:
+        if owner == post.creator_id:
+            entitlement_allowed = True
+    if not entitlement_allowed:
+        try:
+            await public_creator(db, post.creator_id)
+        except PermissionError:
+            return False
+    if not entitlement_allowed and post.access_policy is AccessPolicy.free:
+        entitlement_allowed = True
+    elif not entitlement_allowed and not user:
         return False
-    if post.access_policy is AccessPolicy.free:
-        return True
-    if not user:
-        return False
-    if post.access_policy is AccessPolicy.followers:
-        return (
+    elif not entitlement_allowed and post.access_policy is AccessPolicy.followers:
+        entitlement_allowed = (
             await db.scalar(
                 select(Follow.id).where(
                     Follow.user_id == user.id, Follow.creator_id == post.creator_id
@@ -238,12 +276,12 @@ async def can_access_post(db: AsyncSession, post: FeedPost, user: User | None) -
             )
             is not None
         )
-    if post.access_policy is AccessPolicy.subscription:
+    elif not entitlement_allowed and post.access_policy is AccessPolicy.subscription:
         # Reuse creator-scoped subscription entitlement via an authoritative content-shaped check.
         now = datetime.now(UTC)
         from app.models.content import ContentEntitlement, EntitlementStatus
 
-        return (
+        entitlement_allowed = (
             await db.scalar(
                 select(ContentEntitlement.id).where(
                     ContentEntitlement.subject_user_id == user.id,
@@ -258,7 +296,11 @@ async def can_access_post(db: AsyncSession, post: FeedPost, user: User | None) -
             )
             is not None
         )
-    return False
+    if not entitlement_allowed:
+        return False
+    if await post_requires_adult_access(db, post):
+        return compliance_decision is None or compliance_decision.age_access_allowed
+    return True
 
 
 def encode_cursor(post: FeedPost) -> str:
@@ -303,7 +345,6 @@ async def feed_posts(
             ),
             CreatorProfile.status == CreatorStatus.approved,
             CreatorProfile.is_public.is_(True),
-            current_adult_verification_predicate(CreatorProfile.id),
         )
     )
     if creator_id:
@@ -337,10 +378,21 @@ async def feed_posts(
                 FeedPost.pinned_at.desc().nullslast(),
                 FeedPost.published_at.desc(),
                 FeedPost.id.desc(),
-            ).limit(limit + 1)
+            ).limit((limit + 1) * 4)
         )
     ).all()
-    page, extra = rows[:limit], len(rows) > limit
+    profiles = list(
+        await db.scalars(
+            select(CreatorProfile).where(CreatorProfile.id.in_({row.creator_id for row in rows}))
+        )
+    )
+    eligibility = await resolve_creator_compliance_eligibilities(db, profiles=profiles)
+    eligible_rows = [
+        row
+        for row in rows
+        if eligibility.get(row.creator_id) and eligibility[row.creator_id].public_allowed
+    ]
+    page, extra = eligible_rows[:limit], len(eligible_rows) > limit
     return page, encode_cursor(page[-1]) if extra and page else None
 
 

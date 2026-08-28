@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -29,6 +29,7 @@ async function login(page: import("@playwright/test").Page, email: string, passw
 
 async function register(page: import("@playwright/test").Page, email: string, password: string) {
   await page.goto("/register");
+  await completeRegistrationCompliance(page);
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -80,14 +81,18 @@ async function createApprovedSeller(page: import("@playwright/test").Page, stamp
 }
 
 async function createProgram(page: import("@playwright/test").Page, payload: object, code: string) {
-  const program = await api(page, "/admin/referrals/programs", "POST", payload);
+  const program = await api(page, "/admin/referrals/programs", "POST", {
+    ...payload, reason: "Create the Playwright referral programme", confirmed: true,
+  });
   expect(program.status).toBe(200);
   const policy = await api(page, `/admin/referrals/programs/${program.body.id}/policies`, "POST", {
     basis_points: 1000, eligible_revenue_types: ["marketplace"], attribution_window_days: 30, subscription_reward_window_days: 90,
+    reason: "Create the Playwright referral policy", confirmed: true,
   });
   expect(policy.status).toBe(200);
   expect((await api(page, `/admin/referrals/programs/${program.body.id}/links`, "POST", {
     policy_id: policy.body.id, code, destination_path: "/", source: "playwright",
+    reason: "Create the Playwright referral link", confirmed: true,
   })).status).toBe(200);
 }
 

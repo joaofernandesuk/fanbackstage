@@ -2,7 +2,17 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, EmailStr, Field, TypeAdapter, ValidationError
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    EmailStr,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
+
+from app.compliance.types import normalize_country_code
 
 _email_adapter = TypeAdapter(EmailStr)
 _demo_email_suffix = "@demo.fanbackstage.local"
@@ -38,6 +48,22 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=12, max_length=128)
     adult_confirmed: Literal[True]
+    country_code: str
+    legal_version_ids: list[UUID] = Field(default_factory=list, max_length=20)
+
+    @field_validator("country_code")
+    @classmethod
+    def valid_country(cls, value: str) -> str:
+        normalized = normalize_country_code(value)
+        assert normalized is not None
+        return normalized
+
+    @field_validator("legal_version_ids")
+    @classmethod
+    def unique_legal_versions(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("Legal document version IDs must be unique")
+        return values
 
 
 class AdultAccessAcknowledgeRequest(BaseModel):
@@ -78,6 +104,7 @@ class UserResponse(BaseModel):
     email: AccountEmail
     email_verified: bool
     adult_attested: bool
+    country_code: str | None
     roles: list[str]
 
 

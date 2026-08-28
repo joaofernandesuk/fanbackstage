@@ -11,11 +11,11 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.accounts.adult_access import AdultAccessDecision
 from app.audit.service import record_event as record_audit_event
+from app.compliance.types import ComplianceDecision
 from app.content.access import can_access_content, can_access_preview, content_requires_adult_access
 from app.core.config import get_settings
-from app.creators.service import current_adult_verification_predicate
+from app.creators.service import resolve_creator_compliance_eligibilities
 from app.models.content import (
     ContentItem,
     ContentStatus,
@@ -105,6 +105,16 @@ async def _hidden(db: AsyncSession) -> set[tuple[str, UUID]]:
     return {(kind.value, identifier) for kind, identifier in rows}
 
 
+async def _eligible_creator_ids(db: AsyncSession, creator_ids: set[UUID]) -> set[UUID]:
+    if not creator_ids:
+        return set()
+    profiles = list(
+        await db.scalars(select(CreatorProfile).where(CreatorProfile.id.in_(creator_ids)))
+    )
+    decisions = await resolve_creator_compliance_eligibilities(db, profiles=profiles)
+    return {profile.id for profile in profiles if decisions[profile.id].public_allowed}
+
+
 def _matches(query: str, *values: str | None) -> bool:
     return not query or any(query in normalize_query(value) for value in values)
 
@@ -127,6 +137,7 @@ def _score(
 
 async def _creator_rows(
     db: AsyncSession,
+    adult_decision: ComplianceDecision | None,
     query: str,
     blocked: set[UUID],
     hidden: set[tuple[str, UUID]],
@@ -138,17 +149,24 @@ async def _creator_rows(
             select(CreatorProfile).where(
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
-                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
+    eligibility = await resolve_creator_compliance_eligibilities(db, profiles=rows)
     config = await current_config(db)
     output = []
+    compliance_allowed = adult_decision is None or adult_decision.allowed
     for row in rows:
         if (
-            row.id in blocked
+            not eligibility[row.id].public_allowed
+            or row.id in blocked
             or ("creator", row.id) in hidden
-            or not _matches(query, row.username, row.display_name, row.bio)
+            or not _matches(
+                query,
+                row.username,
+                row.display_name,
+                row.bio if compliance_allowed else None,
+            )
         ):
             continue
         if category and category not in {item.slug for item in row.categories}:
@@ -168,10 +186,20 @@ async def _creator_rows(
             id=row.id,
             title=row.display_name or row.username or "Creator",
             subtitle=f"@{row.username}" if row.username else None,
-            description=(row.bio or "")[:280] or None,
+            description=((row.bio or "")[:280] or None) if compliance_allowed else None,
             creator_id=row.id,
             creator_username=row.username,
             live=live,
+            adult_access_required=True,
+            adult_access_granted=bool(adult_decision is None or adult_decision.age_access_allowed),
+            compliance_allowed=compliance_allowed,
+            compliance_code=adult_decision.code if adult_decision else "ALLOWED",
+            compliance_action=(
+                adult_decision.action
+                if adult_decision is not None and not compliance_allowed
+                else None
+            ),
+            compliance_reason=adult_decision.reason if adult_decision else None,
             created_at=row.created_at,
             reason="LIVE_NOW" if live else "RECENT",
         )
@@ -182,7 +210,7 @@ async def _creator_rows(
 async def _content_rows(
     db: AsyncSession,
     user: User | None,
-    adult_decision: AdultAccessDecision | None,
+    adult_decision: ComplianceDecision | None,
     query: str,
     blocked: set[UUID],
     hidden: set[tuple[str, UUID]],
@@ -198,27 +226,44 @@ async def _content_rows(
                 ContentItem.moderation_status == ModerationStatus.approved,
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
-                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
+    eligible_content_creators = await _eligible_creator_ids(
+        db, {row.owner_creator_id for row in contents}
+    )
     for row in contents:
+        if row.owner_creator_id not in eligible_content_creators:
+            continue
         kind = row.content_type.value
-        if row.requires_verified_consent:
-            from app.trust_safety.service import valid_verified_release_for_content
+        from app.trust_safety.service import (
+            has_verified_content_performers,
+            valid_verified_release_for_content,
+        )
 
-            if not await valid_verified_release_for_content(db, row.id):
-                continue
+        if (
+            row.requires_verified_consent or await has_verified_content_performers(db, row.id)
+        ) and not await valid_verified_release_for_content(db, row.id):
+            continue
+        requires_adult = await content_requires_adult_access(db, row)
+        adult_granted = not requires_adult or bool(
+            adult_decision is None or adult_decision.age_access_allowed
+        )
+        compliance_allowed = not requires_adult or bool(
+            adult_decision is None or adult_decision.allowed
+        )
         if (
             row.owner_creator_id in blocked
             or (kind, row.id) in hidden
-            or not _matches(query, row.title, row.description)
+            or not _matches(
+                query,
+                row.title if compliance_allowed else None,
+                row.description if compliance_allowed else None,
+            )
         ):
             continue
         creator = await db.get(CreatorProfile, row.owner_creator_id)
-        requires_adult = await content_requires_adult_access(db, row)
-        adult_granted = not requires_adult or bool(adult_decision and adult_decision.allowed)
-        allowed = await can_access_content(db, row, user) and adult_granted
+        allowed = await can_access_content(db, row, user) and compliance_allowed
         preview_id = None
         gallery = await db.scalar(select(Gallery).where(Gallery.content_id == row.id))
         video = await db.scalar(select(VideoContent).where(VideoContent.content_id == row.id))
@@ -264,9 +309,9 @@ async def _content_rows(
         result = DiscoveryResult(
             entity_type=kind,
             id=row.id,
-            title=row.title,
+            title=row.title if compliance_allowed else "Age-restricted content",
             subtitle=creator.display_name or creator.username if creator else None,
-            description=(row.description or "")[:280] or None,
+            description=(row.description or "")[:280] or None if compliance_allowed else None,
             creator_id=row.owner_creator_id,
             creator_username=creator.username if creator else None,
             access_policy=row.access_policy.value,
@@ -276,6 +321,18 @@ async def _content_rows(
             video_duration_seconds=video_duration_seconds,
             adult_access_required=requires_adult,
             adult_access_granted=adult_granted,
+            compliance_allowed=compliance_allowed,
+            compliance_code=(
+                adult_decision.code if requires_adult and adult_decision else "ALLOWED"
+            ),
+            compliance_action=(
+                adult_decision.action
+                if requires_adult and adult_decision and not compliance_allowed
+                else None
+            ),
+            compliance_reason=(
+                adult_decision.reason if requires_adult and adult_decision else None
+            ),
             price_amount_minor=row.price_amount_minor if row.access_policy.value == "ppv" else None,
             currency=row.price_currency if row.access_policy.value == "ppv" else None,
             created_at=row.published_at or row.created_at,
@@ -291,14 +348,30 @@ async def _content_rows(
                 FeedPost.moderation_status.notin_(HIDDEN_MODERATION),
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
-                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
+    eligible_post_creators = await _eligible_creator_ids(db, {row.creator_id for row in posts})
     for row in posts:
-        if row.creator_id in blocked or ("post", row.id) in hidden or not _matches(query, row.body):
+        if row.creator_id not in eligible_post_creators:
+            continue
+        from app.social.service import can_access_post, post_requires_adult_access
+
+        requires_adult = await post_requires_adult_access(db, row)
+        adult_granted = not requires_adult or bool(
+            adult_decision is None or adult_decision.age_access_allowed
+        )
+        compliance_allowed = not requires_adult or bool(
+            adult_decision is None or adult_decision.allowed
+        )
+        if (
+            row.creator_id in blocked
+            or ("post", row.id) in hidden
+            or not _matches(query, row.body if compliance_allowed else None)
+        ):
             continue
         creator = await db.get(CreatorProfile, row.creator_id)
+        entitled = await can_access_post(db, row, user, adult_decision)
         reactions = (
             await db.scalar(
                 select(func.count()).select_from(PostReaction).where(PostReaction.post_id == row.id)
@@ -308,15 +381,27 @@ async def _content_rows(
         result = DiscoveryResult(
             entity_type="post",
             id=row.id,
-            title=(row.body or "Post")[:160],
+            title=((row.body or "Post")[:160] if compliance_allowed else "Age-restricted post"),
             subtitle=creator.display_name or creator.username if creator else None,
-            description=(row.body or "")[:280] or None,
+            description=((row.body or "")[:280] or None) if compliance_allowed else None,
             creator_id=row.creator_id,
             creator_username=creator.username if creator else None,
             access_policy=row.access_policy.value,
-            locked=not await __import__(
-                "app.social.service", fromlist=["can_access_post"]
-            ).can_access_post(db, row, user),
+            locked=not entitled,
+            adult_access_required=requires_adult,
+            adult_access_granted=adult_granted,
+            compliance_allowed=compliance_allowed,
+            compliance_code=(
+                adult_decision.code if requires_adult and adult_decision else "ALLOWED"
+            ),
+            compliance_action=(
+                adult_decision.action
+                if requires_adult and adult_decision and not compliance_allowed
+                else None
+            ),
+            compliance_reason=(
+                adult_decision.reason if requires_adult and adult_decision else None
+            ),
             created_at=row.published_at or row.created_at,
             reason="TRENDING" if reactions else "RECENT",
         )
@@ -348,11 +433,15 @@ async def _listing_rows(
                 MarketplaceListing.moderation_status.notin_(HIDDEN_MODERATION),
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
-                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
+    eligible_listing_creators = await _eligible_creator_ids(
+        db, {row.owner_creator_id for row in rows}
+    )
     for row in rows:
+        if row.owner_creator_id not in eligible_listing_creators:
+            continue
         if (
             row.owner_creator_id in blocked
             or ("marketplace_listing", row.id) in hidden
@@ -405,11 +494,13 @@ async def _live_rows(
                 LiveRoom.status == LiveRoomStatus.live,
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
-                current_adult_verification_predicate(CreatorProfile.id),
             )
         )
     ).all()
+    eligible_live_creators = await _eligible_creator_ids(db, {row.creator_id for row in rows})
     for row in rows:
+        if row.creator_id not in eligible_live_creators:
+            continue
         if (
             row.creator_id in blocked
             or ("live_room", row.id) in hidden
@@ -451,7 +542,10 @@ async def search(
     db: AsyncSession,
     user: User | None,
     *,
-    adult_decision: AdultAccessDecision | None = None,
+    adult_decision: ComplianceDecision | None = None,
+    platform_decision: ComplianceDecision | None = None,
+    marketplace_decision: ComplianceDecision | None = None,
+    live_decision: ComplianceDecision | None = None,
     query: str | None,
     entity_types: set[str] | None = None,
     cursor: str | None = None,
@@ -470,6 +564,8 @@ async def search(
         raise ValueError("Invalid price range")
     parsed = _parse_cursor(cursor)
     config = await current_config(db)
+    if platform_decision is not None and not platform_decision.allowed:
+        return [], None, config.version
     if parsed and (parsed.get("v") != config.version or parsed.get("s") != feature_surface):
         raise ValueError("Discovery cursor is stale")
     types = entity_types or {kind.value for kind in DiscoveryEntityType}
@@ -479,16 +575,20 @@ async def search(
     blocked, hidden = await _blocked_creator_ids(db, user), await _hidden(db)
     candidates: list[tuple[DiscoveryResult, int]] = []
     if "creator" in types:
-        candidates += await _creator_rows(db, text, blocked, hidden, live_only, category)
+        candidates += await _creator_rows(
+            db, adult_decision, text, blocked, hidden, live_only, category
+        )
     if types & {"post", "video", "gallery"}:
         candidates += [
             (r, s)
             for r, s in await _content_rows(db, user, adult_decision, text, blocked, hidden)
             if r.entity_type in types
         ]
-    if "marketplace_listing" in types:
+    if "marketplace_listing" in types and (
+        marketplace_decision is None or marketplace_decision.allowed
+    ):
         candidates += await _listing_rows(db, text, blocked, hidden, category, min_price, max_price)
-    if "live_room" in types:
+    if "live_room" in types and (live_decision is None or live_decision.allowed):
         candidates += await _live_rows(db, text, blocked, hidden)
     if sort == "newest":
         candidates.sort(key=lambda item: (item[0].created_at, str(item[0].id)), reverse=True)

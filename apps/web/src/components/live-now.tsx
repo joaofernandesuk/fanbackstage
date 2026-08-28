@@ -6,6 +6,10 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
 
 import { api, ApiError } from "../lib/api";
+import {
+  ComplianceAccess,
+  complianceAccessFromError,
+} from "../lib/compliance-api";
 import { mediaForUsername } from "../lib/demo-personas";
 import {
   creatorUsernameFor,
@@ -14,9 +18,10 @@ import {
   type DiscoveryResult,
 } from "../lib/public-api";
 import { CreatorAvatar, EmptyState, Skeleton, useLoginGate } from "./consumer-ui";
+import { AdultAccessGate } from "./adult-access-gate";
 import styles from "./social-surface.module.css";
 
-type RoomSummary = {
+type RoomSummary = ComplianceAccess & {
   id: string;
   public_id: string;
   creator_id: string;
@@ -46,6 +51,7 @@ export function LiveNow() {
   const [chat, setChat] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [blockedAccess, setBlockedAccess] = useState<ComplianceAccess | null>(null);
   const roomRef = useRef<Room | null>(null);
   const videoRef = useRef<HTMLDivElement | null>(null);
   const attachedTracksRef = useRef<WeakSet<Track>>(new WeakSet());
@@ -76,6 +82,10 @@ export function LiveNow() {
 
   async function join(room: RoomSummary) {
     if (!requireLogin()) return;
+    if (!room.compliance_allowed) {
+      setBlockedAccess(room);
+      return;
+    }
     try {
       disconnect();
       setError("");
@@ -103,6 +113,9 @@ export function LiveNow() {
       setChat(await api<Chat[]>(`/live/rooms/${room.id}/chat`));
     } catch (caught) {
       disconnect();
+      if (caught instanceof ApiError && caught.code) {
+        setBlockedAccess(complianceAccessFromError(caught));
+      }
       setError(caught instanceof ApiError ? caught.message : "Unable to connect to this live room");
     }
   }
@@ -155,6 +168,18 @@ export function LiveNow() {
   return (
     <section aria-label="Live creators" className={styles.liveDirectory}>
       {error && <p className={styles.inlineMessage} role="status">{error}</p>}
+      {blockedAccess && (
+        <AdultAccessGate
+          access={blockedAccess}
+          adultRestricted={true}
+          feature="live"
+          onGranted={async () => {
+            await refresh();
+            setBlockedAccess(null);
+          }}
+          title="this live room"
+        />
+      )}
 
       {active && roomCreator && (
         <section aria-label={`Watching ${active.title}`} className={styles.liveViewer}>

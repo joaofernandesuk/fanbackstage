@@ -16,6 +16,7 @@ class FeedPostInput(BaseModel):
     reactions_enabled: bool = True
     scheduled_at: datetime | None = None
 
+
 class FeedPostUpdate(BaseModel):
     body: str | None = Field(default=None, max_length=5000)
     access_policy: AccessPolicy | None = None
@@ -23,21 +24,26 @@ class FeedPostUpdate(BaseModel):
     reactions_enabled: bool | None = None
     scheduled_at: datetime | None = None
 
+
 class ReactionInput(BaseModel):
     reaction_type: str = "like"
+
 
 class CommentInput(BaseModel):
     body: str = Field(min_length=1, max_length=2000)
     parent_id: UUID | None = None
 
+
 class ReportInput(BaseModel):
     reason: str = Field(min_length=1, max_length=80)
     details: str | None = Field(default=None, max_length=2000)
+
 
 class FeedSettingsInput(BaseModel):
     auto_post_galleries: bool | None = None
     auto_post_videos: bool | None = None
     default_comments_enabled: bool | None = None
+
 
 class FeedPostResponse(BaseModel):
     id: UUID
@@ -58,7 +64,17 @@ class FeedPostResponse(BaseModel):
     viewer_reaction: str | None = None
     media: list[dict] = Field(default_factory=list)
     content_reference: dict | None = None
+    adult_access_required: bool = False
+    adult_access_granted: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None
+
 
 class FeedPage(BaseModel):
     items: list[FeedPostResponse]
     next_cursor: str | None = None
+    compliance_allowed: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None

@@ -8,8 +8,13 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
+from app.compliance.policy import resolve_compliance_decision
+from app.compliance.types import (
+    ComplianceAccessError,
+    ComplianceDecision,
+    require_compliance_access,
+)
 from app.core.config import get_settings
 from app.creators.service import require_public_creator_access
 from app.finance.service import (
@@ -20,6 +25,7 @@ from app.finance.service import (
     post_entries,
     ppv_commission,
 )
+from app.models.compliance import ComplianceFeature
 from app.models.content import ContentEntitlement
 from app.models.finance import (
     ExcessCaptureSource,
@@ -48,7 +54,38 @@ from app.notifications.service import emit_transactional
 
 
 class SubscriptionError(ValueError):
-    pass
+    def __init__(self, message: str, compliance_decision: ComplianceDecision | None = None):
+        super().__init__(message)
+        self.compliance_decision = compliance_decision
+        self.code = compliance_decision.code if compliance_decision else None
+        self.action = compliance_decision.action if compliance_decision else None
+
+
+async def require_subscription_compliance(
+    db: AsyncSession,
+    buyer: User,
+    decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
+) -> ComplianceDecision:
+    allowed: ComplianceDecision | None = None
+    for feature in (ComplianceFeature.subscriptions, ComplianceFeature.purchases):
+        decision = (
+            decisions.get(feature)
+            if decisions
+            else await resolve_compliance_decision(
+                db,
+                user=buyer,
+                feature=feature,
+                adult_restricted=True,
+            )
+        )
+        if decision is None:
+            raise SubscriptionError("Subscription compliance decision is unavailable")
+        try:
+            allowed = require_compliance_access(decision)
+        except ComplianceAccessError as exc:
+            raise SubscriptionError(exc.decision.reason, exc.decision) from exc
+    assert allowed is not None
+    return allowed
 
 
 MONTHS = {
@@ -180,7 +217,12 @@ async def _promotion(
 
 
 async def create_subscription(
-    db: AsyncSession, buyer: User, creator_id: UUID, duration_value: str, idempotency_key: str
+    db: AsyncSession,
+    buyer: User,
+    creator_id: UUID,
+    duration_value: str,
+    idempotency_key: str,
+    compliance_decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
 ) -> Subscription:
     duration = SubscriptionDuration(duration_value)
     if not idempotency_key or len(idempotency_key) > 128:
@@ -209,10 +251,7 @@ async def create_subscription(
         return existing
     if existing_attempt is not None:
         raise SubscriptionError("Idempotency-Key is already used by another payment command")
-    try:
-        require_current_self_attestation(buyer)
-    except PermissionError as exc:
-        raise SubscriptionError("Current adult self-attestation is required") from exc
+    await require_subscription_compliance(db, buyer, compliance_decisions)
     active = await db.scalar(
         select(Subscription)
         .where(
@@ -696,12 +735,12 @@ async def renew_due_subscriptions(db: AsyncSession) -> int:
             subscription.status, subscription.auto_renew = SubscriptionStatus.expired, False
             continue
         try:
-            require_current_self_attestation(buyer)
-        except PermissionError:
+            await require_subscription_compliance(db, buyer)
+        except SubscriptionError as exc:
             await _suppress_renewal(
                 db,
                 subscription,
-                reason="subscriber_adult_attestation_not_current",
+                reason=f"subscriber_compliance_{exc.code or 'denied'}".lower(),
                 now=now,
             )
             continue
@@ -827,12 +866,12 @@ async def retry_failed_subscription_renewals(db: AsyncSession) -> int:
             subscription.auto_renew = False
             continue
         try:
-            require_current_self_attestation(buyer)
-        except PermissionError:
+            await require_subscription_compliance(db, buyer)
+        except SubscriptionError as exc:
             await _suppress_renewal(
                 db,
                 subscription,
-                reason="subscriber_adult_attestation_not_current",
+                reason=f"subscriber_compliance_{exc.code or 'denied'}".lower(),
                 now=now,
             )
             continue

@@ -4,10 +4,20 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
+from app.compliance.policy import effective_policy_for_country
+from app.compliance.types import ASSURANCE_STRENGTH, normalize_country_code
+from app.models.compliance import (
+    AgeVerificationStatus,
+    PerformerAgeVerification,
+    PerformerIdentity,
+    PerformerIdentityStatus,
+    PerformerIdentityVerification,
+    VerifiedContentPerformer,
+)
 from app.models.content import ContentItem, MediaAsset
 from app.models.creator import CreatorProfile
 from app.models.featuring import FeatureBooking, FeatureIneligibilityReason
@@ -59,7 +69,12 @@ async def can_manage_consent_releases(
     )
 
 
-async def target_snapshot(db: AsyncSession, target_type: ReportTargetType, target_id: UUID) -> dict:
+async def target_snapshot(
+    db: AsyncSession,
+    reporter: User,
+    target_type: ReportTargetType,
+    target_id: UUID,
+) -> dict:
     """Resolve a reportable object server-side and retain only safe immutable context."""
     models: dict[ReportTargetType, tuple[type, str | None]] = {
         ReportTargetType.user: (User, "id"),
@@ -85,6 +100,57 @@ async def target_snapshot(db: AsyncSession, target_type: ReportTargetType, targe
             row = await db.get(model[0], target_id) if model else None
     if not row:
         raise TrustSafetyError("Report target not found")
+
+    # Reporting must not become an object-existence oracle for content that the
+    # reporter could not otherwise access. Public and entitled content use the
+    # same domain resolvers as their serving surfaces; raw assets remain
+    # reportable by their creator owner, while viewers report the owning
+    # content/message/listing rather than its private storage object.
+    if isinstance(row, ContentItem):
+        from app.content.access import can_access_content
+
+        if not await can_access_content(db, row, reporter):
+            raise TrustSafetyError("Report target not found")
+    elif isinstance(row, MediaAsset):
+        owner_user_id = await db.scalar(
+            select(CreatorProfile.user_id).where(CreatorProfile.id == row.owner_creator_id)
+        )
+        if owner_user_id != reporter.id:
+            raise TrustSafetyError("Report target not found")
+    elif isinstance(row, FeedPost):
+        from app.social.service import can_access_post
+
+        if not await can_access_post(db, row, reporter):
+            raise TrustSafetyError("Report target not found")
+    elif isinstance(row, PostComment):
+        from app.social.service import can_access_post
+
+        post = await db.get(FeedPost, row.post_id)
+        if (
+            post is None
+            or row.hidden_at is not None
+            or row.deleted_at is not None
+            or not await can_access_post(db, post, reporter)
+        ):
+            raise TrustSafetyError("Report target not found")
+    elif isinstance(row, Message):
+        from app.messaging.service import assert_participant
+        from app.models.messaging import Conversation
+
+        conversation = await db.get(Conversation, row.conversation_id)
+        if conversation is None:
+            raise TrustSafetyError("Report target not found")
+        try:
+            await assert_participant(db, conversation, reporter)
+        except PermissionError as exc:
+            raise TrustSafetyError("Report target not found") from exc
+    elif isinstance(row, MarketplaceOrder):
+        seller_user_id = await db.scalar(
+            select(CreatorProfile.user_id).where(CreatorProfile.id == row.seller_creator_id)
+        )
+        if reporter.id not in {row.buyer_user_id, seller_user_id}:
+            raise TrustSafetyError("Report target not found")
+
     snapshot = {"target_type": target_type.value, "target_id": str(target_id)}
     for field in ("public_id", "owner_creator_id", "creator_id", "sender_user_id", "status"):
         value = getattr(row, field, None)
@@ -137,7 +203,7 @@ async def open_or_attach_report(
 ) -> tuple[TrustSafetyReport, ModerationCase, bool]:
     if details is not None and len(details.strip()) > 2000:
         raise TrustSafetyError("Report details are too long")
-    snapshot = await target_snapshot(db, target_type, target_id)
+    snapshot = await target_snapshot(db, reporter, target_type, target_id)
     now = datetime.now(UTC)
     existing = await db.scalar(
         select(TrustSafetyReport)
@@ -161,19 +227,42 @@ async def open_or_attach_report(
         )
         .order_by(ModerationCase.created_at.desc())
     )
+    severity = severity_for(reason)
+    queue = queue_for(target_type, reason)
     if case is None:
-        severity = severity_for(reason)
         case = ModerationCase(
             public_id=_case_public_id(),
             primary_target_type=target_type,
             primary_target_id=target_id,
+            status=(
+                ModerationCaseStatus.action_required
+                if queue is ModerationQueue.urgent
+                else ModerationCaseStatus.open
+            ),
             severity=severity,
             priority=100 if severity is ModerationSeverity.critical else 0,
-            queue=queue_for(target_type, reason),
+            queue=queue,
             opened_at=now,
         )
         db.add(case)
         await db.flush()
+    else:
+        # A later urgent signal must elevate an already-open lower-severity
+        # case without silently rewinding active moderator investigation.
+        severity_rank = {
+            ModerationSeverity.low: 0,
+            ModerationSeverity.medium: 1,
+            ModerationSeverity.high: 2,
+            ModerationSeverity.critical: 3,
+        }
+        if severity_rank[severity] > severity_rank[case.severity]:
+            case.severity = severity
+        if severity is ModerationSeverity.critical:
+            case.priority = max(case.priority, 100)
+        if queue is ModerationQueue.urgent:
+            case.queue = ModerationQueue.urgent
+            if case.status in {ModerationCaseStatus.open, ModerationCaseStatus.triage}:
+                case.status = ModerationCaseStatus.action_required
     report = TrustSafetyReport(
         reporter_user_id=reporter.id,
         target_type=target_type,
@@ -196,19 +285,6 @@ async def open_or_attach_report(
             created_by_user_id=reporter.id,
         )
     )
-    # A credible underage report against content cannot wait for a reviewer to
-    # pick up the queue.  The report remains evidence, while the same
-    # append-only enforcement path used by a moderator applies reversible
-    # containment.  The unique action constraint makes duplicate reports and
-    # callback retries harmless.
-    if reason is ReportReason.underage_concern and target_type is ReportTargetType.media:
-        await enforce_content_containment(
-            db,
-            case,
-            reporter,
-            target_id,
-            "Immediate temporary containment for credible underage concern",
-        )
     await record_event(
         db,
         "trust_safety.report_created",
@@ -673,6 +749,172 @@ async def valid_verified_release_for_content(
     db: AsyncSession, content_id: UUID, now: datetime | None = None
 ) -> bool:
     now = now or datetime.now(UTC)
+    content = await db.get(ContentItem, content_id)
+    if content is None:
+        return False
+    creator = await db.get(CreatorProfile, content.owner_creator_id)
+    creator_policy = None
+    if creator is not None:
+        # Creator jurisdiction is owned by the creator compliance resolver. Do
+        # not reconstruct it from profile/account fields in the performer
+        # domain, because current KYC conflicts must retain their fail-closed
+        # meaning.
+        from app.creators.service import resolve_creator_compliance_eligibility
+
+        creator_eligibility = await resolve_creator_compliance_eligibility(
+            db,
+            profile=creator,
+            now=now,
+        )
+        if creator_eligibility.jurisdiction is not None:
+            creator_policy = await effective_policy_for_country(
+                db,
+                creator_eligibility.jurisdiction,
+                now=now,
+            )
+    strict_performer_authority = bool(
+        creator_policy and creator_policy.rules.co_performer_verification_required
+    )
+    performers = (
+        await db.scalars(
+            select(VerifiedContentPerformer).where(
+                VerifiedContentPerformer.content_id == content_id
+            )
+        )
+    ).all()
+    if strict_performer_authority and not performers:
+        # A generic release cannot identify the performers it purports to
+        # cover. Jurisdictions that require verified co-performers therefore
+        # require explicit one-per-performer links before any release can be
+        # treated as authority.
+        return False
+    if performers:
+        # A release represents one named performer. Reusing it for multiple
+        # linked people must never satisfy the all-performers invariant.
+        required_release_ids: set[UUID] = set()
+        for link in performers:
+            performer = await db.get(PerformerIdentity, link.performer_id)
+            if performer is None:
+                return False
+            linked_user = (
+                await db.get(User, performer.platform_user_id)
+                if performer.platform_user_id is not None
+                else None
+            )
+            try:
+                countries = {
+                    country
+                    for country in (
+                        normalize_country_code(performer.country_code),
+                        normalize_country_code(linked_user.country_code if linked_user else None),
+                    )
+                    if country is not None
+                }
+            except ValueError:
+                return False
+            if len(countries) != 1:
+                return False
+            country = countries.pop()
+            policy = await effective_policy_for_country(db, country, now=now)
+            if policy is None:
+                return False
+            identity_required = (
+                strict_performer_authority
+                or link.identity_verification_required
+                or policy.rules.co_performer_verification_required
+            )
+            age_required = (
+                strict_performer_authority
+                or link.age_verification_required
+                or policy.rules.co_performer_verification_required
+            )
+            release_required = (
+                strict_performer_authority or link.release_required or policy.rules.release_required
+            )
+            if release_required:
+                if (
+                    link.consent_release_id is None
+                    or link.consent_release_id in required_release_ids
+                ):
+                    return False
+                required_release_ids.add(link.consent_release_id)
+            if identity_required:
+                identity = await db.scalar(
+                    select(PerformerIdentityVerification)
+                    .where(PerformerIdentityVerification.performer_id == performer.id)
+                    .order_by(
+                        PerformerIdentityVerification.created_at.desc(),
+                        PerformerIdentityVerification.id.desc(),
+                    )
+                    .limit(1)
+                )
+                if (
+                    identity is None
+                    or identity.status is not PerformerIdentityStatus.verified
+                    or identity.verified_at is None
+                    or identity.revoked_at is not None
+                    or (identity.expires_at is not None and identity.expires_at <= now)
+                    or (
+                        identity.country_code is not None
+                        and normalize_country_code(identity.country_code) != country
+                    )
+                ):
+                    return False
+            if age_required:
+                age = await db.scalar(
+                    select(PerformerAgeVerification)
+                    .where(PerformerAgeVerification.performer_id == performer.id)
+                    .order_by(
+                        PerformerAgeVerification.created_at.desc(),
+                        PerformerAgeVerification.id.desc(),
+                    )
+                    .limit(1)
+                )
+                if (
+                    age is None
+                    or age.status is not AgeVerificationStatus.verified
+                    or age.verified_at is None
+                    or age.revoked_at is not None
+                    or (age.expires_at is not None and age.expires_at <= now)
+                    or normalize_country_code(age.country_code) != country
+                    or age.required_minimum_age < policy.rules.minimum_age
+                    or ASSURANCE_STRENGTH[age.achieved_assurance_level]
+                    < ASSURANCE_STRENGTH[policy.rules.required_assurance_level]
+                    or (
+                        policy.rules.reverify_after_days is not None
+                        and (
+                            age.expires_at is None
+                            or age.verified_at + timedelta(days=policy.rules.reverify_after_days)
+                            <= now
+                        )
+                    )
+                ):
+                    return False
+            if release_required:
+                release = (
+                    await db.get(ConsentRelease, link.consent_release_id)
+                    if link.consent_release_id
+                    else None
+                )
+                if (
+                    release is None
+                    or release.owner_creator_id != performer.owner_creator_id
+                    or release.participant_reference != performer.safe_reference
+                    or release.status is not ConsentReleaseStatus.verified
+                    or release.verified_at is None
+                    or release.revoked_at is not None
+                    or release.effective_from is None
+                    or release.effective_from > now
+                    or (release.effective_until is not None and release.effective_until < now)
+                    or not await db.scalar(
+                        select(ConsentReleaseContent.consent_release_id).where(
+                            ConsentReleaseContent.consent_release_id == release.id,
+                            ConsentReleaseContent.content_id == content_id,
+                        )
+                    )
+                ):
+                    return False
+        return True
     return bool(
         await db.scalar(
             select(ConsentRelease.id)
@@ -680,12 +922,58 @@ async def valid_verified_release_for_content(
             .where(
                 ConsentReleaseContent.content_id == content_id,
                 ConsentRelease.status == ConsentReleaseStatus.verified,
+                ConsentRelease.verified_at.is_not(None),
                 ConsentRelease.revoked_at.is_(None),
+                ConsentRelease.effective_from <= now,
                 (
                     ConsentRelease.effective_until.is_(None)
                     | (ConsentRelease.effective_until >= now)
                 ),
             )
+        )
+    )
+
+
+async def creator_performer_consent_issue_count(
+    db: AsyncSession,
+    creator_profile_id: UUID,
+    now: datetime | None = None,
+) -> int:
+    """Count creator content whose current performer/consent authority fails.
+
+    A content item contributes at most one issue even when several linked
+    performers fail. Deleted content is historical and is not an actionable
+    Creator Studio item.
+    """
+
+    current = now or datetime.now(UTC)
+    content_ids = (
+        await db.scalars(
+            select(ContentItem.id).where(
+                ContentItem.owner_creator_id == creator_profile_id,
+                ContentItem.deleted_at.is_(None),
+                or_(
+                    ContentItem.requires_verified_consent.is_(True),
+                    exists().where(VerifiedContentPerformer.content_id == ContentItem.id),
+                ),
+            )
+        )
+    ).all()
+    issues = 0
+    for content_id in content_ids:
+        if not await valid_verified_release_for_content(db, content_id, now=current):
+            issues += 1
+    return issues
+
+
+async def has_verified_content_performers(db: AsyncSession, content_id: UUID) -> bool:
+    """Whether the private all-performers authority applies to this content."""
+
+    return bool(
+        await db.scalar(
+            select(VerifiedContentPerformer.id)
+            .where(VerifiedContentPerformer.content_id == content_id)
+            .limit(1)
         )
     )
 

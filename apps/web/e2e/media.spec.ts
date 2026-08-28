@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { mailpitMessage, securityLink } from "./mailpit";
 
 const apiBase =
@@ -72,6 +72,7 @@ test("creator media travels through the real private processing stack", async ({
   const videoTitle = `Private video ${stamp}`;
 
   await page.goto("/register");
+  await completeRegistrationCompliance(page);
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -107,8 +108,8 @@ test("creator media travels through the real private processing stack", async ({
     const response = await fetch(`${apiBase}/api/v1/creators/me`, { credentials: "include" });
     return await response.json();
   }, { apiBase }), { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
-  await page.goto("/account");
-  await page.getByRole("link", { name: "Creator studio" }).click();
+  await page.goto("/creator-studio");
+  await expect(page.getByRole("heading", { name: "Media library" })).toBeVisible();
   const browserErrors: string[] = [];
   const storageRequests: { url: string; method: string; headers: Record<string, string> }[] = [];
   const storageResponses: { url: string; status: number; headers: Record<string, string>; body: string }[] = [];
@@ -232,6 +233,7 @@ test("creator media travels through the real private processing stack", async ({
   const buyerPage = await buyerContext.newPage();
   const buyerEmail = `phase3-buyer-${stamp}@example.com`;
   await buyerPage.goto("/register");
+  await completeRegistrationCompliance(buyerPage);
   await buyerPage.getByLabel("Email").fill(buyerEmail);
   await buyerPage.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await buyerPage.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -280,6 +282,7 @@ test("creator media travels through the real private processing stack", async ({
   const subscriberPage = await subscriberContext.newPage();
   const subscriberEmail = `phase4-subscriber-${stamp}@example.com`;
   await subscriberPage.goto("/register");
+  await completeRegistrationCompliance(subscriberPage);
   await subscriberPage.getByLabel("Email").fill(subscriberEmail);
   await subscriberPage.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await subscriberPage.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -343,11 +346,11 @@ test("creator media travels through the real private processing stack", async ({
   await anonymousPage.goto(
     `${process.env.E2E_WEB_URL ?? "http://127.0.0.1:38181"}/content/${published[2].id}`,
   );
-  await expect(anonymousPage.getByRole("heading", { name: freeGalleryTitle, exact: true })).toBeVisible();
+  await expect(anonymousPage.getByRole("heading", { name: "Age-restricted content", exact: true })).toBeVisible();
   await expect(anonymousPage.getByRole("region", { name: `${freeGalleryTitle} gallery` }))
     .toHaveCount(0);
-  await anonymousPage.getByRole("checkbox", { name: /I confirm that I am at least 18/ }).check();
-  await anonymousPage.getByRole("button", { name: "Confirm and continue" }).click();
+  await anonymousPage.getByRole("button", { name: "Verify age" }).click();
+  await expect(anonymousPage.getByRole("heading", { name: freeGalleryTitle, exact: true })).toBeVisible();
   await expect(anonymousPage.getByRole("region", { name: `${freeGalleryTitle} gallery` }))
     .toBeVisible();
   await anonymousPage.goto(`${process.env.E2E_WEB_URL ?? "http://127.0.0.1:38181"}/creator/${username}`);
@@ -481,9 +484,9 @@ test("creator media travels through the real private processing stack", async ({
   const publicVideoContext = await browser.newContext();
   const publicVideoPage = await publicVideoContext.newPage();
   await publicVideoPage.goto(`${process.env.E2E_WEB_URL ?? "http://127.0.0.1:38181"}/content/${videoReview!.id}`);
+  await expect(publicVideoPage.getByRole("heading", { name: "Age-restricted content", exact: true })).toBeVisible();
+  await publicVideoPage.getByRole("button", { name: "Verify age" }).click();
   await expect(publicVideoPage.getByRole("heading", { name: videoTitle, exact: true })).toBeVisible();
-  await publicVideoPage.getByRole("checkbox", { name: /I confirm that I am at least 18/ }).check();
-  await publicVideoPage.getByRole("button", { name: "Confirm and continue" }).click();
   await expect(publicVideoPage.locator(`video[aria-label="${videoTitle} preview trailer"]`)).toBeVisible();
   const publicVideo = await publicVideoPage.evaluate(async ({ apiBase, contentId }) => {
     const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });

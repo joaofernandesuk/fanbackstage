@@ -1,8 +1,9 @@
 import enum
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -29,6 +30,8 @@ class VerificationStatus(str, enum.Enum):
     failed = "failed"
     expired = "expired"
     needs_review = "needs_review"
+    revoked = "revoked"
+    suspended = "suspended"
 
 
 class CreatorProfile(UUIDPrimaryKey, Timestamped, Base):
@@ -72,6 +75,14 @@ class CreatorVerification(UUIDPrimaryKey, Timestamped, Base):
         Enum(VerificationStatus, name="verification_status"), index=True
     )
     adult_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    identity_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    country_code: Mapped[str | None] = mapped_column(
+        ForeignKey("country_registry.code", ondelete="RESTRICT"), index=True
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason_code: Mapped[str | None] = mapped_column(String(96))
     metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
 

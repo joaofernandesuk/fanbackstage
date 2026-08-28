@@ -10,8 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
+from app.compliance.policy import resolve_compliance_decision
 from app.core.config import get_settings
 from app.integrations.email import email_provider
+from app.models.compliance import ComplianceFeature
 from app.models.identity import User
 from app.models.notification import (
     DeliveryStatus,
@@ -37,6 +39,7 @@ MANDATORY_TYPES = {
     "CHARGEBACK_NOTICE",
     "MODERATION_ACTION",
     "APPEAL_DECIDED",
+    "LEGAL_ACCEPTANCE_REQUIRED",
 }
 TYPE_CATEGORIES = {
     "AUTH_EMAIL_VERIFICATION": "account_security",
@@ -229,6 +232,14 @@ async def _eligible(db: AsyncSession, intent: NotificationIntent, user: User) ->
         return False
     if intent.classification is NotificationClass.transactional:
         return True
+    marketing_decision = await resolve_compliance_decision(
+        db,
+        user=user,
+        feature=ComplianceFeature.marketing_email,
+        adult_restricted=False,
+    )
+    if not marketing_decision.allowed:
+        return False
     if not user.is_active:
         return False
     pref = await db.scalar(

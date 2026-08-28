@@ -19,6 +19,16 @@ class Permission(StrEnum):
     MODERATION_APPEAL_REVIEW = "moderation.appeal.review"
     CONSENT_RELEASE_MANAGE = "consent.release.manage"
     MODERATION_SENSITIVE_EVIDENCE = "moderation.sensitive_evidence"
+    COMPLIANCE_VIEW = "compliance.view"
+    COMPLIANCE_POLICY_MANAGE = "compliance.policy.manage"
+    COMPLIANCE_JURISDICTION_MANAGE = "compliance.jurisdiction.manage"
+    COMPLIANCE_VERIFICATION_VIEW = "compliance.verification.view"
+    COMPLIANCE_VERIFICATION_REVIEW = "compliance.verification.review"
+    COMPLIANCE_PROVIDER_MANAGE = "compliance.provider.manage"
+    LEGAL_DOCUMENT_EDIT = "legal.document.edit"
+    LEGAL_DOCUMENT_PUBLISH = "legal.document.publish"
+    FEATURE_FLAG_MANAGE = "feature_flag.manage"
+    SITE_SETTINGS_MANAGE = "site_settings.manage"
 
 
 ROLE_PERMISSIONS: dict[str, set[Permission]] = {
@@ -33,6 +43,9 @@ ROLE_PERMISSIONS: dict[str, set[Permission]] = {
         Permission.MODERATION_ACTION,
         Permission.MODERATION_APPEAL_REVIEW,
         Permission.CONSENT_RELEASE_MANAGE,
+        Permission.COMPLIANCE_VIEW,
+        Permission.COMPLIANCE_VERIFICATION_VIEW,
+        Permission.COMPLIANCE_VERIFICATION_REVIEW,
     },
     "admin": {
         Permission.ACCOUNT_SELF_READ,
@@ -44,6 +57,11 @@ ROLE_PERMISSIONS: dict[str, set[Permission]] = {
         Permission.MODERATION_ACTION,
         Permission.MODERATION_APPEAL_REVIEW,
         Permission.CONSENT_RELEASE_MANAGE,
+        Permission.COMPLIANCE_VIEW,
+        Permission.COMPLIANCE_VERIFICATION_VIEW,
+        Permission.COMPLIANCE_VERIFICATION_REVIEW,
+        Permission.LEGAL_DOCUMENT_EDIT,
+        Permission.SITE_SETTINGS_MANAGE,
     },
     "super_admin": set(Permission),
 }

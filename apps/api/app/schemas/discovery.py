@@ -19,6 +19,10 @@ class DiscoveryResult(BaseModel):
     video_duration_seconds: int | None = None
     adult_access_required: bool = False
     adult_access_granted: bool = True
+    compliance_allowed: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None
     price_amount_minor: int | None = None
     currency: str | None = None
     availability: str | None = None
@@ -35,6 +39,10 @@ class DiscoveryPage(BaseModel):
     items: list[DiscoveryResult]
     next_cursor: str | None = None
     ranking_version: int
+    compliance_allowed: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None
 
 
 class DiscoveryConfigInput(BaseModel):

@@ -9,12 +9,25 @@ from sqlalchemy import func, select
 
 from app.accounts import adult_access
 from app.models.audit import AuditEvent
+from app.models.compliance import (
+    AgeVerificationRecord,
+    JurisdictionPolicyRevision,
+    PerformerIdentity,
+    VerifiedContentPerformer,
+)
 from app.models.content import ContentItem, ContentStatus, ContentType, MediaAsset
-from app.models.creator import CreatorProfile, CreatorStatus
+from app.models.creator import CreatorProfile, CreatorStatus, CreatorVerification
 from app.models.featuring import FeatureBooking
 from app.models.finance import LedgerTransaction, PaymentAttempt, Purchase
 from app.models.groups import Group, GroupContract, GroupContractStatus
 from app.models.identity import User
+from app.models.legal import (
+    LegalAcceptance,
+    LegalDocumentStatus,
+    LegalDocumentType,
+    LegalDocumentVersion,
+    SiteSettingsVersion,
+)
 from app.models.marketplace import MarketplaceListing, MarketplaceListingStatus, MarketplaceOrder
 from app.models.messaging import Conversation, Message
 from app.models.notification import NotificationClass, NotificationIntent, NotificationPreference
@@ -23,6 +36,7 @@ from app.models.social import FeedPost, FeedPostStatus, Follow, PostComment, Pos
 from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
 from app.models.subscription import Subscription
+from app.models.trust_safety import ConsentRelease
 from app.notifications import service as notifications
 from app.seed import demo
 from app.seed.build import seed_database
@@ -198,6 +212,38 @@ async def _snapshot(db_session) -> dict[str, int]:
             Story.expires_at > now,
         ),
         "expired_stories": await count(Story, Story.status == StoryStatus.expired),
+        "demo_country_policies": await count(
+            JurisdictionPolicyRevision, JurisdictionPolicyRevision.is_demo.is_(True)
+        ),
+        "demo_age_verifications": await count(
+            AgeVerificationRecord,
+            AgeVerificationRecord.provider_verification_id.in_(
+                [
+                    "demo-verified-fan-v1",
+                    "demo-expired-fan-v1",
+                    "demo-failed-fan-v1",
+                ]
+            ),
+        ),
+        "demo_legal_published": await count(
+            LegalDocumentVersion,
+            LegalDocumentVersion.is_demo.is_(True),
+            LegalDocumentVersion.status == LegalDocumentStatus.published,
+        ),
+        "demo_legal_drafts": await count(
+            LegalDocumentVersion,
+            LegalDocumentVersion.is_demo.is_(True),
+            LegalDocumentVersion.status == LegalDocumentStatus.draft,
+        ),
+        "legal_acceptances": await count(LegalAcceptance),
+        "site_settings_versions": await count(SiteSettingsVersion),
+        "demo_performers": await count(PerformerIdentity),
+        "demo_performer_links": await count(VerifiedContentPerformer),
+        "demo_consent_releases": await count(ConsentRelease),
+        "demo_pending_creator_kyc": await count(
+            CreatorVerification,
+            CreatorVerification.provider_reference == "demo-pending-creator-kyc-reya-v1",
+        ),
     }
 
 
@@ -255,6 +301,16 @@ async def test_demo_seed_is_count_stable_when_run_twice(db_session):
     assert second["notification_intents"] >= 20
     assert second["marketing_preferences"] == 2
     assert second["marketing_preference_audits"] == 2
+    assert second["demo_country_policies"] == 3
+    assert second["demo_age_verifications"] == 3
+    assert second["demo_legal_published"] == 3
+    assert second["demo_legal_drafts"] == len(LegalDocumentType) - 3
+    assert second["legal_acceptances"] == TARGET_USER_COUNT * 3
+    assert second["site_settings_versions"] == 1
+    assert second["demo_performers"] == 1
+    assert second["demo_performer_links"] == 1
+    assert second["demo_consent_releases"] == 1
+    assert second["demo_pending_creator_kyc"] == 1
     marketing_users = (
         await db_session.scalars(
             select(User).where(

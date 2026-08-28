@@ -1,9 +1,10 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
+from app.core.rate_limit import enforce_social_rate_limit
 from app.models.trust_safety import (
     ConsentRelease,
     ModerationAction,
@@ -29,7 +30,13 @@ router = APIRouter(prefix="/trust-safety", tags=["trust-safety"])
 
 
 @router.post("/reports")
-async def create_report(payload: TrustSafetyReportInput, identity: CurrentIdentity, db: Db) -> dict:
+async def create_report(
+    payload: TrustSafetyReportInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    await enforce_social_rate_limit(request, str(identity[0].id), "trust_safety_report")
     try:
         report, case, duplicate = await service.open_or_attach_report(
             db,

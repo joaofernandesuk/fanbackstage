@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -49,6 +49,7 @@ async function logout(page: Page) {
 
 async function register(page: Page, email: string, password: string) {
   await page.goto("/register");
+  await completeRegistrationCompliance(page);
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -87,19 +88,25 @@ async function createApprovedCreator(page: Page, stamp: string): Promise<Creator
 
 async function publishGallery(page: Page, creator: Creator, title: string, requiresConsent = false, approve = true): Promise<Content> {
   await page.goto("/creator-studio");
+  const existingAssets = await apiOk<{ id: string }[]>(page, "/media/mine");
+  const existingAssetIds = new Set(existingAssets.map((item) => item.id));
   await page.getByLabel("Upload image or video").setInputFiles({ name: `${title}.png`, mimeType: "image/png", buffer: image });
   await page.getByRole("button", { name: "Upload media" }).click();
-  const asset = await expect.poll(async () => {
+  let readyAssetId: string | undefined;
+  await expect.poll(async () => {
     const assets = await apiOk<{ id: string; status: string; media_type: string }[]>(page, "/media/mine");
-    return assets.find((item) => item.status === "ready" && item.media_type === "image");
-  }, { timeout: 30_000 }).toBeTruthy();
-  void asset;
-  const assets = await apiOk<{ id: string; status: string; media_type: string }[]>(page, "/media/mine");
-  const ready = assets.find((item) => item.status === "ready" && item.media_type === "image");
-  expect(ready).toBeTruthy();
+    const ready = assets.find((item) =>
+      !existingAssetIds.has(item.id)
+      && item.status === "ready"
+      && item.media_type === "image"
+    );
+    readyAssetId = ready?.id;
+    return ready?.status;
+  }, { timeout: 30_000 }).toBe("ready");
+  expect(readyAssetId).toBeTruthy();
   const gallery = await apiOk<Content>(page, "/content/galleries", "POST", { title, access_policy: "free", requires_verified_consent: requiresConsent });
-  await apiOk(page, `/content/galleries/${gallery.id}/items`, "POST", { media_asset_id: ready!.id, is_preview: true });
-  await apiOk(page, `/content/galleries/${gallery.id}/cover`, "PATCH", { media_asset_id: ready!.id });
+  await apiOk(page, `/content/galleries/${gallery.id}/items`, "POST", { media_asset_id: readyAssetId!, is_preview: true });
+  await apiOk(page, `/content/galleries/${gallery.id}/cover`, "PATCH", { media_asset_id: readyAssetId! });
   await apiOk(page, `/content/galleries/${gallery.id}/preview`, "PATCH", { preview_count: 1, preview_asset_ids: [] });
   await apiOk(page, `/content/${gallery.id}/submit`, "POST");
   if (!approve) return gallery;
@@ -267,16 +274,26 @@ test("Phase 13 real-stack report, appeal, consent, and critical-containment jour
   await register(page, `phase13-critical-${stamp}@example.com`, "phase13-critical-password");
   const criticalReport = await apiOk<{ case_id: string }>(page, "/trust-safety/reports", "POST", { target_type: "media", target_id: critical.id, reason: "underage_concern", details: "Credible evidence requires urgent containment." });
   await apiOk(page, "/trust-safety/reports", "POST", { target_type: "media", target_id: critical.id, reason: "underage_concern", details: "Repeated credible evidence." });
+  expect((await api(page, `/content/public/${critical.id}`)).status).toBe(200);
   await logout(page);
   await login(page, moderator.email, moderator.password);
   const criticalCase = await expect.poll(async () => {
-    const cases = await apiOk<{ id: string; public_id: string; severity: string }[]>(page, "/trust-safety/cases");
+    const cases = await apiOk<{ id: string; public_id: string; severity: string; status: string }[]>(page, "/trust-safety/cases");
     return cases.find((item) => item.public_id === criticalReport.case_id);
   }).toBeTruthy();
   void criticalCase;
-  const cases = await apiOk<{ id: string; public_id: string; severity: string }[]>(page, "/trust-safety/cases");
+  const cases = await apiOk<{ id: string; public_id: string; severity: string; status: string }[]>(page, "/trust-safety/cases");
   const criticalCaseRow = cases.find((item) => item.public_id === criticalReport.case_id)!;
   expect(criticalCaseRow.severity).toBe("critical");
+  expect(criticalCaseRow.status).toBe("action_required");
+  const reportedOnly = await detail(page, criticalCaseRow.id);
+  expect(reportedOnly.actions.filter((item) => item.type === "temporary_containment")).toHaveLength(0);
+  expect((await api(page, `/content/public/${critical.id}`)).status).toBe(200);
+  await apiOk(page, `/trust-safety/cases/${criticalCaseRow.id}/enforcement`, "POST", {
+    action: "contain_content",
+    target_id: critical.id,
+    reason: "Moderator confirmed temporary containment is required.",
+  });
   const criticalDetail = await detail(page, criticalCaseRow.id);
   expect(criticalDetail.actions.filter((item) => item.type === "temporary_containment")).toHaveLength(1);
   expect((await api(page, `/content/public/${critical.id}`)).status).toBe(404);
@@ -285,7 +302,7 @@ test("Phase 13 real-stack report, appeal, consent, and critical-containment jour
   const criticalAction = criticalDetail.actions.find((item) => item.type === "temporary_containment")!;
   const criticalAppeal = await apiOk<{ id: string }>(page, `/trust-safety/actions/${criticalAction.id}/appeals`, "POST", { reason: "Containment can be safely overturned after review." });
   await logout(page);
-  await login(page, moderator.email, moderator.password);
+  await login(page, reviewer.email, reviewer.password);
   await page.goto("/moderation/appeals");
   await page.getByLabel("Appeal ID").fill(criticalAppeal.id);
   await page.getByLabel("Outcome").selectOption("overturned");

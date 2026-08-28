@@ -1,10 +1,12 @@
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy import func, select, update
 
-from app.api.deps import CurrentIdentity, Db
+from app.api.deps import CurrentIdentity, Db, RawCurrentIdentity
 from app.core.config import get_settings
+from app.core.http import RequestBodyTooLarge, read_limited_body
 from app.models.notification import InAppNotification, NotificationPreference
 from app.notifications.service import (
     _now,
@@ -23,6 +25,7 @@ from app.schemas.notification import (
 )
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
+PROVIDER_WEBHOOK_MAX_BYTES = 16 * 1024
 
 
 def preference_response(row: NotificationPreference) -> PreferenceResponse:
@@ -100,7 +103,7 @@ async def mark_all_read(identity: CurrentIdentity, db: Db) -> MessageResponse:
 
 
 @router.get("/preferences", response_model=list[PreferenceResponse])
-async def preferences(identity: CurrentIdentity, db: Db) -> list[PreferenceResponse]:
+async def preferences(identity: RawCurrentIdentity, db: Db) -> list[PreferenceResponse]:
     rows = (
         await db.scalars(
             select(NotificationPreference)
@@ -132,7 +135,7 @@ async def set_preference(
 
 
 @router.post("/unsubscribe", response_model=MessageResponse)
-async def unsubscribe_marketing(identity: CurrentIdentity, db: Db) -> MessageResponse:
+async def unsubscribe_marketing(identity: RawCurrentIdentity, db: Db) -> MessageResponse:
     await unsubscribe(db, identity[0])
     await db.commit()
     return MessageResponse(message="Marketing email unsubscribed")
@@ -154,14 +157,19 @@ async def unsubscribe_marketing_token(token: str, db: Db) -> MessageResponse:
 
 
 @router.post("/provider-events", response_model=MessageResponse, include_in_schema=False)
-async def provider_event(
-    payload: ProviderWebhookInput, request: Request, db: Db
-) -> MessageResponse:
+async def provider_event(request: Request, db: Db) -> MessageResponse:
     if (
         request.headers.get("X-FanBackstage-Provider-Secret")
         != get_settings().notification_webhook_secret
     ):
         raise HTTPException(status_code=401, detail="Invalid provider webhook")
+    try:
+        body = await read_limited_body(request, max_bytes=PROVIDER_WEBHOOK_MAX_BYTES)
+        payload = ProviderWebhookInput.model_validate_json(body)
+    except RequestBodyTooLarge as exc:
+        raise HTTPException(status_code=413, detail="Provider webhook is too large") from exc
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid provider webhook payload") from exc
     if not await mark_provider_event(db, payload.provider_message_id, payload.event):
         raise HTTPException(status_code=404, detail="Unknown provider message")
     await db.commit()

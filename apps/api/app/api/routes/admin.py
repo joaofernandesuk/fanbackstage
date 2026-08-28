@@ -122,6 +122,33 @@ def affiliate_response(partner: referral_service.AffiliatePartner) -> AffiliateP
     )
 
 
+def referral_program_snapshot(program: referral_service.ReferralProgram) -> dict[str, object]:
+    return {
+        "public_id": program.public_id,
+        "actor_type": program.actor_type.value,
+        "program_type": program.program_type.value,
+        "status": program.status.value,
+        "owner_user_id": str(program.owner_user_id) if program.owner_user_id else None,
+        "owner_creator_id": str(program.owner_creator_id) if program.owner_creator_id else None,
+        "affiliate_partner_id": (
+            str(program.affiliate_partner_id) if program.affiliate_partner_id else None
+        ),
+        "terms_reference": program.terms_reference,
+    }
+
+
+def referral_link_snapshot(link: referral_service.ReferralLink) -> dict[str, object]:
+    return {
+        "public_id": link.public_id,
+        "policy_id": str(link.policy_id),
+        "code": link.code,
+        "destination_path": link.destination_path,
+        "status": link.status.value,
+        "source": link.source,
+        "expires_at": link.expires_at.isoformat() if link.expires_at else "none",
+    }
+
+
 @router.post("/affiliates", response_model=AffiliatePartnerResponse)
 async def create_affiliate(
     payload: AffiliatePartnerInput, identity: CurrentIdentity, db: Db
@@ -189,6 +216,20 @@ async def create_referral_program(
             affiliate_partner_id=payload.affiliate_partner_id,
             terms_reference=payload.terms_reference,
         )
+        await record_event(
+            db,
+            "referral.program_created",
+            actor_user_id=identity[0].id,
+            target_type="referral_program",
+            target_id=str(program.id),
+            metadata={
+                "reason": payload.reason,
+                "confirmed": payload.confirmed,
+                "scope": {"program_id": str(program.id)},
+                "before": "none",
+                "after": referral_program_snapshot(program),
+            },
+        )
         await db.commit()
         return {"id": program.id, "public_id": program.public_id, "status": program.status.value}
     except (ValueError, referral_service.ReferralError) as exc:
@@ -205,6 +246,12 @@ async def create_referral_policy(
     if not program:
         raise HTTPException(status_code=404, detail="Referral program not found")
     try:
+        previous_policy = await db.scalar(
+            select(referral_service.ReferralCommissionPolicy)
+            .where(referral_service.ReferralCommissionPolicy.program_id == program.id)
+            .order_by(referral_service.ReferralCommissionPolicy.version.desc())
+            .limit(1)
+        )
         policy = await referral_service.create_policy(
             db,
             program,
@@ -212,6 +259,22 @@ async def create_referral_policy(
             eligible_revenue_types=payload.eligible_revenue_types,
             attribution_window_days=payload.attribution_window_days,
             subscription_reward_window_days=payload.subscription_reward_window_days,
+        )
+        await record_event(
+            db,
+            "referral.policy_created",
+            actor_user_id=identity[0].id,
+            target_type="referral_commission_policy",
+            target_id=str(policy.id),
+            metadata={
+                "reason": payload.reason,
+                "confirmed": payload.confirmed,
+                "scope": {"program_id": str(program.id)},
+                "before": (
+                    referral_service.policy_snapshot(previous_policy) if previous_policy else "none"
+                ),
+                "after": referral_service.policy_snapshot(policy),
+            },
         )
         await db.commit()
         return {"id": policy.id, "public_id": policy.public_id, "version": policy.version}
@@ -238,6 +301,23 @@ async def create_referral_link(
             destination_path=payload.destination_path,
             source=payload.source,
             expires_at=payload.expires_at,
+        )
+        await record_event(
+            db,
+            "referral.link_created",
+            actor_user_id=identity[0].id,
+            target_type="referral_link",
+            target_id=str(link.id),
+            metadata={
+                "reason": payload.reason,
+                "confirmed": payload.confirmed,
+                "scope": {
+                    "program_id": str(program.id),
+                    "policy_id": str(policy.id),
+                },
+                "before": "none",
+                "after": referral_link_snapshot(link),
+            },
         )
         await db.commit()
         return ReferralLinkResponse(

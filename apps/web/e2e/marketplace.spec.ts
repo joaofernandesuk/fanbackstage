@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -8,7 +8,7 @@ const admin = { email: "phase2-e2e-admin@example.com", password: "phase2-e2e-adm
 const manager = { email: "phase8-e2e-manager@example.com", password: "phase8-e2e-manager-password" };
 async function api(page: import("@playwright/test").Page, path: string, method = "GET", body?: unknown) { return page.evaluate(async ({ apiBase, path, method, body }) => { const headers = body ? { "Content-Type": "application/json", ...(path.includes("/checkout") ? { "Idempotency-Key": `e2e-${Date.now()}` } : {}) } : undefined; const response = await fetch(`${apiBase}/api/v1${path}`, { method, credentials: "include", headers, body: body ? JSON.stringify(body) : undefined }); return { status: response.status, body: await response.json().catch(() => null) }; }, { apiBase, path, method, body }); }
 async function login(page: import("@playwright/test").Page, email: string, password: string) { await page.goto("/login"); await page.getByLabel("Email").fill(email); await page.getByLabel("Password", { exact: true }).fill(password); await page.getByRole("button", { name: "Log in" }).click(); await expectAuthenticatedAs(page, email); }
-async function register(page: import("@playwright/test").Page, email: string, password: string) { await page.goto("/register"); await page.getByLabel("Email").fill(email); await page.getByLabel("Password", { exact: true }).fill(password); await page.getByRole("checkbox", { name: "I confirm I am at least 18 years old and agree to the Terms." }).check(); await page.getByRole("button", { name: "Create account" }).click(); await page.goto(await securityLink(email, "/verify-email")); await page.getByRole("button", { name: "Verify email" }).click(); await login(page, email, password); }
+async function register(page: import("@playwright/test").Page, email: string, password: string) { await page.goto("/register"); await completeRegistrationCompliance(page); await page.getByLabel("Email").fill(email); await page.getByLabel("Password", { exact: true }).fill(password); await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check(); await page.getByRole("button", { name: "Create account" }).click(); await page.goto(await securityLink(email, "/verify-email")); await page.getByRole("button", { name: "Verify email" }).click(); await login(page, email, password); }
 
 test("Phase 9 marketplace settles, fulfils, holds, and releases one immutable order", async ({ page }) => {
   const stamp = Date.now(), password = "phase9-marketplace-password", creatorEmail = `phase9-seller-${stamp}@example.com`, buyerEmail = `phase9-buyer-${stamp}@example.com`, username = `seller${stamp}`;

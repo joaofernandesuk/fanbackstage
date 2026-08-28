@@ -2,6 +2,24 @@ import { describe, expect, it } from "vitest";
 
 import { creatorProgressItems, CreatorProgressSnapshot } from "./creator-studio-progress";
 
+const currentCreatorCompliance = {
+  jurisdiction: "PT",
+  policy_version: 2,
+  verification_status: "verified",
+  verification_expires_at: "2026-09-26T00:00:00Z",
+  identity_required: true,
+  identity_allowed: true,
+  age_required: true,
+  age_allowed: true,
+  public_allowed: true,
+  payout_kyc_required: true,
+  payout_kyc_satisfied: true,
+  payout_allowed: false,
+  code: "CREATOR_COMPLIANCE_ALLOWED",
+  reason: "Creator identity and age requirements are satisfied",
+  payout_code: "PAYOUT_NOT_CONFIGURED",
+};
+
 const incomplete: CreatorProgressSnapshot = {
   profile: null,
   content: [],
@@ -25,6 +43,9 @@ describe("creator Studio progress", () => {
         is_public: true,
         verification_status: "verified",
         adult_verified: true,
+        creator_compliance: currentCreatorCompliance,
+        performer_consent_issue_count: 0,
+        creator_compliance_action_required: false,
       },
       content: [
         {
@@ -92,6 +113,9 @@ describe("creator Studio progress", () => {
         is_public: false,
         verification_status: "verified",
         adult_verified: true,
+        creator_compliance: currentCreatorCompliance,
+        performer_consent_issue_count: 0,
+        creator_compliance_action_required: false,
       },
       posts: [{ status: "draft" }],
     });
@@ -100,7 +124,7 @@ describe("creator Studio progress", () => {
     expect(items[1].complete).toBe(false);
   });
 
-  it("does not call a public profile complete after creator KYC becomes stale", () => {
+  it("does not call a raw verified provider row current after policy eligibility fails", () => {
     const items = creatorProgressItems({
       ...incomplete,
       profile: {
@@ -109,8 +133,20 @@ describe("creator Studio progress", () => {
         bio: "Saved profile",
         status: "approved",
         is_public: true,
-        verification_status: "failed",
-        adult_verified: false,
+        verification_status: "verified",
+        adult_verified: true,
+        creator_compliance: {
+          ...currentCreatorCompliance,
+          verification_expires_at: "2026-08-01T00:00:00Z",
+          identity_allowed: false,
+          public_allowed: false,
+          code: "CREATOR_IDENTITY_VERIFICATION_REQUIRED",
+          reason: "Current creator identity verification is required",
+          payout_kyc_satisfied: false,
+          payout_code: "PAYOUT_KYC_REQUIRED",
+        },
+        performer_consent_issue_count: 0,
+        creator_compliance_action_required: true,
       },
     });
 

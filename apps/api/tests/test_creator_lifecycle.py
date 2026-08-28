@@ -1,14 +1,18 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from sqlalchemy import func, select
+from surface_policy_helpers import publish_creator_identity_policy
 
 from app.accounts import service as accounts
+from app.api.routes import creators as creator_routes
 from app.creators import service
 from app.main import app
 from app.models.audit import AuditEvent
+from app.models.content import AccessPolicy, ContentItem, ContentStatus, ContentType
 from app.models.creator import (
     CreatorCategory,
     CreatorLanguage,
@@ -29,7 +33,9 @@ async def mark_email_verified(db_session, email: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_creator_application_is_concurrency_safe_and_audited_once(db_session, monkeypatch):
+async def test_creator_application_is_concurrency_safe_and_audited_once(
+    db_session, monkeypatch, reviewed_pt_compliance_policy
+):
     initial_lookup_barrier = asyncio.Barrier(2)
     original_profile_for_user = service.profile_for_user
 
@@ -51,6 +57,8 @@ async def test_creator_application_is_concurrency_safe_and_audited_once(db_sessi
                     "email": "creator-concurrent@example.com",
                     "password": "strong-password-123",
                     "adult_confirmed": True,
+                    "country_code": "PT",
+                    "legal_version_ids": [],
                 },
             )
         ).status_code == 201
@@ -77,9 +85,70 @@ async def test_creator_application_is_concurrency_safe_and_audited_once(db_sessi
         select(AuditEvent).where(AuditEvent.event_type == "creator.application_started")
     )
     assert event is not None
-    assert event.actor_user_id == (await db_session.scalar(select(User.id)))
+    registered_user_id = await db_session.scalar(
+        select(User.id).where(User.email == "creator-concurrent@example.com")
+    )
+    assert event.actor_user_id == registered_user_id
     assert event.target_type == "creator_profile"
     assert event.target_id == first.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_creator_registration_policy_denial_creates_no_application(db_session, monkeypatch):
+    async def denied(*_args, **_kwargs):
+        return SimpleNamespace(
+            allowed=False,
+            code="FEATURE_UNAVAILABLE",
+            action="CONTACT_SUPPORT",
+            reason="Creator registration is unavailable",
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": "creator-registration-denied@example.com",
+                    "password": "strong-password-123",
+                    "adult_confirmed": True,
+                    "country_code": "PT",
+                    "legal_version_ids": [],
+                },
+            )
+        ).status_code == 201
+        await mark_email_verified(db_session, "creator-registration-denied@example.com")
+        assert (
+            await client.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": "creator-registration-denied@example.com",
+                    "password": "strong-password-123",
+                },
+            )
+        ).status_code == 200
+        monkeypatch.setattr(creator_routes, "resolve_request_compliance_decision", denied)
+        response = await client.post("/api/v1/creators/me/application")
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "FEATURE_UNAVAILABLE"
+    user_id = await db_session.scalar(
+        select(User.id).where(User.email == "creator-registration-denied@example.com")
+    )
+    assert (
+        await db_session.scalar(select(CreatorProfile.id).where(CreatorProfile.user_id == user_id))
+        is None
+    )
+    assert (
+        await db_session.scalar(
+            select(AuditEvent.id).where(
+                AuditEvent.event_type == "creator.application_started",
+                AuditEvent.actor_user_id == user_id,
+            )
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -105,6 +174,84 @@ async def test_creator_application_requires_verified_adult_before_review(db_sess
         "creator.status_approved",
         "creator.verification_changed",
     } <= {event.event_type for event in events}
+
+
+@pytest.mark.asyncio
+async def test_creator_self_projects_current_policy_eligibility_separately_from_raw_evidence(
+    db_session,
+):
+    await publish_creator_identity_policy(db_session)
+    now = datetime.now(UTC)
+    user, _ = await accounts.register(
+        db_session,
+        "creator-self-effective@example.com",
+        "strong-password-123",
+        None,
+        adult_confirmed=True,
+        country_code="PT",
+    )
+    user.email_verified_at = now
+    profile = CreatorProfile(
+        user_id=user.id,
+        username="creator-self-effective",
+        display_name="Creator Self Effective",
+        country_code="PT",
+        status=CreatorStatus.approved,
+        is_public=True,
+    )
+    db_session.add(profile)
+    await db_session.flush()
+    db_session.add(
+        CreatorVerification(
+            creator_profile_id=profile.id,
+            provider="test-raw-current",
+            provider_reference="creator-self-effective-raw-current",
+            status=VerificationStatus.verified,
+            identity_verified=True,
+            adult_verified=True,
+            country_code="PT",
+            verified_at=now - timedelta(days=31),
+            expires_at=now + timedelta(days=30),
+        )
+    )
+    db_session.add(
+        ContentItem(
+            owner_creator_id=profile.id,
+            created_by_user_id=user.id,
+            content_type=ContentType.gallery,
+            status=ContentStatus.draft,
+            access_policy=AccessPolicy.free,
+            title="Creator self unresolved consent",
+            requires_verified_consent=True,
+        )
+    )
+    await db_session.commit()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": user.email,
+                    "password": "strong-password-123",
+                },
+            )
+        ).status_code == 200
+        response = await client.get("/api/v1/creators/me")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["verification_status"] == "verified"
+    assert payload["adult_verified"] is True
+    assert payload["creator_compliance"]["verification_status"] == "verified"
+    assert payload["creator_compliance"]["identity_allowed"] is False
+    assert payload["creator_compliance"]["public_allowed"] is False
+    assert payload["creator_compliance"]["code"] == "CREATOR_IDENTITY_VERIFICATION_REQUIRED"
+    assert payload["creator_compliance"]["payout_allowed"] is False
+    assert payload["performer_consent_issue_count"] == 1
+    assert payload["creator_compliance_action_required"] is True
 
 
 @pytest.mark.asyncio
@@ -151,6 +298,7 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
         "strong-password-123",
         None,
         adult_confirmed=True,
+        country_code="PT",
     )
     await mark_email_verified(db_session, user.email)
 
@@ -268,7 +416,9 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
 
 
 @pytest.mark.asyncio
-async def test_development_kyc_http_requires_explicit_nonproduction_opt_in(db_session, monkeypatch):
+async def test_development_kyc_http_requires_explicit_nonproduction_opt_in(
+    db_session, monkeypatch, reviewed_pt_compliance_policy
+):
     from app.core.config import Settings
 
     async with httpx.AsyncClient(
@@ -281,6 +431,8 @@ async def test_development_kyc_http_requires_explicit_nonproduction_opt_in(db_se
                     "email": "dev-kyc-guard@example.com",
                     "password": "strong-password-123",
                     "adult_confirmed": True,
+                    "country_code": "PT",
+                    "legal_version_ids": [],
                 },
             )
         ).status_code == 201
@@ -320,7 +472,7 @@ async def test_development_kyc_http_requires_explicit_nonproduction_opt_in(db_se
 
 @pytest.mark.asyncio
 async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(
-    db_session, monkeypatch
+    db_session, monkeypatch, reviewed_pt_compliance_policy
 ):
     from app.core.config import Settings
 
@@ -347,6 +499,8 @@ async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(
                     "email": creator_email,
                     "password": "strong-password-123",
                     "adult_confirmed": True,
+                    "country_code": "PT",
+                    "legal_version_ids": [],
                 },
             )
         ).status_code == 201
@@ -378,7 +532,11 @@ async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(
         assert (await creator_client.get("/api/v1/creators/creator-public")).status_code == 404
 
         admin, _ = await accounts.register(
-            db_session, "admin@example.com", "strong-password-123", None
+            db_session,
+            "admin@example.com",
+            "strong-password-123",
+            None,
+            country_code="PT",
         )
         admin.email_verified_at = accounts._now()
         await accounts.assign_role(db_session, admin, "admin", admin.id, None)
@@ -399,6 +557,12 @@ async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(
 
         published = await creator_client.patch("/api/v1/creators/me", json={"is_public": True})
         assert published.status_code == 200
+        assert published.json()["creator_compliance"]["payout_kyc_required"] is False
+        assert published.json()["creator_compliance"]["payout_kyc_satisfied"] is True
+        assert published.json()["creator_compliance"]["payout_allowed"] is False
+        assert published.json()["creator_compliance"]["payout_code"] == "PAYOUT_NOT_CONFIGURED"
+        assert published.json()["performer_consent_issue_count"] == 0
+        assert published.json()["creator_compliance_action_required"] is False
         public = await creator_client.get("/api/v1/creators/creator-public")
         assert public.status_code == 200
         assert public.json() == {
@@ -415,13 +579,51 @@ async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(
             "languages": [],
             "categories": [],
             "social_links": [],
+            "adult_access_required": True,
+            "adult_access_granted": True,
+            "compliance_allowed": True,
+            "compliance_code": "ALLOWED",
+            "compliance_action": None,
+            "compliance_reason": "Policy and age-assurance requirements are satisfied",
         }
+        original_resolver = creator_routes.resolve_request_compliance_decision
+
+        async def denied_profile(*_args, **_kwargs):
+            return SimpleNamespace(
+                allowed=False,
+                age_access_allowed=False,
+                code="AGE_VERIFICATION_REQUIRED",
+                action="VERIFY_AGE",
+                reason="Age verification is required",
+            )
+
+        monkeypatch.setattr(creator_routes, "resolve_request_compliance_decision", denied_profile)
+        restricted_profile = await creator_client.get("/api/v1/creators/creator-public")
+        assert restricted_profile.status_code == 200
+        restricted_payload = restricted_profile.json()
+        assert restricted_payload["display_name"] == "Creator Public"
+        assert restricted_payload["username"] == "creator-public"
+        assert restricted_payload["bio"] is None
+        assert restricted_payload["avatar_reference"] is None
+        assert restricted_payload["cover_reference"] is None
+        assert restricted_payload["languages"] == []
+        assert restricted_payload["categories"] == []
+        assert restricted_payload["social_links"] == []
+        assert restricted_payload["follower_count"] == 0
+        assert restricted_payload["compliance_code"] == "AGE_VERIFICATION_REQUIRED"
+        assert "A public-safe profile" not in str(restricted_payload)
+        monkeypatch.setattr(
+            creator_routes,
+            "resolve_request_compliance_decision",
+            original_resolver,
+        )
         viewer, _ = await accounts.register(
             db_session,
             "creator-public-viewer@example.com",
             "strong-password-123",
             None,
             adult_confirmed=True,
+            country_code="PT",
         )
         viewer.email_verified_at = accounts._now()
         await db_session.commit()
@@ -456,7 +658,10 @@ async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(
             )
         )
         await db_session.commit()
-        assert (await creator_client.get("/api/v1/creators/creator-public")).status_code == 404
+        # The reviewed fixture does not require creator age/KYC. A provider row
+        # is not itself a policy switch; public eligibility follows the current
+        # reviewed creator rules.
+        assert (await creator_client.get("/api/v1/creators/creator-public")).status_code == 200
         creator = await db_session.scalar(select(User).where(User.email == creator_email))
         assert creator is not None
         await db_session.refresh(creator, ["roles"])

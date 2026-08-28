@@ -10,11 +10,17 @@ from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
-from app.content.access import public_content_surface_eligible
+from app.compliance.policy import resolve_compliance_decision
+from app.compliance.types import (
+    ComplianceAccessError,
+    ComplianceDecision,
+    require_compliance_access,
+)
+from app.content.access import content_requires_adult_access, public_content_surface_eligible
 from app.core.config import get_settings
 from app.finance.providers import PaymentProviderError, payment_provider
+from app.models.compliance import ComplianceFeature
 from app.models.content import (
     AccessPolicy,
     ContentEntitlement,
@@ -52,7 +58,40 @@ from app.notifications.service import emit_transactional
 
 
 class FinancialError(ValueError):
-    pass
+    def __init__(self, message: str, compliance_decision: ComplianceDecision | None = None):
+        super().__init__(message)
+        self.compliance_decision = compliance_decision
+        self.code = compliance_decision.code if compliance_decision else None
+        self.action = compliance_decision.action if compliance_decision else None
+
+
+async def require_ppv_compliance(
+    db: AsyncSession,
+    buyer: User,
+    content: ContentItem,
+    decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
+) -> ComplianceDecision:
+    restricted = await content_requires_adult_access(db, content)
+    allowed: ComplianceDecision | None = None
+    for feature in (ComplianceFeature.ppv, ComplianceFeature.purchases):
+        decision = (
+            decisions.get(feature)
+            if decisions
+            else await resolve_compliance_decision(
+                db,
+                user=buyer,
+                feature=feature,
+                adult_restricted=restricted,
+            )
+        )
+        if decision is None:
+            raise FinancialError("PPV compliance decision is unavailable")
+        try:
+            allowed = require_compliance_access(decision)
+        except ComplianceAccessError as exc:
+            raise FinancialError(exc.decision.reason, exc.decision) from exc
+    assert allowed is not None
+    return allowed
 
 
 _GENERIC_CREATOR_RELEASE_PROVENANCE = "generic_creator_settlement"
@@ -817,7 +856,11 @@ async def complete_excess_capture_refund(
 
 
 async def initiate_purchase(
-    db: AsyncSession, buyer: User, content_id: UUID, idempotency_key: str
+    db: AsyncSession,
+    buyer: User,
+    content_id: UUID,
+    idempotency_key: str,
+    compliance_decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
 ) -> Purchase:
     if not idempotency_key or len(idempotency_key) > 128:
         raise FinancialError("A valid Idempotency-Key is required")
@@ -864,10 +907,7 @@ async def initiate_purchase(
         return prior
     if not await public_content_surface_eligible(db, content, buyer):
         raise FinancialError("PPV content is not available for purchase")
-    try:
-        require_current_self_attestation(buyer)
-    except PermissionError as exc:
-        raise FinancialError("Current adult self-attestation is required") from exc
+    await require_ppv_compliance(db, buyer, content, compliance_decisions)
     currency = currency_code(prior.currency if prior else content.price_currency)
     bps = prior.commission_basis_points if prior else await ppv_commission(db)
     gross_amount_minor = prior.gross_amount_minor if prior else content.price_amount_minor
@@ -1215,6 +1255,21 @@ async def _open_provider_dispute(
                             .with_for_update()
                         )
                         if private_session:
+                            from app.streaming.service import (
+                                block_private_session_for_dispute,
+                            )
+
+                            await block_private_session_for_dispute(
+                                db,
+                                private_session,
+                                reason="provider_dispute",
+                            )
+                            # The committed outbox intent owns provider room
+                            # termination. Financial/product authority is
+                            # nevertheless terminal in this same transaction;
+                            # callers must never observe a merely "ending"
+                            # disputed session as purchasable or reconnectable.
+                            private_session.status = PrivateSessionStatus.disputed
                             from app.models.streaming import PrivateSessionSettlement
 
                             settlement = await db.scalar(
@@ -1232,11 +1287,6 @@ async def _open_provider_dispute(
                                 )
                             source_type = "private_session"
                             source_reference = str(private_session.id)
-                            private_session.status = PrivateSessionStatus.disputed
-                            private_session.ended_at = private_session.ended_at or datetime.now(UTC)
-                            private_session.end_reason = (
-                                private_session.end_reason or "provider_dispute"
-                            )
     attempt.status = PaymentStatus.disputed
     await record_event(
         db,

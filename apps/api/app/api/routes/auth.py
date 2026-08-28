@@ -2,9 +2,26 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
 
 from app.accounts import adult_access, service
-from app.api.deps import CurrentIdentity, Db, OptionalIdentity
+from app.api.deps import (
+    Db,
+    OptionalIdentity,
+    RawCurrentIdentity,
+    enforce_current_legal_acceptance,
+)
+from app.compliance.age_verification import AgeVerificationError, attach_anonymous_session
+from app.compliance.http import (
+    resolve_request_compliance_decision,
+    resolve_request_jurisdiction_with_evidence,
+)
+from app.compliance.types import (
+    ComplianceAccessError,
+    JurisdictionSignals,
+    require_compliance_access,
+)
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_auth_rate_limit
+from app.legal import service as legal_service
+from app.models.compliance import ComplianceFeature
 from app.models.identity import TokenPurpose, User
 from app.models.notification import NotificationChannel, NotificationClass, NotificationPriority
 from app.notifications.service import create_intent
@@ -31,6 +48,7 @@ def user_response(user: User) -> UserResponse:
         email=user.email,
         email_verified=user.email_verified_at is not None,
         adult_attested=adult_access.has_current_self_attestation(user),
+        country_code=user.country_code,
         roles=[role.name for role in user.roles],
     )
 
@@ -53,13 +71,57 @@ async def register(
     payload: RegisterRequest, response: Response, request: Request, db: Db
 ) -> UserResponse:
     await enforce_auth_rate_limit(request, str(payload.email).lower())
+    signals = JurisdictionSignals(selected_country=payload.country_code)
+    country_code = await resolve_request_jurisdiction_with_evidence(
+        db,
+        request,
+        user=None,
+        signals=signals,
+    )
+    if country_code is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JURISDICTION_UNRESOLVED",
+                "message": "Jurisdiction could not be resolved safely.",
+                "action": "CONTACT_SUPPORT",
+            },
+        )
     try:
+        decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=None,
+            feature=ComplianceFeature.new_fan_registration,
+            signals=signals,
+        )
+        require_compliance_access(decision)
+        await legal_service.validate_registration_acceptances(
+            db,
+            payload.legal_version_ids,
+            jurisdiction_code=country_code,
+        )
         user, token = await service.register(
             db,
             str(payload.email),
             payload.password,
             request.state.correlation_id,
             adult_confirmed=payload.adult_confirmed,
+            country_code=country_code,
+        )
+        anonymous_secret = request.cookies.get(get_settings().anonymous_compliance_cookie_name)
+        if anonymous_secret:
+            await attach_anonymous_session(
+                db,
+                anonymous_session_secret=anonymous_secret,
+                user=user,
+            )
+        await legal_service.record_registration_acceptances(
+            db,
+            user,
+            payload.legal_version_ids,
+            jurisdiction_code=country_code,
+            correlation_id=request.state.correlation_id,
         )
         await snapshot_signup_attribution(db, user, request.cookies.get(ATTRIBUTION_COOKIE_NAME))
         intent = await create_intent(
@@ -83,7 +145,25 @@ async def register(
         deliver_notification.delay(str(intent.id))
         await db.refresh(user, ["roles"])
         adult_access.set_adult_access_cookie(response)
+        if anonymous_secret:
+            response.delete_cookie(
+                get_settings().anonymous_compliance_cookie_name,
+                path="/",
+            )
         return user_response(user)
+    except ComplianceAccessError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "action": exc.action,
+            },
+        ) from exc
+    except (AgeVerificationError, legal_service.LegalError) as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -130,11 +210,28 @@ async def login(
             detail="Verify your email address before logging in.",
         )
     await db.refresh(user, ["roles"])
+    anonymous_secret = request.cookies.get(get_settings().anonymous_compliance_cookie_name)
+    if anonymous_secret:
+        try:
+            await attach_anonymous_session(
+                db,
+                anonymous_session_secret=anonymous_secret,
+                user=user,
+            )
+        except AgeVerificationError:
+            # A stale or differently attached browser session must never be
+            # reassigned or prevent the rightful account from logging in.
+            pass
     raw = await service.create_session(
         db, user, request.state.correlation_id, request.headers.get("user-agent")
     )
     await db.commit()
     set_cookie(response, raw)
+    if anonymous_secret:
+        response.delete_cookie(
+            get_settings().anonymous_compliance_cookie_name,
+            path="/",
+        )
     return user_response(user)
 
 
@@ -161,6 +258,8 @@ async def acknowledge_adult_access(
     await enforce_auth_rate_limit(
         request, str(identity[0].id) if identity else "anonymous-adult-access"
     )
+    if identity:
+        await enforce_current_legal_acceptance(request, db, identity[0])
     expires_at = adult_access.set_adult_access_cookie(response)
     if identity:
         changed = adult_access.attest_account(identity[0])
@@ -202,7 +301,7 @@ async def adult_access_status(
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(
-    response: Response, request: Request, identity: CurrentIdentity, db: Db
+    response: Response, request: Request, identity: RawCurrentIdentity, db: Db
 ) -> MessageResponse:
     _, session = identity
     await service.revoke_session(db, session, request.state.correlation_id)

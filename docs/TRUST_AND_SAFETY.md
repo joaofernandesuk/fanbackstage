@@ -47,19 +47,25 @@ Phase 5 provides stable post/comment report targets and append-oriented report r
 
 Exact legal and payments requirements vary by jurisdiction and provider and must be validated before production launch. The architecture should make those obligations enforceable without rebuilding the content model.
 
-## 29.3 Implemented baseline adult-access boundary
+## 29.3 Implemented compliance and age-assurance boundary
 
-The current implementation provides only a versioned 18+ self-attestation. Anonymous
-acknowledgement is stored in an HMAC-signed, HttpOnly, SameSite cookie with a bounded
-expiry; client flags and tampered or expired cookies fail closed. Authenticated account
-state is authoritative, so a guest cookie cannot elevate a legacy account. Restricted
-guest media URLs are capped to the remaining signed-attestation lifetime.
+FanBackstage now has a provider-neutral, durable age-assurance lifecycle and a central reviewed jurisdiction resolver. It records normalized threshold, assurance, status, expiry/revocation, and exact policy provenance without retaining DOB, document images, provider access tokens, or whole result payloads. The VerifyMyAge browser adapter and deterministic local/test adapter implement the same interface and callback lifecycle. The earlier versioned 18+ self-attestation remains only a low-authority compatibility result; production rejects it as the selected provider.
 
-This is deliberately not called age verification. No jurisdiction rules, date of birth,
-document result, or assurance level is inferred. Production remains blocked until real
-age-assurance and creator-KYC adapters, signed replay-safe callbacks, evidence retention,
-and jurisdiction/provider policy have been selected and implemented. Creator public
-serving separately requires the latest verified adult KYC result.
+Anonymous verification uses a durable server session referenced by a random HttpOnly, SameSite cookie whose hash is stored. It may attach to one account under row lock and cannot be reassigned. Provider verification never grants authentication or commercial entitlement.
+
+Current KYC/billing/trusted-request/account country authorities must agree. A valid provider result retains its country as evidence provenance and is used as jurisdiction only when current authority is absent; it does not permanently veto a later authoritative country change. The existing age threshold/assurance is then tested against the newly applicable policy, so stronger requirements trigger re-verification while sufficient assurance is reused. Country registry, policy templates, country overrides, feature revisions, effective dates, review state, assurance, expiry, and re-verification are evaluated by one fail-closed resolver. Missing/conflicting current authority, provider outage, stronger requirements, disabled jurisdictions, or expired/revoked results deny protected operations. Restricted delivery URLs are capped to the remaining verification/session lifetime and reauthorised at each request.
+
+Creator identity/KYC and creator adulthood remain separate from viewer age assurance. Performer identity, performer age, and per-performer consent releases are separate again. Every required linked performer must independently have current identity, age, and release authority. A creator cannot opt out of server-derived performer requirements, and one release cannot satisfy multiple performers.
+
+When the effective creator-jurisdiction policy requires co-performer verification,
+a legacy release-only content record is not verified performer authority. The
+content must have explicit `VerifiedContentPerformer` links, and every link must
+resolve current identity, age, and performer-specific release authority at
+approval, public projection, and final delivery. The legacy scoped-release
+fallback remains available only when that policy does not require verified
+co-performers.
+
+The repository does not contain reviewed real country law, production legal text, a retention duration, or real creator-KYC/payment providers. Demo PT/GB/US policies and legal bodies are fictional test data rejected by production readiness. See `COMPLIANCE.md`, `AGE_VERIFICATION.md`, `JURISDICTION_POLICY.md`, and `LEGAL_CMS.md`.
 
 # 31. Admin Backoffice
 
@@ -99,6 +105,8 @@ Use explicit temporary impersonation sessions rather than sharing credentials or
 - Promotion created/edited/cancelled.
 
 Audit logs should be append-oriented, timestamped, actor-aware and resistant to ordinary application-level deletion.
+
+Compliance audit includes template/country/feature revisions, verification starts/results/reviews/revocations/attachments, provider probes, performer changes, consent changes, normalized creator-verification changes, legal draft/publish/retire/acceptance, and site-settings versions. Public clients receive safe reason/action codes, never moderator notes, provider credentials, raw evidence, or private performer identity.
 
 # 39. Security Requirements
 

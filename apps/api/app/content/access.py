@@ -5,10 +5,14 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.adult_access import AdultAccessDecision
+from app.compliance.policy import effective_policy_for_country
+from app.compliance.types import ComplianceDecision
 from app.creators.service import (
-    current_adult_verification_predicate,
     require_public_creator_access,
+    resolve_creator_compliance_eligibility,
 )
+from app.media.contexts import has_single_media_context
+from app.models.compliance import ComplianceFeature
 from app.models.content import (
     AccessPolicy,
     ContentEntitlement,
@@ -31,6 +35,25 @@ from app.models.messaging import UserBlock
 from app.models.social import Follow
 
 HIDDEN_MODERATION = {"flagged", "rejected", "removed"}
+
+
+async def asset_delivery_feature(db: AsyncSession, asset_id: UUID) -> ComplianceFeature:
+    """Resolve the most restrictive owning surface for an opaque derivative URL."""
+    from app.models.marketplace import MarketplaceListingMedia
+    from app.models.messaging import MessageAttachment
+
+    if await db.scalar(
+        select(MessageAttachment.id).where(MessageAttachment.media_asset_id == asset_id)
+    ):
+        return ComplianceFeature.messaging
+    if await db.scalar(
+        select(MarketplaceListingMedia.id).where(MarketplaceListingMedia.media_asset_id == asset_id)
+    ):
+        return ComplianceFeature.marketplace
+    asset = await db.get(MediaAsset, asset_id)
+    if asset and asset.audience is MediaAudience.adult_restricted:
+        return ComplianceFeature.adult_media
+    return ComplianceFeature.platform_access
 
 
 async def public_content_eligible(
@@ -62,21 +85,19 @@ async def public_content_surface_eligible(
         or content.moderation_status.name != "approved"
     ):
         return False
-    if content.requires_verified_consent:
-        from app.trust_safety.service import valid_verified_release_for_content
+    from app.trust_safety.service import (
+        has_verified_content_performers,
+        valid_verified_release_for_content,
+    )
 
-        if not await valid_verified_release_for_content(db, content.id):
-            return False
+    if (
+        content.requires_verified_consent or await has_verified_content_performers(db, content.id)
+    ) and not await valid_verified_release_for_content(db, content.id):
+        return False
     creator = await db.get(CreatorProfile, content.owner_creator_id)
     if not creator or creator.status is not CreatorStatus.approved or not creator.is_public:
         return False
-    current_kyc = await db.scalar(
-        select(CreatorProfile.id).where(
-            CreatorProfile.id == creator.id,
-            current_adult_verification_predicate(CreatorProfile.id),
-        )
-    )
-    if not current_kyc:
+    if not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed:
         return False
     if user and creator.user_id != user.id:
         blocked = await db.scalar(
@@ -112,8 +133,13 @@ async def content_requires_adult_access(db: AsyncSession, content: ContentItem) 
 
 
 def adult_access_allows_asset(
-    asset: MediaAsset, adult_decision: AdultAccessDecision | None
+    asset: MediaAsset,
+    adult_decision: AdultAccessDecision | ComplianceDecision | None,
 ) -> bool:
+    if isinstance(adult_decision, ComplianceDecision):
+        # A canonical decision includes platform/domain feature availability as
+        # well as age. Safe media must not bypass a blocked jurisdiction.
+        return adult_decision.allowed
     return asset.audience is MediaAudience.safe_public or bool(
         adult_decision and adult_decision.allowed
     )
@@ -126,18 +152,18 @@ async def can_access_content(db: AsyncSession, content: ContentItem, user: User 
         or content.moderation_status.name in HIDDEN_MODERATION
     ):
         return False
-    if content.requires_verified_consent:
-        from app.trust_safety.service import valid_verified_release_for_content
+    from app.trust_safety.service import (
+        has_verified_content_performers,
+        valid_verified_release_for_content,
+    )
 
-        if not await valid_verified_release_for_content(db, content.id):
-            return False
+    if (
+        content.requires_verified_consent or await has_verified_content_performers(db, content.id)
+    ) and not await valid_verified_release_for_content(db, content.id):
+        return False
     if user:
         owner = await db.scalar(select(CreatorProfile.id).where(CreatorProfile.user_id == user.id))
-        if owner == content.owner_creator_id or {role.name for role in user.roles} & {
-            "admin",
-            "moderator",
-            "super_admin",
-        }:
+        if owner == content.owner_creator_id:
             return True
     if content.access_policy is AccessPolicy.free:
         return True
@@ -172,7 +198,7 @@ async def can_access_asset(
     db: AsyncSession,
     asset_id: UUID,
     user: User | None,
-    adult_decision: AdultAccessDecision | None = None,
+    adult_decision: AdultAccessDecision | ComplianceDecision | None = None,
 ) -> bool:
     """Only an owning or entitled published content item can authorize full media."""
     asset = await db.get(MediaAsset, asset_id)
@@ -183,6 +209,8 @@ async def can_access_asset(
         or asset.moderation_status.name in {"flagged", "rejected", "removed"}
         or not adult_access_allows_asset(asset, adult_decision)
     ):
+        return False
+    if not await has_single_media_context(db, asset_id):
         return False
     contents = (
         (
@@ -203,18 +231,16 @@ async def can_access_asset(
         .all()
     )
     for content in contents:
-        privileged = False
+        owner_access = False
         if user:
             owner = await db.scalar(
                 select(CreatorProfile.id).where(CreatorProfile.user_id == user.id)
             )
-            privileged = owner == content.owner_creator_id or bool(
-                {role.name for role in user.roles} & {"admin", "moderator", "super_admin"}
-            )
+            owner_access = owner == content.owner_creator_id
         if (
             content.owner_creator_id == asset.owner_creator_id
             and await can_access_content(db, content, user)
-            and (privileged or await public_content_eligible(db, content, user, adult_decision))
+            and (owner_access or await public_content_eligible(db, content, user, adult_decision))
         ):
             return True
     # A message offer is a distinct entitlement source: buying it must not
@@ -258,18 +284,41 @@ async def can_access_asset(
             except ValueError:
                 return False
             return True
-    return False
+    from app.models.social import FeedPost, FeedPostMedia
+    from app.social.service import can_access_post
+
+    feed_post = await db.scalar(
+        select(FeedPost)
+        .join(FeedPostMedia, FeedPostMedia.post_id == FeedPost.id)
+        .where(
+            FeedPostMedia.media_asset_id == asset_id,
+            FeedPost.creator_id == asset.owner_creator_id,
+        )
+    )
+    return bool(feed_post and await can_access_post(db, feed_post, user, adult_decision))
 
 
 async def can_access_preview(
     db: AsyncSession,
     derivative: MediaDerivative,
     user: User | None = None,
-    adult_decision: AdultAccessDecision | None = None,
+    adult_decision: AdultAccessDecision | ComplianceDecision | None = None,
 ) -> bool:
     """A preview is public only when it belongs to published, ready content and is configured."""
     if derivative.status is not MediaStatus.ready:
         return False
+    if not await has_single_media_context(db, derivative.media_asset_id):
+        return False
+    if isinstance(adult_decision, ComplianceDecision):
+        # Preview publication is an explicit jurisdiction policy choice, separate
+        # from viewer age assurance and content entitlement. Canonical public
+        # routes always supply a decision; missing reviewed policy therefore
+        # fails closed instead of treating the creator-configured teaser as public.
+        if not adult_decision.jurisdiction:
+            return False
+        policy = await effective_policy_for_country(db, adult_decision.jurisdiction)
+        if policy is None or not policy.rules.explicit_public_preview_allowed:
+            return False
     asset = await db.get(MediaAsset, derivative.media_asset_id)
     if (
         not asset
@@ -345,7 +394,6 @@ async def can_access_preview(
             MarketplaceListing.moderation_status == ModerationStatus.approved,
             CreatorProfile.status == CreatorStatus.approved,
             CreatorProfile.is_public.is_(True),
-            current_adult_verification_predicate(CreatorProfile.id),
         )
     )
     if (
@@ -358,6 +406,13 @@ async def can_access_preview(
         }
     ):
         creator = await db.get(CreatorProfile, listing.owner_creator_id)
+        if (
+            not creator
+            or not (
+                await resolve_creator_compliance_eligibility(db, profile=creator)
+            ).public_allowed
+        ):
+            return False
         if creator and user and creator.user_id != user.id:
             blocked = await db.scalar(
                 select(UserBlock.id).where(

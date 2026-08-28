@@ -4,14 +4,18 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from conftest import trusted_self_attested_accounts as accounts
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from starlette.requests import Request
+from surface_policy_helpers import publish_creator_identity_policy
 
-from app.accounts import service as accounts
 from app.api.routes import stories as story_routes
+from app.compliance.types import ComplianceDecision
 from app.creators import service as creators
 from app.main import app
 from app.models.audit import AuditEvent
+from app.models.compliance import AgeAssuranceLevel, ComplianceFeature
 from app.models.content import (
     AccessPolicy,
     ContentEntitlement,
@@ -31,15 +35,52 @@ from app.models.content import (
 from app.models.creator import CreatorStatus, CreatorVerification, VerificationStatus
 from app.models.messaging import UserBlock
 from app.models.social import Follow
-from app.models.story import StoryStatus
+from app.models.story import Story, StoryStatus
 from app.stories import service as stories
 from app.worker.celery_app import celery_app
 
 PASSWORD = "strong-password-123"
 
 
+def denied_story_decision() -> ComplianceDecision:
+    return ComplianceDecision(
+        allowed=False,
+        code="AGE_VERIFICATION_REQUIRED",
+        action="VERIFY_AGE",
+        reason="Age verification is required",
+        feature=ComplianceFeature.adult_media,
+        jurisdiction="PT",
+        policy_id=None,
+        policy_version=1,
+        required_minimum_age=18,
+        required_assurance_level=AgeAssuranceLevel.self_attested,
+        achieved_assurance_level=AgeAssuranceLevel.none,
+        age_access_allowed=False,
+        feature_allowed=True,
+        country_conflict=False,
+        verification_expires_at=None,
+    )
+
+
+def story_request(path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+    )
+
+
 async def creator(db, email: str, username: str):
-    user, _ = await accounts.register(db, email, PASSWORD, None)
+    user, _ = await accounts.register(db, email, PASSWORD, None, adult_confirmed=True)
     profile = await creators.get_or_create_profile(db, user)
     await creators.update_profile(
         db,
@@ -251,6 +292,48 @@ async def test_video_story_selects_preview_clip_and_never_full_playback(db_sessi
     assert payload["media"]["derivative_id"] == str(preview.id)
     assert payload["creator"]["verified"] is True
     assert "full-playback-must-not-serve" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_safe_asset_story_copy_still_requires_age_and_leaks_no_media(
+    db_session, reviewed_pt_compliance_policy
+):
+    owner, profile = await creator(
+        db_session,
+        "restricted-story@example.com",
+        "restricted-story",
+    )
+    asset, derivative = await ready_asset(
+        db_session,
+        profile.id,
+        "restricted-story",
+        audience=MediaAudience.safe_public,
+    )
+    story = await publish_story(
+        db_session,
+        owner,
+        asset.id,
+        "Explicit Story caption must not leak",
+        "Explicit Story alt text must not leak",
+        AccessPolicy.free,
+    )
+    payload = (
+        await story_routes.story_response(
+            db_session,
+            story,
+            compliance_decision=denied_story_decision(),
+        )
+    ).model_dump(mode="json")
+    assert payload["compliance_allowed"] is False
+    assert payload["compliance_code"] == "AGE_VERIFICATION_REQUIRED"
+    assert payload["compliance_action"] == "VERIFY_AGE"
+    assert payload["compliance_reason"] == "Age verification is required"
+    assert payload["caption"] is None
+    assert payload["alt_text"] is None
+    assert payload["media"] is None
+    assert derivative and str(derivative.id) not in str(payload)
+    assert asset.storage_key not in str(payload)
+    assert "Explicit Story" not in str(payload)
     assert asset.storage_key not in str(payload)
 
     verification = await db_session.scalar(
@@ -265,18 +348,77 @@ async def test_video_story_selects_preview_clip_and_never_full_playback(db_sessi
 
 
 @pytest.mark.asyncio
+async def test_restricted_story_final_delivery_applies_age_to_owner_and_staff(
+    db_session, monkeypatch, reviewed_pt_compliance_policy
+):
+    owner, profile = await creator(
+        db_session,
+        "story-final-owner@example.com",
+        "story-final-owner",
+    )
+    moderator, _ = await accounts.register(
+        db_session,
+        "story-final-moderator@example.com",
+        PASSWORD,
+        None,
+    )
+    await accounts.assign_role(db_session, moderator, "moderator", moderator.id, "test authority")
+    asset, derivative = await ready_asset(
+        db_session,
+        profile.id,
+        "story-final-restricted",
+        audience=MediaAudience.adult_restricted,
+    )
+    story = await publish_story(
+        db_session,
+        owner,
+        asset.id,
+        "Restricted owner Story",
+        None,
+        AccessPolicy.free,
+    )
+
+    async def denied(*_args, **_kwargs):
+        return denied_story_decision()
+
+    async def no_rate_limit(*_args, **_kwargs):
+        return None
+
+    class Storage:
+        def create_download_url(self, *_args, **_kwargs):
+            raise AssertionError("Denied Story access must not mint a storage URL")
+
+    monkeypatch.setattr(story_routes, "request_adult_access", denied)
+    monkeypatch.setattr(story_routes, "enforce_media_rate_limit", no_rate_limit)
+    monkeypatch.setattr(story_routes, "storage_provider", lambda: Storage())
+    for viewer in (owner, moderator):
+        with pytest.raises(HTTPException) as blocked:
+            await story_routes.story_media(
+                story.id,
+                story_request(f"/stories/{story.id}/media"),
+                (viewer, None),
+                db_session,
+            )
+        assert blocked.value.status_code == 404
+    assert derivative is not None
+
+
+@pytest.mark.asyncio
 async def test_public_rail_resolves_access_and_excludes_due_or_unsafe_rows(db_session):
     owner, profile = await creator(db_session, "rail-owner@example.com", "rail-owner")
     viewer, _ = await accounts.register(db_session, "rail-viewer@example.com", PASSWORD, None)
-    asset, _ = await ready_asset(db_session, profile.id, "rail")
+    free_asset, _ = await ready_asset(db_session, profile.id, "rail-free")
+    follower_asset, _ = await ready_asset(db_session, profile.id, "rail-follower")
+    subscription_asset, _ = await ready_asset(db_session, profile.id, "rail-subscription")
+    overdue_asset, _ = await ready_asset(db_session, profile.id, "rail-overdue")
     now = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
     free = await publish_story(
-        db_session, owner, asset.id, "free", None, AccessPolicy.free, now=now
+        db_session, owner, free_asset.id, "free", None, AccessPolicy.free, now=now
     )
     follower = await publish_story(
         db_session,
         owner,
-        asset.id,
+        follower_asset.id,
         "followers",
         None,
         AccessPolicy.followers,
@@ -285,7 +427,7 @@ async def test_public_rail_resolves_access_and_excludes_due_or_unsafe_rows(db_se
     subscription = await publish_story(
         db_session,
         owner,
-        asset.id,
+        subscription_asset.id,
         "subscription",
         None,
         AccessPolicy.subscription,
@@ -294,7 +436,7 @@ async def test_public_rail_resolves_access_and_excludes_due_or_unsafe_rows(db_se
     overdue = await publish_story(
         db_session,
         owner,
-        asset.id,
+        overdue_asset.id,
         "overdue",
         None,
         AccessPolicy.free,
@@ -354,7 +496,11 @@ async def test_public_rail_resolves_access_and_excludes_due_or_unsafe_rows(db_se
         title="Later linked gallery",
     )
     linked_content.gallery = Gallery(
-        items=[GalleryItem(media_asset_id=asset.id, position=0, is_preview=True)]
+        items=[
+            GalleryItem(media_asset_id=free_asset.id, position=0, is_preview=True),
+            GalleryItem(media_asset_id=follower_asset.id, position=1, is_preview=True),
+            GalleryItem(media_asset_id=subscription_asset.id, position=2, is_preview=True),
+        ]
     )
     db_session.add(linked_content)
     await db_session.flush()
@@ -362,10 +508,13 @@ async def test_public_rail_resolves_access_and_excludes_due_or_unsafe_rows(db_se
     await db_session.delete(linked_content)
     await db_session.flush()
 
-    asset.moderation_status = ModerationStatus.rejected
+    for asset in (free_asset, follower_asset, subscription_asset):
+        asset.moderation_status = ModerationStatus.rejected
     assert (await stories.public_rail(db_session, viewer, None, 50, now=current_time))[0] == []
     assert overdue.status is StoryStatus.active
-    asset.moderation_status = ModerationStatus.approved
+    for asset in (free_asset, follower_asset, subscription_asset):
+        asset.moderation_status = ModerationStatus.approved
+    await publish_creator_identity_policy(db_session)
     db_session.add(
         CreatorVerification(
             creator_profile_id=profile.id,
@@ -381,14 +530,74 @@ async def test_public_rail_resolves_access_and_excludes_due_or_unsafe_rows(db_se
 
 
 @pytest.mark.asyncio
+async def test_corrupt_multi_story_asset_is_hidden_and_never_mints_delivery(
+    db_session, monkeypatch
+):
+    owner, profile = await creator(
+        db_session, "ambiguous-story-owner@example.com", "ambiguous-story-owner"
+    )
+    asset, _derivative = await ready_asset(db_session, profile.id, "ambiguous-story")
+    now = datetime.now(UTC)
+    first = await publish_story(
+        db_session,
+        owner,
+        asset.id,
+        "First Story",
+        None,
+        AccessPolicy.free,
+        now=now,
+    )
+    second = Story(
+        creator_id=profile.id,
+        created_by_user_id=owner.id,
+        media_asset_id=asset.id,
+        idempotency_key="corrupt-second-story-context",
+        status=StoryStatus.active,
+        access_policy=AccessPolicy.free,
+        caption="A weaker duplicate context must not win",
+        published_at=now + timedelta(seconds=1),
+        expires_at=now + timedelta(hours=24, seconds=1),
+    )
+    db_session.add(second)
+    await db_session.flush()
+
+    assert await stories.public_story(db_session, first.id, owner, now=now) is None
+    assert await stories.public_story(db_session, second.id, owner, now=now) is None
+    rows, _cursor = await stories.public_rail(db_session, owner, None, 50, now=now)
+    assert rows == []
+    with pytest.raises(HTTPException) as projection_error:
+        await story_routes.story_response(db_session, first)
+    assert projection_error.value.status_code == 404
+
+    async def no_rate_limit(*_args, **_kwargs):
+        return None
+
+    class Storage:
+        def create_download_url(self, *_args, **_kwargs):
+            raise AssertionError("Ambiguous Story media must not mint a storage URL")
+
+    monkeypatch.setattr(story_routes, "enforce_media_rate_limit", no_rate_limit)
+    monkeypatch.setattr(story_routes, "storage_provider", lambda: Storage())
+    with pytest.raises(HTTPException) as delivery_error:
+        await story_routes.story_media(
+            first.id,
+            story_request(f"/stories/{first.id}/media"),
+            (owner, None),
+            db_session,
+        )
+    assert delivery_error.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_expiry_and_delete_transitions_are_replay_safe(db_session):
     owner, profile = await creator(db_session, "expiry-owner@example.com", "expiry-owner")
-    asset, _ = await ready_asset(db_session, profile.id, "expiry")
+    expired_asset, _ = await ready_asset(db_session, profile.id, "expiry-expired")
+    active_asset, _ = await ready_asset(db_session, profile.id, "expiry-active")
     published_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
     expired = await publish_story(
         db_session,
         owner,
-        asset.id,
+        expired_asset.id,
         None,
         None,
         AccessPolicy.free,
@@ -397,7 +606,7 @@ async def test_expiry_and_delete_transitions_are_replay_safe(db_session):
     active = await publish_story(
         db_session,
         owner,
-        asset.id,
+        active_asset.id,
         None,
         None,
         AccessPolicy.free,
@@ -446,10 +655,11 @@ async def test_story_report_and_moderation_removal_are_authoritative(db_session)
     )
     await accounts.assign_role(db_session, moderator, "moderator", moderator.id, None)
     asset, _ = await ready_asset(db_session, profile.id, "reported-story")
+    dismissed_asset, _ = await ready_asset(db_session, profile.id, "dismissed-story")
     story = await publish_story(
         db_session,
         owner,
-        asset.id,
+        dismissed_asset.id,
         "A reportable Story caption",
         None,
         AccessPolicy.free,
@@ -576,11 +786,12 @@ async def test_story_api_projects_only_safe_paths_and_soft_deleted_detail_disapp
     db_session, monkeypatch
 ):
     owner, profile = await creator(db_session, "story-api@example.com", "story-api")
+    historical_asset, _ = await ready_asset(db_session, profile.id, "api-historical")
     asset, derivative = await ready_asset(db_session, profile.id, "api-safe")
     historical = await publish_story(
         db_session,
         owner,
-        asset.id,
+        historical_asset.id,
         "Historical Story",
         None,
         AccessPolicy.free,
@@ -658,11 +869,13 @@ async def test_story_api_projects_only_safe_paths_and_soft_deleted_detail_disapp
         assert rail.status_code == detail.status_code == 200
         assert rail.json()["items"] == [detail.json()]
 
-        delivery = await anonymous_client.get(
+        delivery = await creator_client.get(
             f"/api/v1/stories/{story_id}/media", follow_redirects=False
         )
         assert delivery.status_code in {302, 307}
         assert delivery.headers["location"].endswith(derivative.storage_key)
+        assert delivery.headers["cache-control"] == "private, no-store"
+        assert delivery.headers["referrer-policy"] == "no-referrer"
         assert asset.storage_key not in delivery.headers["location"]
 
         deleted = await creator_client.delete(f"/api/v1/stories/{story_id}")

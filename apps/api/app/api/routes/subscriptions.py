@@ -1,13 +1,15 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.audit.service import record_event
+from app.compliance.http import resolve_request_compliance_decision
 from app.creators.service import require_public_creator_access
 from app.finance import service as finance
 from app.media.service import approved_creator
+from app.models.compliance import ComplianceFeature
 from app.models.creator import CreatorProfile
 from app.models.subscription import (
     PromotionEligibility,
@@ -31,6 +33,55 @@ from app.subscriptions import service
 router = APIRouter(tags=["subscriptions"])
 
 
+def compliance_error_detail(exc: service.SubscriptionError):
+    decision = exc.compliance_decision
+    if decision is None:
+        return str(exc)
+    return {
+        "message": str(exc),
+        "code": decision.code,
+        "action": decision.action,
+        "reason": decision.reason,
+    }
+
+
+async def request_subscription_decisions(db: Db, request: Request, user):
+    return {
+        feature: await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=feature,
+            adult_restricted=True,
+        )
+        for feature in (ComplianceFeature.subscriptions, ComplianceFeature.purchases)
+    }
+
+
+async def require_subscription_authoring(db: Db, request: Request, user) -> None:
+    for feature, restricted in (
+        (ComplianceFeature.platform_access, False),
+        (ComplianceFeature.subscriptions, True),
+    ):
+        decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=feature,
+            adult_restricted=restricted,
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                403,
+                {
+                    "message": decision.reason,
+                    "code": decision.code,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                },
+            )
+
+
 def response(subscription: Subscription) -> SubscriptionResponse:
     return SubscriptionResponse(
         id=subscription.id,
@@ -45,7 +96,8 @@ def response(subscription: Subscription) -> SubscriptionResponse:
 
 
 @router.put("/creator/subscription-plan", response_model=dict)
-async def set_plan(payload: PlanInput, identity: CurrentIdentity, db: Db) -> dict:
+async def set_plan(payload: PlanInput, request: Request, identity: CurrentIdentity, db: Db) -> dict:
+    await require_subscription_authoring(db, request, identity[0])
     creator = await approved_creator(db, identity[0])
     try:
         plan = await service.configure_plan(
@@ -70,7 +122,10 @@ async def set_plan(payload: PlanInput, identity: CurrentIdentity, db: Db) -> dic
 
 
 @router.post("/creator/subscription-promotions", response_model=dict)
-async def create_promotion(payload: PromotionInput, identity: CurrentIdentity, db: Db) -> dict:
+async def create_promotion(
+    payload: PromotionInput, request: Request, identity: CurrentIdentity, db: Db
+) -> dict:
+    await require_subscription_authoring(db, request, identity[0])
     creator = await approved_creator(db, identity[0])
     try:
         promotion = SubscriptionPromotion(
@@ -108,7 +163,7 @@ async def create_promotion(payload: PromotionInput, identity: CurrentIdentity, d
 
 @router.get("/creators/{username}/subscription-options", response_model=list[PublicPlanResponse])
 async def public_options(
-    username: str, db: Db, identity: OptionalIdentity
+    username: str, request: Request, db: Db, identity: OptionalIdentity
 ) -> list[PublicPlanResponse]:
     creator = await db.scalar(
         select(CreatorProfile).where(CreatorProfile.username == username.lower())
@@ -119,6 +174,23 @@ async def public_options(
         await require_public_creator_access(db, creator.id, identity[0].id if identity else None)
     except ValueError as exc:
         raise HTTPException(404, "Creator not found") from exc
+    decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=identity[0] if identity else None,
+        feature=ComplianceFeature.adult_media,
+        adult_restricted=True,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": decision.reason,
+                "code": decision.code,
+                "action": decision.action,
+                "reason": decision.reason,
+            },
+        )
     plan = await service.plan_for_creator(db, creator.id)
     if not plan or not plan.enabled:
         return []
@@ -154,19 +226,30 @@ async def public_options(
 async def start(
     creator_id: UUID,
     payload: SubscriptionStart,
+    request: Request,
     identity: CurrentIdentity,
     db: Db,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> SubscriptionResponse:
     try:
         subscription = await service.create_subscription(
-            db, identity[0], creator_id, payload.duration, idempotency_key or ""
+            db,
+            identity[0],
+            creator_id,
+            payload.duration,
+            idempotency_key or "",
+            compliance_decisions=await request_subscription_decisions(db, request, identity[0]),
         )
         await db.commit()
         return response(subscription)
     except (service.SubscriptionError, ValueError) as exc:
         await db.rollback()
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(
+            403 if isinstance(exc, service.SubscriptionError) and exc.compliance_decision else 400,
+            compliance_error_detail(exc)
+            if isinstance(exc, service.SubscriptionError)
+            else str(exc),
+        ) from exc
 
 
 @router.post(

@@ -49,6 +49,7 @@ export default function AdminReferralsPage() {
           owner_creator_id: form.get("owner_creator_id") || undefined,
           affiliate_partner_id: form.get("affiliate_partner_id") || undefined,
           terms_reference: form.get("terms_reference") || undefined,
+          reason: form.get("reason"), confirmed: form.get("confirmed") === "on",
         }),
       });
       setMessage(`Program ${program.public_id} created.`); event.currentTarget.reset();
@@ -67,6 +68,7 @@ export default function AdminReferralsPage() {
           eligible_revenue_types: String(form.get("revenue_types")).split(",").map((value) => value.trim()).filter(Boolean),
           attribution_window_days: Number(form.get("attribution_window_days")),
           subscription_reward_window_days: Number(form.get("subscription_reward_window_days")),
+          reason: form.get("reason"), confirmed: form.get("confirmed") === "on",
         }),
       });
       setMessage(`Policy ${policy.public_id} version ${policy.version} created.`); event.currentTarget.reset();
@@ -80,7 +82,7 @@ export default function AdminReferralsPage() {
       const programId = String(form.get("program_id"));
       await api(`/admin/referrals/programs/${programId}/links`, {
         method: "POST",
-        body: JSON.stringify({ policy_id: form.get("policy_id"), code: form.get("code"), destination_path: form.get("destination_path"), source: form.get("source") || undefined }),
+        body: JSON.stringify({ policy_id: form.get("policy_id"), code: form.get("code"), destination_path: form.get("destination_path"), source: form.get("source") || undefined, reason: form.get("reason"), confirmed: form.get("confirmed") === "on" }),
       });
       setMessage("Referral link created."); event.currentTarget.reset();
     } catch (e) { setError(e instanceof ApiError ? e.message : "Link could not be created"); }
@@ -93,11 +95,11 @@ export default function AdminReferralsPage() {
     <form onSubmit={submitAffiliate}><label>Name<input name="name" required /></label><label>Owner account ID<input name="owner_user_id" /></label><button>Create affiliate</button></form>
     <ul>{affiliates.map((affiliate) => <li key={affiliate.id}>{affiliate.name} ({affiliate.status}) <button onClick={() => void setStatus(affiliate.id, "paused")}>Pause</button><button onClick={() => void setStatus(affiliate.id, "active")}>Activate</button><button onClick={() => void setStatus(affiliate.id, "suspended")}>Suspend</button></li>)}</ul>
     <h2>Program</h2>
-    <form onSubmit={submitProgram}><label>Actor type<select name="actor_type"><option value="user">User</option><option value="creator">Creator</option><option value="affiliate_partner">Affiliate</option></select></label><label>Program type<select name="program_type"><option value="user_user_referral">User to user</option><option value="creator_buyer_referral">Creator to buyer</option><option value="affiliate_referral">Affiliate</option><option value="creator_creator_referral">Creator to creator (paused)</option></select></label><label>Owner account ID<input name="owner_user_id" /></label><label>Owner creator ID<input name="owner_creator_id" /></label><label>Affiliate ID<input name="affiliate_partner_id" /></label><label>Terms reference<input name="terms_reference" /></label><button>Create program</button></form>
+    <form onSubmit={submitProgram}><label>Actor type<select name="actor_type"><option value="user">User</option><option value="creator">Creator</option><option value="affiliate_partner">Affiliate</option></select></label><label>Program type<select name="program_type"><option value="user_user_referral">User to user</option><option value="creator_buyer_referral">Creator to buyer</option><option value="affiliate_referral">Affiliate</option><option value="creator_creator_referral">Creator to creator (paused)</option></select></label><label>Owner account ID<input name="owner_user_id" /></label><label>Owner creator ID<input name="owner_creator_id" /></label><label>Affiliate ID<input name="affiliate_partner_id" /></label><label>Terms reference<input name="terms_reference" /></label><label>Reason<input name="reason" minLength={8} required /></label><label><input name="confirmed" type="checkbox" required /> I confirm this referral programme configuration</label><button>Create program</button></form>
     <h2>Versioned policy</h2>
-    <form onSubmit={submitPolicy}><label>Program ID<input name="program_id" required /></label><label>Commission basis points<input name="basis_points" type="number" min="0" max="10000" required /></label><label>Revenue types (comma-separated)<input name="revenue_types" defaultValue="ppv" required /></label><label>Attribution days<input name="attribution_window_days" type="number" min="1" defaultValue="30" required /></label><label>Subscription reward days<input name="subscription_reward_window_days" type="number" min="1" defaultValue="90" required /></label><button>Create policy version</button></form>
+    <form onSubmit={submitPolicy}><label>Program ID<input name="program_id" required /></label><label>Commission basis points<input name="basis_points" type="number" min="0" max="10000" required /></label><label>Revenue types (comma-separated)<input name="revenue_types" defaultValue="ppv" required /></label><label>Attribution days<input name="attribution_window_days" type="number" min="1" defaultValue="30" required /></label><label>Subscription reward days<input name="subscription_reward_window_days" type="number" min="1" defaultValue="90" required /></label><label>Reason<input name="reason" minLength={8} required /></label><label><input name="confirmed" type="checkbox" required /> I confirm this commission policy version</label><button>Create policy version</button></form>
     <h2>Referral link</h2>
-    <form onSubmit={submitLink}><label>Program ID<input name="program_id" required /></label><label>Policy ID<input name="policy_id" required /></label><label>Code<input name="code" required /></label><label>Internal destination<input name="destination_path" defaultValue="/" required /></label><label>Source<input name="source" /></label><button>Create link</button></form>
+    <form onSubmit={submitLink}><label>Program ID<input name="program_id" required /></label><label>Policy ID<input name="policy_id" required /></label><label>Code<input name="code" required /></label><label>Internal destination<input name="destination_path" defaultValue="/" required /></label><label>Source<input name="source" /></label><label>Reason<input name="reason" minLength={8} required /></label><label><input name="confirmed" type="checkbox" required /> I confirm this referral link activation</label><button>Create link</button></form>
     {message && <p role="status">{message}</p>}{error && <p className="error">{error}</p>}
   </section>;
 }

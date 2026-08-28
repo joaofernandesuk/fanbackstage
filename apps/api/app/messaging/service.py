@@ -7,8 +7,13 @@ from uuid import UUID
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
+from app.compliance.policy import resolve_compliance_decision
+from app.compliance.types import (
+    ComplianceAccessError,
+    ComplianceDecision,
+    require_compliance_access,
+)
 from app.core.config import get_settings
 from app.creators.service import require_public_creator_access
 from app.finance.service import (
@@ -17,7 +22,15 @@ from app.finance.service import (
     currency_code,
     post_entries,
 )
-from app.models.content import ContentEntitlement, EntitlementStatus, MediaAsset, MediaStatus
+from app.media.contexts import require_media_context_available
+from app.models.compliance import ComplianceFeature
+from app.models.content import (
+    ContentEntitlement,
+    EntitlementStatus,
+    MediaAsset,
+    MediaAudience,
+    MediaStatus,
+)
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.finance import (
     CommissionRule,
@@ -54,7 +67,59 @@ from app.notifications.service import emit_transactional
 
 
 class MessagingError(ValueError):
-    pass
+    def __init__(self, message: str, compliance_decision: ComplianceDecision | None = None):
+        super().__init__(message)
+        self.compliance_decision = compliance_decision
+        self.code = compliance_decision.code if compliance_decision else None
+        self.action = compliance_decision.action if compliance_decision else None
+
+
+async def require_messaging_compliance(
+    db: AsyncSession,
+    user: User,
+    *,
+    adult_restricted: bool,
+    decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
+) -> ComplianceDecision:
+    allowed: ComplianceDecision | None = None
+    for feature in (ComplianceFeature.messaging, ComplianceFeature.purchases):
+        decision = (
+            decisions.get(feature)
+            if decisions
+            else await resolve_compliance_decision(
+                db,
+                user=user,
+                feature=feature,
+                adult_restricted=adult_restricted,
+            )
+        )
+        if decision is None:
+            raise MessagingError("Messaging compliance decision is unavailable")
+        try:
+            allowed = require_compliance_access(decision)
+        except ComplianceAccessError as exc:
+            raise MessagingError(exc.decision.reason, exc.decision) from exc
+    assert allowed is not None
+    return allowed
+
+
+async def require_messaging_feature(
+    db: AsyncSession,
+    user: User,
+    *,
+    adult_restricted: bool = False,
+    decision: ComplianceDecision | None = None,
+) -> ComplianceDecision:
+    resolved = decision or await resolve_compliance_decision(
+        db,
+        user=user,
+        feature=ComplianceFeature.messaging,
+        adult_restricted=adult_restricted,
+    )
+    try:
+        return require_compliance_access(resolved)
+    except ComplianceAccessError as exc:
+        raise MessagingError(exc.decision.reason, exc.decision) from exc
 
 
 async def creator_for_user(db: AsyncSession, user: User) -> CreatorProfile:
@@ -207,7 +272,9 @@ async def send_message(
     creator_id: UUID,
     body: str | None,
     reply_to_message_id: UUID | None = None,
+    compliance_decision: ComplianceDecision | None = None,
 ) -> Message:
+    await require_messaging_feature(db, sender, decision=compliance_decision)
     try:
         creator = await require_public_creator_access(db, creator_id, sender.id)
     except ValueError as exc:
@@ -218,6 +285,10 @@ async def send_message(
         raise MessagingError("Message text is too long")
     if sender.id == creator.user_id:
         raise MessagingError("Creator replies require an existing conversation")
+    creator_user = await db.get(User, creator.user_id)
+    if creator_user is None:
+        raise PermissionError("Messaging is not permitted")
+    await require_messaging_feature(db, creator_user)
     if not await can_message(db, sender, creator):
         raise PermissionError("Messaging is not permitted")
     conversation = await conversation_for_pair(db, creator, sender)
@@ -257,7 +328,9 @@ async def send_in_conversation(
     conversation_id: UUID,
     body: str,
     reply_to_message_id: UUID | None = None,
+    compliance_decision: ComplianceDecision | None = None,
 ) -> Message:
+    await require_messaging_feature(db, sender, decision=compliance_decision)
     conversation = await db.get(Conversation, conversation_id)
     if not conversation:
         raise PermissionError("Conversation not found")
@@ -265,6 +338,10 @@ async def send_in_conversation(
     if not body.strip() or len(body) > 4000:
         raise MessagingError("Message text is invalid")
     other = conversation.viewer_user_id if sender.id == creator.user_id else creator.user_id
+    recipient = await db.get(User, other)
+    if recipient is None:
+        raise PermissionError("Conversation not found")
+    await require_messaging_feature(db, recipient)
     if await is_blocked(db, sender.id, other):
         raise PermissionError("Messaging is blocked")
     if sender.id != creator.user_id and not await can_message(db, sender, creator):
@@ -362,6 +439,7 @@ async def attach_media(
     asset_id: UUID,
     unlock_price_minor: int | None,
     unlock_currency: str | None,
+    compliance_decision: ComplianceDecision | None = None,
 ) -> MessageAttachment:
     message = await db.get(Message, message_id)
     if not message:
@@ -373,8 +451,34 @@ async def attach_media(
     if bool(unlock_price_minor) != bool(unlock_currency):
         raise MessagingError("Locked attachments require a price and currency")
     asset = await db.get(MediaAsset, asset_id)
-    if not asset or asset.owner_creator_id != creator.id or asset.status is not MediaStatus.ready:
+    if (
+        not asset
+        or asset.owner_creator_id != creator.id
+        or asset.status is not MediaStatus.ready
+        or asset.deleted_at is not None
+        or asset.moderation_status.name in {"flagged", "rejected", "removed"}
+    ):
         raise MessagingError("Only ready creator-owned media may be attached")
+    try:
+        await require_media_context_available(
+            db,
+            asset.id,
+            context_type="message",
+            context_id=message.id,
+        )
+    except ValueError as exc:
+        raise MessagingError(str(exc)) from exc
+    adult_restricted = asset.audience is MediaAudience.adult_restricted
+    await require_messaging_feature(
+        db,
+        creator_user,
+        adult_restricted=adult_restricted,
+        decision=compliance_decision,
+    )
+    viewer = await db.get(User, conversation.viewer_user_id)
+    if viewer is None:
+        raise PermissionError("Message recipient not found")
+    await require_messaging_feature(db, viewer, adult_restricted=adult_restricted)
     attachment = MessageAttachment(
         message_id=message.id,
         media_asset_id=asset.id,
@@ -412,7 +516,11 @@ async def messaging_commission(db: AsyncSession) -> int:
 
 
 async def create_unlock_purchase(
-    db: AsyncSession, buyer: User, attachment_id: UUID, idempotency_key: str
+    db: AsyncSession,
+    buyer: User,
+    attachment_id: UUID,
+    idempotency_key: str,
+    compliance_decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
 ) -> MessageUnlockPurchase:
     if not idempotency_key or len(idempotency_key) > 128:
         raise MessagingError("A valid Idempotency-Key is required")
@@ -445,7 +553,13 @@ async def create_unlock_purchase(
         creator = await require_public_creator_access(db, conversation.creator_id, buyer.id)
     except ValueError as exc:
         raise PermissionError("Locked attachment not found") from exc
-    require_current_self_attestation(buyer)
+    asset = await db.get(MediaAsset, attachment.media_asset_id)
+    await require_messaging_compliance(
+        db,
+        buyer,
+        adult_restricted=bool(asset is None or asset.audience is MediaAudience.adult_restricted),
+        decisions=compliance_decisions,
+    )
     currency = currency_code(attachment.unlock_currency)
     bps = await messaging_commission(db)
     fee, creator_amount = commission_amount(attachment.unlock_price_minor, bps)
@@ -545,7 +659,12 @@ async def settle_message_unlock(
 
 
 async def initiate_paid_send(
-    db: AsyncSession, buyer: User, creator_id: UUID, body: str, idempotency_key: str
+    db: AsyncSession,
+    buyer: User,
+    creator_id: UUID,
+    body: str,
+    idempotency_key: str,
+    compliance_decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
 ) -> PendingMessageSend:
     if not idempotency_key or len(idempotency_key) > 128:
         raise MessagingError("A valid Idempotency-Key is required")
@@ -568,7 +687,12 @@ async def initiate_paid_send(
     amount, currency = await resolve_send_price(db, buyer, creator)
     if not amount or not currency:
         raise MessagingError("This message does not require payment")
-    require_current_self_attestation(buyer)
+    await require_messaging_compliance(
+        db,
+        buyer,
+        adult_restricted=True,
+        decisions=compliance_decisions,
+    )
     bps = await messaging_commission(db)
     fee, creator_amount = commission_amount(amount, bps)
     attempt = PaymentAttempt(
@@ -733,11 +857,15 @@ async def execute_campaign(db: AsyncSession, campaign_id: UUID) -> int:
     )
     if not campaign or campaign.status in {CampaignStatus.completed, CampaignStatus.cancelled}:
         return 0
+    creator = await db.get(CreatorProfile, campaign.creator_id)
+    creator_user = await db.get(User, creator.user_id) if creator else None
+    if creator is None or creator_user is None:
+        raise MessagingError("Campaign creator is unavailable")
+    await require_messaging_feature(db, creator_user)
     campaign.status, campaign.started_at = (
         CampaignStatus.processing,
         campaign.started_at or datetime.now(UTC),
     )
-    creator = await db.get(CreatorProfile, campaign.creator_id)
     count = 0
     recipients = (
         await db.scalars(
@@ -754,6 +882,10 @@ async def execute_campaign(db: AsyncSession, campaign_id: UUID) -> int:
             continue
         viewer = await db.get(User, recipient.recipient_user_id)
         if not viewer:
+            continue
+        try:
+            await require_messaging_feature(db, viewer)
+        except MessagingError:
             continue
         conversation = await conversation_for_pair(db, creator, viewer)
         message = Message(

@@ -371,8 +371,14 @@ export function ContentDetail({ contentId }: { contentId: string }) {
         </div>
       </header>
 
-      {content.adult_access_required && !content.adult_access_granted ? (
-        <AdultAccessGate onGranted={load} title={content.title} />
+      {!content.compliance_allowed || (content.adult_access_required && !content.adult_access_granted) ? (
+        <AdultAccessGate
+          access={content}
+          adultRestricted={Boolean(content.adult_access_required)}
+          feature={content.adult_access_required ? "adult_media" : "platform_access"}
+          onGranted={load}
+          title={content.title}
+        />
       ) : content.content_type === "gallery" ? (
         <GalleryViewer content={content} />
       ) : (
@@ -387,8 +393,8 @@ export function ContentDetail({ contentId }: { contentId: string }) {
           {content.published_at && <p className={styles.published}>Published {new Date(content.published_at).toLocaleDateString()}</p>}
         </div>
         <aside className={styles.accessPanel}>
-          {content.adult_access_required && !content.adult_access_granted ? (
-            <><strong>18+ confirmation required</strong><p>Confirm adult access above before entitlement or purchase options can be evaluated.</p></>
+          {!content.compliance_allowed || (content.adult_access_required && !content.adult_access_granted) ? (
+            <><strong>Verification required</strong><p>{content.compliance_reason ?? "Complete the access check above before entitlement or purchase options can be evaluated."}</p></>
           ) : content.has_access ? (
             <><strong>Access confirmed</strong><p>{content.access_policy === "free" ? "This creator made the complete release free to view." : "Your current entitlement unlocks the complete release."}</p></>
           ) : content.access_policy === "ppv" && price ? (

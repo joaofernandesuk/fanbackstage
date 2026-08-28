@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CreatorMessageComposer } from "../../../components/creator-message-composer";
+import { AdultAccessGate } from "../../../components/adult-access-gate";
 import {
   AccessBadge,
   CreatorAvatar,
@@ -23,9 +24,10 @@ import { api, ApiError } from "../../../lib/api";
 import { marketplaceListingMediaUrl } from "../../../lib/content-api";
 import { mediaForUsername } from "../../../lib/demo-personas";
 import { formatMoney, type MarketplaceListing } from "../../../lib/public-api";
+import type { ComplianceAccess } from "../../../lib/compliance-api";
 
 type TaxonomyItem = { id: string; code: string; label: string };
-type Creator = {
+type Creator = ComplianceAccess & {
   id: string;
   display_name: string;
   username: string;
@@ -118,19 +120,26 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   const [following, setFollowing] = useState(false);
   const [messageOpen, setMessageOpen] = useState(false);
   const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
   const subscribeRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let active = true;
     params
       .then(async ({ username }) => {
-        const [profile, publishedContent, marketplace] = await Promise.all([
-          api<Creator>(`/creators/${encodeURIComponent(username)}`),
+        const profile = await api<Creator>(`/creators/${encodeURIComponent(username)}`);
+        if (!active) return;
+        setCreator(profile);
+        if (!profile.compliance_allowed) {
+          setContent([]);
+          setListings([]);
+          return;
+        }
+        const [publishedContent, marketplace] = await Promise.all([
           api<Content[]>(`/content/public/by-creator/${encodeURIComponent(username)}`),
           api<MarketplaceListing[]>("/marketplace/listings?limit=100").catch(() => []),
         ]);
         if (!active) return;
-        setCreator(profile);
         setContent(publishedContent);
         setListings(marketplace.filter((item) => item.owner_creator_id === profile.id));
         const state = await api<{ following: boolean }>(`/feed/creator/${profile.id}/follow-state`).catch(() => ({ following: false }));
@@ -140,7 +149,7 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
         if (active) setError(caught instanceof ApiError ? caught.message : "Creator not found");
       });
     return () => { active = false; };
-  }, [params]);
+  }, [params, refreshKey]);
 
   const visual = mediaForUsername(creator?.username);
   const fallbackContent = visual?.content || "/images/fanbackstage-hero.png";
@@ -171,6 +180,23 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   }
   if (!creator) {
     return <div className={styles.profileLoading}><Skeleton lines={3} /><Skeleton lines={2} /></div>;
+  }
+
+  if (!creator.compliance_allowed) {
+    return (
+      <div className={styles.profileShell}>
+        <section className={styles.actionPanel} aria-labelledby="creator-name">
+          <p className="eyebrow">CREATOR PROFILE</p>
+          <h1 id="creator-name">{creator.display_name}</h1>
+          <p className={styles.profileHandle}>@{creator.username}</p>
+          <AdultAccessGate
+            access={creator}
+            onGranted={() => setRefreshKey((value) => value + 1)}
+            title={`${creator.display_name}'s profile`}
+          />
+        </section>
+      </div>
+    );
   }
 
   const coverSource = creator.cover_reference || visual?.cover || "/images/fanbackstage-hero.png";

@@ -5,14 +5,17 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 
-from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db
+from app.compliance.http import resolve_request_compliance_decision
+from app.compliance.types import ComplianceDecision
 from app.content.access import can_access_asset
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_messaging_rate_limit
 from app.creators.service import require_public_creator_access
+from app.media.contexts import has_single_media_context
 from app.media.storage import storage_provider
 from app.messaging import service
+from app.models.compliance import ComplianceFeature
 from app.models.content import (
     DerivativeType,
     MediaAsset,
@@ -30,6 +33,7 @@ from app.models.messaging import (
     Message,
     MessageAttachment,
     MessageReport,
+    MessageUnlockPurchase,
     MessagingPermission,
     UserBlock,
 )
@@ -45,6 +49,79 @@ from app.schemas.messaging import (
 )
 
 router = APIRouter(prefix="/messages", tags=["messaging"])
+
+
+def messaging_error_detail(exc: service.MessagingError) -> str | dict[str, object]:
+    if not exc.compliance_decision:
+        return str(exc)
+    return {
+        "message": str(exc),
+        "code": exc.code,
+        "action": exc.action,
+        "reason": exc.compliance_decision.reason,
+    }
+
+
+async def request_attachment_decision(
+    db: Db, request: Request, user, asset: MediaAsset
+) -> ComplianceDecision:
+    return await resolve_request_compliance_decision(
+        db,
+        request,
+        user=user,
+        feature=ComplianceFeature.messaging,
+        adult_restricted=asset.audience is MediaAudience.adult_restricted,
+    )
+
+
+async def request_messaging_decision(
+    db: Db,
+    request: Request,
+    user,
+    *,
+    adult_restricted: bool = False,
+    feature: ComplianceFeature = ComplianceFeature.messaging,
+) -> ComplianceDecision:
+    return await resolve_request_compliance_decision(
+        db,
+        request,
+        user=user,
+        feature=feature,
+        adult_restricted=adult_restricted,
+    )
+
+
+def require_request_messaging_access(decision: ComplianceDecision) -> ComplianceDecision:
+    if not decision.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": decision.reason,
+                "code": decision.code,
+                "action": decision.action,
+                "reason": decision.reason,
+            },
+        )
+    return decision
+
+
+async def request_paid_messaging_decisions(
+    db: Db,
+    request: Request,
+    user,
+    *,
+    adult_restricted: bool,
+) -> dict[ComplianceFeature, ComplianceDecision]:
+    return {
+        feature: await request_messaging_decision(
+            db,
+            request,
+            user,
+            feature=feature,
+            adult_restricted=adult_restricted,
+        )
+        for feature in (ComplianceFeature.messaging, ComplianceFeature.purchases)
+    }
 
 
 def response(message: Message) -> MessageResponse:
@@ -80,13 +157,19 @@ async def update_settings(
             "send_fee_currency": settings.send_fee_currency,
             "subscribers_free": settings.subscribers_free,
         }
+    except service.MessagingError as exc:
+        await db.rollback()
+        raise HTTPException(
+            403 if exc.compliance_decision else 400, messaging_error_detail(exc)
+        ) from exc
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/creator/{creator_id}/send-price")
-async def send_price(creator_id: UUID, identity: CurrentIdentity, db: Db) -> dict:
+async def send_price(creator_id: UUID, request: Request, identity: CurrentIdentity, db: Db) -> dict:
+    require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
     try:
         creator = await require_public_creator_access(db, creator_id, identity[0].id)
     except ValueError as exc:
@@ -107,6 +190,7 @@ async def start(
 ) -> MessageResponse:
     try:
         await enforce_messaging_rate_limit(request, str(identity[0].id), "send")
+        decision = await request_messaging_decision(db, request, identity[0])
         try:
             creator = await require_public_creator_access(db, creator_id, identity[0].id)
         except ValueError as exc:
@@ -118,10 +202,20 @@ async def start(
         if amount:
             raise ValueError("This message requires payment; confirm it through the paid-send flow")
         message = await service.send_message(
-            db, identity[0], creator_id, payload.body, payload.reply_to_message_id
+            db,
+            identity[0],
+            creator_id,
+            payload.body,
+            payload.reply_to_message_id,
+            compliance_decision=decision,
         )
         await db.commit()
         return response(message)
+    except service.MessagingError as exc:
+        await db.rollback()
+        raise HTTPException(
+            403 if exc.compliance_decision else 400, messaging_error_detail(exc)
+        ) from exc
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
@@ -137,8 +231,14 @@ async def send(
 ) -> MessageResponse:
     try:
         await enforce_messaging_rate_limit(request, str(identity[0].id), "send")
+        decision = await request_messaging_decision(db, request, identity[0])
         message = await service.send_in_conversation(
-            db, identity[0], conversation_id, payload.body, payload.reply_to_message_id
+            db,
+            identity[0],
+            conversation_id,
+            payload.body,
+            payload.reply_to_message_id,
+            compliance_decision=decision,
         )
         await db.commit()
         return response(message)
@@ -158,8 +258,16 @@ async def paid_send(
 ) -> dict:
     try:
         await enforce_messaging_rate_limit(request, str(identity[0].id), "paid_send")
+        decisions = await request_paid_messaging_decisions(
+            db, request, identity[0], adult_restricted=True
+        )
         pending = await service.initiate_paid_send(
-            db, identity[0], creator_id, payload.body, idempotency_key or ""
+            db,
+            identity[0],
+            creator_id,
+            payload.body,
+            idempotency_key or "",
+            compliance_decisions=decisions,
         )
         await db.commit()
         return {
@@ -169,13 +277,21 @@ async def paid_send(
             "currency": pending.currency,
             "payment_attempt_id": str(pending.payment_attempt_id),
         }
+    except service.MessagingError as exc:
+        await db.rollback()
+        raise HTTPException(
+            403 if exc.compliance_decision else 400, messaging_error_detail(exc)
+        ) from exc
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
 @router.get("/conversations", response_model=list[ConversationResponse])
-async def inbox(identity: CurrentIdentity, db: Db, limit: int = 20) -> list[ConversationResponse]:
+async def inbox(
+    request: Request, identity: CurrentIdentity, db: Db, limit: int = 20
+) -> list[ConversationResponse]:
+    require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
     rows = (
         await db.scalars(
             select(Conversation)
@@ -232,8 +348,13 @@ async def inbox(identity: CurrentIdentity, db: Db, limit: int = 20) -> list[Conv
 
 @router.get("/conversations/{conversation_id}", response_model=list[MessageResponse])
 async def messages(
-    conversation_id: UUID, identity: CurrentIdentity, db: Db, limit: int = 50
+    conversation_id: UUID,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    limit: int = 50,
 ) -> list[MessageResponse]:
+    require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
     conversation = await db.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found")
@@ -259,8 +380,9 @@ async def messages(
 
 @router.get("/conversations/{conversation_id}/attachments", response_model=list[dict])
 async def conversation_attachments(
-    conversation_id: UUID, identity: CurrentIdentity, db: Db
+    conversation_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> list[dict]:
+    require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
     conversation = await db.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found")
@@ -279,8 +401,9 @@ async def conversation_attachments(
 
 
 @router.post("/conversations/{conversation_id}/read", status_code=204)
-async def read(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+async def read(conversation_id: UUID, request: Request, identity: CurrentIdentity, db: Db) -> None:
     try:
+        require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
         await service.mark_read(db, identity[0], conversation_id)
         await db.commit()
     except PermissionError as exc:
@@ -289,8 +412,11 @@ async def read(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None
 
 
 @router.post("/conversations/{conversation_id}/archive", status_code=204)
-async def archive(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+async def archive(
+    conversation_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> None:
     try:
+        require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
         await service.set_inbox_state(db, identity[0], conversation_id, archived=True)
         await db.commit()
     except PermissionError as exc:
@@ -299,8 +425,11 @@ async def archive(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> N
 
 
 @router.delete("/conversations/{conversation_id}/archive", status_code=204)
-async def unarchive(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+async def unarchive(
+    conversation_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> None:
     try:
+        require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
         await service.set_inbox_state(db, identity[0], conversation_id, archived=False)
         await db.commit()
     except PermissionError as exc:
@@ -309,8 +438,9 @@ async def unarchive(conversation_id: UUID, identity: CurrentIdentity, db: Db) ->
 
 
 @router.post("/conversations/{conversation_id}/mute", status_code=204)
-async def mute(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+async def mute(conversation_id: UUID, request: Request, identity: CurrentIdentity, db: Db) -> None:
     try:
+        require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
         await service.set_inbox_state(db, identity[0], conversation_id, muted=True)
         await db.commit()
     except PermissionError as exc:
@@ -319,8 +449,11 @@ async def mute(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None
 
 
 @router.delete("/conversations/{conversation_id}/mute", status_code=204)
-async def unmute(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> None:
+async def unmute(
+    conversation_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> None:
     try:
+        require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
         await service.set_inbox_state(db, identity[0], conversation_id, muted=False)
         await db.commit()
     except PermissionError as exc:
@@ -331,13 +464,25 @@ async def unmute(conversation_id: UUID, identity: CurrentIdentity, db: Db) -> No
 @router.post("/attachments/{attachment_id}/unlock")
 async def unlock(
     attachment_id: UUID,
+    request: Request,
     identity: CurrentIdentity,
     db: Db,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
     try:
+        _attachment, asset, _conversation = await attachment_context(db, attachment_id, identity)
+        decisions = await request_paid_messaging_decisions(
+            db,
+            request,
+            identity[0],
+            adult_restricted=asset.audience is MediaAudience.adult_restricted,
+        )
         purchase = await service.create_unlock_purchase(
-            db, identity[0], attachment_id, idempotency_key or ""
+            db,
+            identity[0],
+            attachment_id,
+            idempotency_key or "",
+            compliance_decisions=decisions,
         )
         await db.commit()
         return {
@@ -347,6 +492,11 @@ async def unlock(
             "amount_minor": purchase.gross_amount_minor,
             "currency": purchase.currency,
         }
+    except service.MessagingError as exc:
+        await db.rollback()
+        raise HTTPException(
+            403 if exc.compliance_decision else 400, messaging_error_detail(exc)
+        ) from exc
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
@@ -368,16 +518,17 @@ async def attachment_context(db: Db, attachment_id: UUID, identity: CurrentIdent
         or asset.status is not MediaStatus.ready
         or asset.deleted_at is not None
         or asset.moderation_status.name in {"flagged", "rejected", "removed"}
+        or not await has_single_media_context(db, attachment.media_asset_id)
     ):
         raise HTTPException(404, "Attachment not found")
-    return attachment, asset
+    return attachment, asset, conversation
 
 
 @router.get("/attachments/{attachment_id}/access", response_model=AttachmentAccessResponse)
 async def attachment_access(
-    attachment_id: UUID, identity: CurrentIdentity, db: Db
+    attachment_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> AttachmentAccessResponse:
-    attachment, asset = await attachment_context(db, attachment_id, identity)
+    attachment, asset, conversation = await attachment_context(db, attachment_id, identity)
     preview_type = (
         DerivativeType.blurred_preview
         if asset.media_type.value == "image"
@@ -400,13 +551,31 @@ async def attachment_access(
             MediaDerivative.status == MediaStatus.ready,
         )
     )
-    decision = adult_access.resolve_adult_access(identity[0], None)
-    allowed = await can_access_asset(db, asset.id, identity[0], decision)
-    preview_allowed = asset.audience is MediaAudience.safe_public or decision.allowed
+    decision = await request_attachment_decision(db, request, identity[0], asset)
+    creator = await db.get(CreatorProfile, conversation.creator_id)
+    entitlement_allowed = bool(creator and creator.user_id == identity[0].id)
+    if attachment.unlock_price_minor is None:
+        entitlement_allowed = True
+    elif not entitlement_allowed:
+        entitlement_allowed = bool(
+            await db.scalar(
+                select(MessageUnlockPurchase.id).where(
+                    MessageUnlockPurchase.message_attachment_id == attachment.id,
+                    MessageUnlockPurchase.buyer_user_id == identity[0].id,
+                    MessageUnlockPurchase.status == "paid",
+                )
+            )
+        )
+    allowed = bool(
+        decision.allowed
+        and entitlement_allowed
+        and await can_access_asset(db, asset.id, identity[0], decision)
+    )
+    preview_allowed = decision.allowed
     return AttachmentAccessResponse(
         id=attachment.id,
         media_type=asset.media_type.value,
-        locked=attachment.unlock_price_minor is not None and not allowed,
+        locked=not entitlement_allowed,
         amount_minor=attachment.unlock_price_minor,
         currency=attachment.unlock_currency,
         preview_delivery_path=(
@@ -415,14 +584,22 @@ async def attachment_access(
             else None
         ),
         full_delivery_path=f"/media/derivatives/{full}" if allowed and full else None,
+        adult_access_required=asset.audience is MediaAudience.adult_restricted,
+        adult_access_granted=(
+            asset.audience is MediaAudience.safe_public or decision.age_access_allowed
+        ),
+        compliance_allowed=decision.allowed,
+        compliance_code=decision.code,
+        compliance_action=decision.action if not decision.allowed else None,
+        compliance_reason=decision.reason,
     )
 
 
 @router.get("/attachments/{attachment_id}/preview")
 async def attachment_preview(
-    attachment_id: UUID, identity: CurrentIdentity, db: Db
+    attachment_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> RedirectResponse:
-    _attachment, asset = await attachment_context(db, attachment_id, identity)
+    _attachment, asset, _conversation = await attachment_context(db, attachment_id, identity)
     preview_type = (
         DerivativeType.blurred_preview
         if asset.media_type.value == "image"
@@ -437,15 +614,21 @@ async def attachment_preview(
     )
     if not derivative:
         raise HTTPException(404, "Attachment preview not found")
-    decision = adult_access.resolve_adult_access(identity[0], None)
-    if asset.audience is MediaAudience.adult_restricted and not decision.allowed:
+    decision = await request_attachment_decision(db, request, identity[0], asset)
+    if not decision.allowed:
         raise HTTPException(404, "Attachment preview not found")
     try:
         ttl = (
-            adult_access.restricted_delivery_ttl(decision, get_settings().media_url_ttl_seconds)
+            min(
+                get_settings().media_url_ttl_seconds,
+                int((decision.verification_expires_at - datetime.now(UTC)).total_seconds()),
+            )
             if asset.audience is MediaAudience.adult_restricted
+            and decision.verification_expires_at is not None
             else get_settings().media_url_ttl_seconds
         )
+        if ttl <= 0:
+            raise ValueError("Attachment preview access has expired")
     except ValueError as exc:
         raise HTTPException(404, "Attachment preview not found") from exc
     return RedirectResponse(
@@ -456,9 +639,20 @@ async def attachment_preview(
 
 @router.post("/messages/{message_id}/attachments")
 async def add_attachment(
-    message_id: UUID, payload: AttachmentInput, identity: CurrentIdentity, db: Db
+    message_id: UUID,
+    payload: AttachmentInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> dict:
     try:
+        asset = await db.get(MediaAsset, payload.media_asset_id)
+        decision = await request_messaging_decision(
+            db,
+            request,
+            identity[0],
+            adult_restricted=bool(asset and asset.audience is MediaAudience.adult_restricted),
+        )
         attachment = await service.attach_media(
             db,
             identity[0],
@@ -466,6 +660,7 @@ async def add_attachment(
             payload.media_asset_id,
             payload.unlock_price_minor,
             payload.unlock_currency,
+            compliance_decision=decision,
         )
         await db.commit()
         return {
@@ -489,7 +684,14 @@ async def block(user_id: UUID, identity: CurrentIdentity, db: Db) -> None:
         )
     ):
         db.add(UserBlock(blocker_user_id=identity[0].id, blocked_user_id=user_id))
-        await db.commit()
+        await db.flush()
+    # A block is an immediate Trust & Safety authority change, not only a
+    # future messaging filter. Disconnect any shared protected live delivery;
+    # provider failures leave durable retry-visible room/session state.
+    from app.streaming.service import enforce_user_block_on_active_live
+
+    await enforce_user_block_on_active_live(db, identity[0].id, user_id)
+    await db.commit()
 
 
 @router.delete("/block/{user_id}", status_code=204)
@@ -542,8 +744,11 @@ async def report_message(
 
 
 @router.post("/campaigns", response_model=dict)
-async def campaign(payload: CampaignInput, identity: CurrentIdentity, db: Db) -> dict:
+async def campaign(
+    payload: CampaignInput, request: Request, identity: CurrentIdentity, db: Db
+) -> dict:
     try:
+        require_request_messaging_access(await request_messaging_decision(db, request, identity[0]))
         if payload.scheduled_at and (
             payload.scheduled_at.tzinfo is None
             or payload.scheduled_at.utcoffset() is None

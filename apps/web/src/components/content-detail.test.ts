@@ -43,6 +43,10 @@ describe("related creator content", () => {
       published_at: null,
       media_count: 1,
       duration_seconds: null,
+      compliance_allowed: true,
+      compliance_code: "ALLOWED",
+      compliance_action: null,
+      compliance_reason: "Policy allows access",
       previews: [],
       media: [],
     });

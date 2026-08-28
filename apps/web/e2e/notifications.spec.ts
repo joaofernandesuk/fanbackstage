@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -20,6 +20,7 @@ test("notification center is recipient-scoped and reflects read state", async ({
   const replacement = "notifications-replacement-123";
 
   await page.goto("/register");
+  await completeRegistrationCompliance(page);
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -49,6 +50,7 @@ test("notification center is recipient-scoped and reflects read state", async ({
   const otherPage = await other.newPage();
   const otherEmail = `notifications-other-${stamp}@example.com`;
   await otherPage.goto("/register");
+  await completeRegistrationCompliance(otherPage);
   await otherPage.getByLabel("Email").fill(otherEmail);
   await otherPage.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await otherPage.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();

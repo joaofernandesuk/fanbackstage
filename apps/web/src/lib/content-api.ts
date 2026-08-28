@@ -1,4 +1,5 @@
 import { api } from "./api";
+import type { ComplianceAccess } from "./compliance-api";
 import type { MarketplaceListingMedia } from "./public-api";
 
 export type ContentMedia = {
@@ -12,7 +13,7 @@ export type ContentMedia = {
   duration_seconds: number | null;
 };
 
-export type PublicContent = {
+export type PublicContent = ComplianceAccess & {
   id: string;
   content_type: "gallery" | "video";
   title: string;

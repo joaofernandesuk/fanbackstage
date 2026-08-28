@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -18,13 +19,31 @@ from sqlalchemy.orm import selectinload
 
 from app.accounts import adult_access
 from app.accounts import service as accounts
+from app.audit.service import record_event
+from app.compliance import policy as compliance_policy
+from app.compliance.types import PolicyOverrides, PolicyRules
 from app.content import service as content_service
 from app.creators import service as creators
 from app.featuring import service as featuring
 from app.finance import service as finance
 from app.groups import service as groups
+from app.legal import service as legal_service
 from app.marketplace import service as marketplace
 from app.messaging import service as messaging
+from app.models.compliance import (
+    AgeAssuranceLevel,
+    AgeVerificationRecord,
+    AgeVerificationStatus,
+    CompliancePolicyStatus,
+    CompliancePolicyTemplate,
+    CompliancePolicyTemplateRevision,
+    CountryRegistry,
+    JurisdictionPolicyRevision,
+    PerformerAgeVerification,
+    PerformerIdentity,
+    PerformerIdentityStatus,
+    PerformerIdentityVerification,
+)
 from app.models.content import (
     AccessPolicy,
     ContentItem,
@@ -58,6 +77,14 @@ from app.models.groups import (
     GroupPermission,
 )
 from app.models.identity import User
+from app.models.legal import (
+    LegalAudience,
+    LegalDocument,
+    LegalDocumentStatus,
+    LegalDocumentType,
+    LegalDocumentVersion,
+    SiteSettingsVersion,
+)
 from app.models.marketplace import (
     MarketplaceEarningsHoldPolicy,
     MarketplaceListing,
@@ -89,7 +116,9 @@ from app.models.social import (
 from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveAccessMode, LiveRoom
 from app.models.subscription import SubscriptionPeriod
+from app.models.trust_safety import ConsentRelease, ConsentReleaseStatus, ConsentReleaseType
 from app.notifications import service as notifications
+from app.performers import service as performers
 from app.referrals import service as referrals
 from app.seed.manifest import (
     CORE_USERS,
@@ -122,6 +151,7 @@ from app.social import service as social
 from app.stories import service as stories
 from app.streaming import service as streaming
 from app.subscriptions import service as subscriptions
+from app.trust_safety import service as trust_safety
 
 
 @dataclass(frozen=True)
@@ -139,6 +169,7 @@ class CreatorContent:
     gallery: ContentItem
     video: ContentItem
     image_asset: MediaAsset
+    feed_image_asset: MediaAsset
     video_asset: MediaAsset
 
 
@@ -146,10 +177,337 @@ def _email(local_part: str) -> str:
     return f"{local_part}@demo.fanbackstage.local"
 
 
+DEMO_POLICY_KEY = "development-demo-baseline"
+DEMO_LEGAL_TYPES = (
+    LegalDocumentType.terms,
+    LegalDocumentType.privacy,
+    LegalDocumentType.age_policy,
+)
+
+
+def _demo_policy_rules() -> PolicyRules:
+    """Operational demo rules, explicitly not a statement of applicable law."""
+
+    return PolicyRules(
+        enabled=True,
+        registration_allowed=True,
+        creator_registration_allowed=True,
+        purchases_allowed=True,
+        subscriptions_allowed=True,
+        ppv_allowed=True,
+        live_allowed=True,
+        marketplace_allowed=True,
+        featuring_allowed=True,
+        marketing_email_allowed=True,
+        messaging_allowed=True,
+        minimum_age=18,
+        fan_age_verification_required=True,
+        anonymous_adult_preview_allowed=True,
+        required_assurance_level=AgeAssuranceLevel.self_attested,
+        reverify_after_days=30,
+        grace_period_days=0,
+        creator_identity_required=True,
+        creator_age_verification_required=True,
+        payout_kyc_required=False,
+        co_performer_verification_required=True,
+        release_required=True,
+        explicit_public_preview_allowed=True,
+        restricted_media_policy="development-demo-restricted",
+        age_provider="test",
+        provider_policy_key=None,
+    )
+
+
+async def _ensure_compliance_demo_policy(
+    db: AsyncSession, admin: User
+) -> JurisdictionPolicyRevision:
+    """Seed three fictional scenarios without asserting real country requirements."""
+
+    now = datetime.now(UTC)
+    template = await db.scalar(
+        select(CompliancePolicyTemplate).where(CompliancePolicyTemplate.key == DEMO_POLICY_KEY)
+    )
+    if template is None:
+        template = await compliance_policy.create_policy_template(
+            db,
+            key=DEMO_POLICY_KEY,
+            name="Development demo baseline",
+            description="Fictional operational scenarios only; legal review is still required.",
+            actor_user_id=admin.id,
+            change_reason="Create development-only compliance demonstration",
+        )
+    template_revision = await db.scalar(
+        select(CompliancePolicyTemplateRevision)
+        .where(CompliancePolicyTemplateRevision.template_id == template.id)
+        .order_by(CompliancePolicyTemplateRevision.version.desc())
+        .limit(1)
+    )
+    if template_revision is None:
+        template_revision = await compliance_policy.create_template_revision(
+            db,
+            template_id=template.id,
+            rules=_demo_policy_rules(),
+            status=CompliancePolicyStatus.active,
+            effective_from=now - timedelta(days=1),
+            effective_until=None,
+            actor_user_id=admin.id,
+            reviewed_at=now,
+            reviewed_by_user_id=admin.id,
+            change_reason="Reviewed fictional development baseline",
+            is_demo=True,
+        )
+    scenarios = {
+        "PT": PolicyOverrides(),
+        "GB": PolicyOverrides(
+            required_assurance_level=AgeAssuranceLevel.medium,
+            reverify_after_days=7,
+        ),
+        "US": PolicyOverrides(
+            marketplace_allowed=False,
+            purchases_allowed=False,
+        ),
+    }
+    result: JurisdictionPolicyRevision | None = None
+    for country_code, overrides in scenarios.items():
+        revision = await db.scalar(
+            select(JurisdictionPolicyRevision)
+            .where(JurisdictionPolicyRevision.country_code == country_code)
+            .order_by(JurisdictionPolicyRevision.version.desc())
+            .limit(1)
+        )
+        if revision is None:
+            revision = await compliance_policy.create_jurisdiction_revision(
+                db,
+                country_code=country_code,
+                template_revision_id=template_revision.id,
+                overrides=overrides,
+                status=CompliancePolicyStatus.active,
+                effective_from=now - timedelta(days=1),
+                effective_until=None,
+                actor_user_id=admin.id,
+                reviewed_at=now,
+                reviewed_by_user_id=admin.id,
+                change_reason=(
+                    f"Reviewed fictional {country_code} demonstration; not legal guidance"
+                ),
+                is_demo=True,
+            )
+        registry = await db.get(CountryRegistry, country_code)
+        if registry is not None and not registry.enabled:
+            await compliance_policy.set_country_enabled(
+                db,
+                code=country_code,
+                enabled=True,
+                actor_user_id=admin.id,
+                change_reason="Enable fictional development compliance scenario",
+            )
+        if country_code == "PT":
+            result = revision
+    if result is None:
+        raise RuntimeError("The PT development compliance scenario is missing")
+    return result
+
+
+async def _ensure_demo_age_verifications(
+    db: AsyncSession,
+    users: dict[str, User],
+    policy: JurisdictionPolicyRevision,
+) -> None:
+    """Create provider-normalized verified, expired, failed, and absent fan states."""
+
+    now = datetime.now(UTC)
+    fixtures = (
+        (_email("subscriber"), "verified", AgeVerificationStatus.verified),
+        (_email("socialfan"), "expired", AgeVerificationStatus.expired),
+        (_email("marketing-out"), "failed", AgeVerificationStatus.failed),
+    )
+    for email, key, status in fixtures:
+        reference = f"demo-{key}-fan-v1"
+        existing = await db.scalar(
+            select(AgeVerificationRecord.id).where(
+                AgeVerificationRecord.provider == "test",
+                AgeVerificationRecord.provider_verification_id == reference,
+            )
+        )
+        if existing:
+            # A deterministic demo identity can survive a long-lived local
+            # database. Refresh only the intentionally-current fixture so
+            # re-running the seed remains convergent rather than inheriting a
+            # stale verified result from an earlier local run.
+            row = await db.get(AgeVerificationRecord, existing)
+            if (
+                status is AgeVerificationStatus.verified
+                and row is not None
+                and (row.expires_at is None or row.expires_at <= now)
+            ):
+                row.verified_at = now - timedelta(days=1)
+                row.expires_at = now + timedelta(days=29)
+            continue
+        verified_at = (
+            now - timedelta(days=45)
+            if status is AgeVerificationStatus.expired
+            else now - timedelta(days=1)
+            if status is AgeVerificationStatus.verified
+            else None
+        )
+        row = AgeVerificationRecord(
+            user_id=users[email].id,
+            provider="test",
+            provider_verification_id=reference,
+            state_hash=sha256(f"fanbackstage:{reference}".encode()).hexdigest(),
+            state_consumed_at=now,
+            safe_return_path="/account",
+            country_code="PT",
+            applicable_policy_id=policy.id,
+            applicable_policy_version=policy.version,
+            required_minimum_age=18,
+            achieved_minimum_age=(18 if status is not AgeVerificationStatus.failed else None),
+            required_assurance_level=AgeAssuranceLevel.self_attested,
+            achieved_assurance_level=(
+                AgeAssuranceLevel.medium
+                if status is not AgeVerificationStatus.failed
+                else AgeAssuranceLevel.none
+            ),
+            status=status,
+            initiated_at=(verified_at or now - timedelta(days=2)),
+            verified_at=verified_at,
+            failed_at=now - timedelta(days=2) if status is AgeVerificationStatus.failed else None,
+            expires_at=(
+                now + timedelta(days=29)
+                if status is AgeVerificationStatus.verified
+                else now - timedelta(days=15)
+                if status is AgeVerificationStatus.expired
+                else None
+            ),
+            failure_reason_code=(
+                "DEMO_AGE_NOT_VERIFIED" if status is AgeVerificationStatus.failed else None
+            ),
+            retryable=status is AgeVerificationStatus.failed,
+            result_metadata_json={"demo_fixture": True},
+        )
+        db.add(row)
+        await db.flush()
+        await record_event(
+            db,
+            "compliance.demo_age_verification_seeded",
+            actor_user_id=users[email].id,
+            target_type="age_verification_record",
+            target_id=str(row.id),
+            metadata={"status": status.value, "country_code": "PT"},
+        )
+
+
+async def _ensure_demo_legal_content(
+    db: AsyncSession, admin: User, users: dict[str, User]
+) -> list[LegalDocumentVersion]:
+    """Seed required demo pages and review-required drafts for every other type."""
+
+    published: list[LegalDocumentVersion] = []
+    for document_type in LegalDocumentType:
+        slug = document_type.value.replace("_", "-")
+        document = await db.scalar(
+            select(LegalDocument).where(
+                LegalDocument.slug == slug,
+                LegalDocument.jurisdiction_code.is_(None),
+                LegalDocument.language == "en",
+                LegalDocument.audience == LegalAudience.all_users,
+            )
+        )
+        if document is None:
+            document, version = await legal_service.create_document(
+                db,
+                admin,
+                {
+                    "document_type": document_type,
+                    "slug": slug,
+                    "jurisdiction_code": None,
+                    "language": "en",
+                    "audience": LegalAudience.all_users,
+                    "title": f"Development placeholder: {document_type.value.replace('_', ' ')}",
+                    "body": [
+                        {
+                            "type": "callout",
+                            "text": (
+                                "Development-only placeholder. This is not approved legal text, "
+                                "legal advice, or a claim of compliance."
+                            ),
+                        }
+                    ],
+                    "requires_acceptance": document_type in DEMO_LEGAL_TYPES,
+                    "requires_legal_review": document_type not in DEMO_LEGAL_TYPES,
+                    "approved_for_publication": document_type in DEMO_LEGAL_TYPES,
+                    "is_demo": True,
+                },
+            )
+            if document_type in DEMO_LEGAL_TYPES:
+                await legal_service.publish_version(
+                    db,
+                    admin,
+                    version.id,
+                    reason="Activate explicit development-only placeholder",
+                )
+        version = await db.scalar(
+            select(LegalDocumentVersion)
+            .where(
+                LegalDocumentVersion.document_id == document.id,
+                LegalDocumentVersion.is_demo.is_(True),
+            )
+            .order_by(LegalDocumentVersion.version.desc())
+            .limit(1)
+        )
+        if (
+            version is not None
+            and document_type in DEMO_LEGAL_TYPES
+            and version.status is LegalDocumentStatus.published
+        ):
+            published.append(version)
+    required_ids = [version.id for version in published]
+    for user in users.values():
+        await legal_service.record_acceptances(
+            db,
+            user,
+            required_ids,
+            source="account",
+            jurisdiction_code="PT",
+            correlation_id=None,
+        )
+    current_settings = await db.scalar(
+        select(SiteSettingsVersion).where(SiteSettingsVersion.is_current.is_(True))
+    )
+    if current_settings is None:
+        await legal_service.update_site_settings(
+            db,
+            admin,
+            {
+                "support_email": "support@demo.fanbackstage.local",
+                "footer_text": "Development-only FanBackstage compliance demonstration.",
+                "public_contact_text": "Fictional local support contact for manual QA.",
+                "social_links": [],
+                "homepage_announcement": (
+                    "Development demo: country policies and legal copy require real review."
+                ),
+                "maintenance_notice": None,
+                "banner_level": "info",
+                "banner_starts_at": None,
+                "banner_ends_at": None,
+                "reason": "Create development-only public site settings",
+            },
+        )
+    return published
+
+
 async def _ensure_user(db: AsyncSession, email: str, role_names: tuple[str, ...]) -> User:
     user = await db.scalar(select(User).where(User.email == email))
     if not user:
-        user, _ = await accounts.register(db, email, PASSWORD, None, adult_confirmed=True)
+        user, _ = await accounts.register(
+            db,
+            email,
+            PASSWORD,
+            None,
+            adult_confirmed=True,
+            country_code="PT",
+        )
+    user.country_code = "PT"
     if user.email_verified_at is None:
         user.email_verified_at = datetime.now(UTC)
     adult_access.attest_account(user)
@@ -244,6 +602,40 @@ async def _ensure_creator(
             "the seed will not override an existing moderation decision"
         )
     return profile
+
+
+async def _ensure_pending_creator_kyc(
+    db: AsyncSession, admin: User, profile: CreatorProfile
+) -> None:
+    """Keep the suspended demo creator as the explicit pending-KYC support case."""
+
+    provider_reference = "demo-pending-creator-kyc-reya-v1"
+    if await db.scalar(
+        select(CreatorVerification.id).where(
+            CreatorVerification.provider_reference == provider_reference
+        )
+    ):
+        return
+    verification = CreatorVerification(
+        creator_profile_id=profile.id,
+        provider="development",
+        provider_reference=provider_reference,
+        status=VerificationStatus.pending,
+        adult_verified=False,
+        identity_verified=False,
+        country_code="PT",
+        metadata_json={"demo_fixture": True, "purpose": "pending_kyc_manual_qa"},
+    )
+    db.add(verification)
+    await db.flush()
+    await record_event(
+        db,
+        "creator.demo_pending_kyc_seeded",
+        actor_user_id=admin.id,
+        target_type="creator_verification",
+        target_id=str(verification.id),
+        metadata={"creator_profile_id": str(profile.id), "status": "pending"},
+    )
 
 
 async def _ensure_marketing_preferences(db: AsyncSession, users: dict[str, User]) -> None:
@@ -441,6 +833,19 @@ async def _ensure_creator_content(
         asset_root,
         classification_actor=admin,
     )
+    # Asset contexts are exclusive: the gallery master cannot also back a
+    # free feed post. Keep the deterministic feed illustration distinct while
+    # retaining idempotent filename-based seed convergence.
+    feed_image_asset = await ensure_image_asset(
+        db,
+        creator_user,
+        profile,
+        seed.slug,
+        provider,
+        asset_root,
+        variant="feed",
+        classification_actor=admin,
+    )
     video_asset = await ensure_video_asset(
         db,
         creator_user,
@@ -517,7 +922,7 @@ async def _ensure_creator_content(
         await content_service.approve(db, video, admin)
     if gallery.status is not ContentStatus.published or video.status is not ContentStatus.published:
         raise RuntimeError(f"Demo content did not publish for {seed.slug}")
-    return CreatorContent(gallery, video, image_asset, video_asset)
+    return CreatorContent(gallery, video, image_asset, feed_image_asset, video_asset)
 
 
 async def _ensure_showcase_galleries(
@@ -598,6 +1003,105 @@ async def _ensure_showcase_galleries(
             raise RuntimeError(f"Demo gallery did not publish: {showcase.title}")
 
 
+async def _ensure_performer_consent_example(
+    db: AsyncSession,
+    admin: User,
+    users: dict[str, User],
+    profiles: dict[str, CreatorProfile],
+    content: dict[str, CreatorContent],
+) -> None:
+    """Build one private co-performer identity, verification, release, and content link."""
+
+    creator = profiles["zara-pulse"]
+    creator_user = users[_email("zara-pulse")]
+    target = content["zara-pulse"].video
+    safe_reference = "Demo co-performer A"
+    performer = await db.scalar(
+        select(PerformerIdentity).where(
+            PerformerIdentity.owner_creator_id == creator.id,
+            PerformerIdentity.safe_reference == safe_reference,
+        )
+    )
+    if performer is None:
+        performer = await performers.create_identity(
+            db,
+            creator_user,
+            safe_reference,
+            country_code="PT",
+        )
+    identity_reference = "demo-performer-identity-zara-v1"
+    if not await db.scalar(
+        select(PerformerIdentityVerification.id).where(
+            PerformerIdentityVerification.provider == "development",
+            PerformerIdentityVerification.provider_reference == identity_reference,
+        )
+    ):
+        await performers.record_identity_verification(
+            db,
+            admin,
+            performer.id,
+            provider="development",
+            provider_reference=identity_reference,
+            status=PerformerIdentityStatus.verified,
+            country_code="PT",
+            expires_at=datetime.now(UTC) + timedelta(days=365),
+            confirmed=True,
+            reason="Reviewed fictional development performer identity fixture",
+        )
+    age_reference = "demo-performer-age-zara-v1"
+    if not await db.scalar(
+        select(PerformerAgeVerification.id).where(
+            PerformerAgeVerification.provider == "development",
+            PerformerAgeVerification.provider_reference == age_reference,
+        )
+    ):
+        await performers.record_age_verification(
+            db,
+            admin,
+            performer.id,
+            provider="development",
+            provider_reference=age_reference,
+            status=AgeVerificationStatus.verified,
+            country_code="PT",
+            required_minimum_age=18,
+            achieved_assurance_level=AgeAssuranceLevel.medium,
+            expires_at=datetime.now(UTC) + timedelta(days=365),
+            confirmed=True,
+            reason="Reviewed fictional development performer age fixture",
+        )
+    release = await db.scalar(
+        select(ConsentRelease)
+        .where(
+            ConsentRelease.owner_creator_id == creator.id,
+            ConsentRelease.participant_reference == safe_reference,
+        )
+        .order_by(ConsentRelease.created_at.desc())
+        .limit(1)
+    )
+    if release is None:
+        release = await trust_safety.submit_consent_release(
+            db,
+            creator,
+            creator_user,
+            ConsentReleaseType.co_performer_release,
+            safe_reference,
+            [target.id],
+            effective_until=datetime.now(UTC) + timedelta(days=365),
+            evidence_reference="demo://fictional-performer-release-evidence",
+        )
+    if release.status is ConsentReleaseStatus.pending:
+        await trust_safety.verify_consent_release(db, release, admin, approved=True)
+    if release.status is not ConsentReleaseStatus.verified:
+        raise RuntimeError("The demo co-performer release is not current")
+    await performers.link_content_performer(
+        db,
+        creator_user,
+        target.id,
+        performer.id,
+        release.id,
+    )
+
+
 async def _ensure_posts(
     db: AsyncSession,
     creator_user: User,
@@ -609,7 +1113,7 @@ async def _ensure_posts(
         {
             "post_type": "image",
             "body": post_body(seed, 0),
-            "media_asset_ids": [bundle.image_asset.id],
+            "media_asset_ids": [bundle.feed_image_asset.id],
         },
         {"post_type": "text", "body": post_body(seed, 1)},
         {
@@ -658,26 +1162,6 @@ async def _ensure_stories(
     for creator_position, seed in enumerate(STORY_CREATORS):
         creator = profiles[seed.slug]
         creator_user = users[seed.email]
-        story_image = await ensure_image_asset(
-            db,
-            creator_user,
-            creator,
-            seed.slug,
-            provider,
-            asset_root,
-            variant="story",
-            classification_actor=admin,
-        )
-        story_video = await ensure_video_asset(
-            db,
-            creator_user,
-            creator,
-            seed.slug,
-            provider,
-            asset_root,
-            variant="story",
-            classification_actor=admin,
-        )
         for position in range(3):
             caption = story_caption(seed, position)
             existing = await db.scalar(
@@ -696,10 +1180,32 @@ async def _ensure_stories(
                 policy = AccessPolicy.followers
             else:
                 policy = AccessPolicy.subscription
+            if position % 2 == 0:
+                story_asset = await ensure_image_asset(
+                    db,
+                    creator_user,
+                    creator,
+                    seed.slug,
+                    provider,
+                    asset_root,
+                    variant=f"story-{position}",
+                    classification_actor=admin,
+                )
+            else:
+                story_asset = await ensure_video_asset(
+                    db,
+                    creator_user,
+                    creator,
+                    seed.slug,
+                    provider,
+                    asset_root,
+                    variant=f"story-{position}",
+                    classification_actor=admin,
+                )
             await stories.create_story(
                 db,
                 creator_user,
-                (story_image.id if position % 2 == 0 else story_video.id),
+                story_asset.id,
                 caption,
                 f"{seed.display_name} demo Story {position + 1}",
                 policy,
@@ -717,10 +1223,20 @@ async def _ensure_stories(
             )
         )
         if not historical:
+            historical_asset = await ensure_image_asset(
+                db,
+                creator_user,
+                creator,
+                seed.slug,
+                provider,
+                asset_root,
+                variant="story-historical",
+                classification_actor=admin,
+            )
             await stories.create_story(
                 db,
                 creator_user,
-                story_image.id,
+                historical_asset.id,
                 caption,
                 f"Expired {seed.display_name} demo Story",
                 AccessPolicy.free,
@@ -809,7 +1325,9 @@ async def _ensure_conversations(
 ) -> None:
     pairs = (
         ("subscriber", "luna-sparks"),
-        ("socialfan", "mira-nova"),
+        # ``socialfan`` intentionally demonstrates expired assurance and must
+        # not be used to create a fresh protected-message mutation.
+        ("subscriber", "mira-nova"),
         ("newfan", "zara-pulse"),
         ("marketing-in", "sera-kim"),
     )
@@ -866,10 +1384,10 @@ async def _ensure_live_history(
             LiveAccessMode.public,
             "An ended local-only room retained as streaming history.",
         )
-        # Start and end occur inside the same uncommitted transaction.  No public
-        # request can observe a fake active room, and the creator participant is
-        # the authoritative broadcaster for the historical session.
-        await streaming.end_live(db, creator_user, room.id)
+        # This is a historical fixture, not a provider-backed room. Finalize
+        # its local lifecycle directly so the seed never performs (or queues)
+        # a LiveKit control before the seed transaction commits.
+        await streaming._mark_public_room_ended(db, room)
 
 
 async def _ensure_subscription_plans(db: AsyncSession, profiles: dict[str, CreatorProfile]) -> None:
@@ -916,18 +1434,18 @@ async def _ensure_listings(
     for creator_position, seed in enumerate(PUBLIC_CREATORS):
         creator = profiles[seed.slug]
         creator_user = users[seed.email]
-        marketplace_asset = await ensure_image_asset(
-            db,
-            creator_user,
-            creator,
-            seed.slug,
-            provider,
-            asset_root,
-            variant="marketplace",
-            audience=MediaAudience.safe_public,
-            classification_actor=admin,
-        )
         for item_position in range(listing_count_for_creator(creator_position)):
+            marketplace_asset = await ensure_image_asset(
+                db,
+                creator_user,
+                creator,
+                seed.slug,
+                provider,
+                asset_root,
+                variant=f"marketplace-{item_position}",
+                audience=MediaAudience.safe_public,
+                classification_actor=admin,
+            )
             title = listing_title(seed, item_position)
             listing = await db.scalar(
                 select(MarketplaceListing).where(
@@ -1273,10 +1791,14 @@ async def seed_database(
 
     users = {seed.email: await _ensure_user(db, seed.email, seed.roles) for seed in USERS}
     admin = users[_email("admin")]
+    demo_policy = await _ensure_compliance_demo_policy(db, admin)
+    await _ensure_demo_age_verifications(db, users, demo_policy)
+    await _ensure_demo_legal_content(db, admin, users)
     await _ensure_marketing_preferences(db, users)
     profiles = {
         seed.slug: await _ensure_creator(db, admin, users[seed.email], seed) for seed in CREATORS
     }
+    await _ensure_pending_creator_kyc(db, admin, profiles[RESTRICTED_CREATOR.slug])
     await _ensure_referral(db, users)
     await _ensure_groups(db, users, profiles)
 
@@ -1301,6 +1823,7 @@ async def seed_database(
             content[seed.slug],
         )
     await _ensure_showcase_galleries(db, admin, users, profiles, provider, asset_root)
+    await _ensure_performer_consent_example(db, admin, users, profiles, content)
     await _ensure_stories(db, admin, users, profiles, provider, asset_root)
     await _ensure_social_graph(db, users, profiles, posts)
     await _ensure_conversations(db, users, profiles)

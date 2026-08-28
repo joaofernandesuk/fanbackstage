@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -91,6 +92,18 @@ class LiveRecordingStatus(str, enum.Enum):
     recording = "recording"
     completed = "completed"
     failed = "failed"
+
+
+class LiveProviderControlAction(str, enum.Enum):
+    delete_room = "delete_room"
+    remove_participant = "remove_participant"
+
+
+class LiveProviderControlStatus(str, enum.Enum):
+    pending = "pending"
+    processing = "processing"
+    succeeded = "succeeded"
+    failed_terminal = "failed_terminal"
 
 
 class LiveRoom(UUIDPrimaryKey, Timestamped, Base):
@@ -345,3 +358,87 @@ class ProviderLiveEvent(UUIDPrimaryKey, Timestamped, Base):
         ForeignKey("private_sessions.id", ondelete="SET NULL")
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveProviderControlIntent(UUIDPrimaryKey, Timestamped, Base):
+    """Durable, replay-safe command for the LiveKit server-control boundary."""
+
+    __tablename__ = "live_provider_control_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "(action = 'delete_room' AND participant_identity IS NULL) OR "
+            "(action = 'remove_participant' AND "
+            "participant_identity IS NOT NULL AND btrim(participant_identity) <> '')",
+            name="ck_live_provider_control_action_target",
+        ),
+        CheckConstraint(
+            "btrim(target_type) <> '' AND btrim(target_id) <> '' "
+            "AND btrim(provider_room_name) <> '' AND btrim(reason) <> '' "
+            "AND btrim(idempotency_key) <> ''",
+            name="ck_live_provider_control_required_text",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_live_provider_control_attempt_count",
+        ),
+        CheckConstraint(
+            "(last_error_code IS NULL AND last_error_at IS NULL) OR "
+            "(last_error_code IS NOT NULL AND last_error_at IS NOT NULL)",
+            name="ck_live_provider_control_error_pair",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND retryable IS TRUE "
+            "AND next_attempt_at IS NOT NULL AND lease_expires_at IS NULL "
+            "AND succeeded_at IS NULL AND terminal_failed_at IS NULL) OR "
+            "(status = 'processing' AND retryable IS TRUE "
+            "AND next_attempt_at IS NULL AND lease_expires_at IS NOT NULL "
+            "AND last_attempt_at IS NOT NULL AND attempt_count > 0 "
+            "AND succeeded_at IS NULL AND terminal_failed_at IS NULL) OR "
+            "(status = 'succeeded' AND retryable IS FALSE "
+            "AND next_attempt_at IS NULL AND lease_expires_at IS NULL "
+            "AND succeeded_at IS NOT NULL AND terminal_failed_at IS NULL) OR "
+            "(status = 'failed_terminal' AND retryable IS FALSE "
+            "AND next_attempt_at IS NULL AND lease_expires_at IS NULL "
+            "AND succeeded_at IS NULL AND terminal_failed_at IS NOT NULL "
+            "AND last_error_code IS NOT NULL AND last_error_at IS NOT NULL)",
+            name="ck_live_provider_control_status_state",
+        ),
+        Index(
+            "ix_live_provider_control_due",
+            "status",
+            "next_attempt_at",
+            "lease_expires_at",
+            "created_at",
+            "id",
+        ),
+    )
+    action: Mapped[LiveProviderControlAction] = mapped_column(
+        Enum(LiveProviderControlAction, name="live_provider_control_action"),
+        nullable=False,
+    )
+    target_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_room_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    participant_identity: Mapped[str | None] = mapped_column(String(255))
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    status: Mapped[LiveProviderControlStatus] = mapped_column(
+        Enum(LiveProviderControlStatus, name="live_provider_control_status"),
+        default=LiveProviderControlStatus.pending,
+        nullable=False,
+        index=True,
+    )
+    retryable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(96))
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

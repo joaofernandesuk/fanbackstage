@@ -9,12 +9,18 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
+from app.compliance.policy import resolve_compliance_decision
+from app.compliance.types import (
+    ComplianceAccessError,
+    ComplianceDecision,
+    require_compliance_access,
+)
 from app.core.config import get_settings
-from app.creators.service import has_current_adult_verification
+from app.creators.service import resolve_creator_compliance_eligibility
 from app.finance.service import _account, currency_code, post_entries, reverse_original_ledger
 from app.groups.service import has_delegated_permission
+from app.models.compliance import ComplianceFeature
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.featuring import (
@@ -57,7 +63,38 @@ INELIGIBLE_MODERATION = (
 
 
 class FeaturingError(ValueError):
-    pass
+    def __init__(self, message: str, compliance_decision: ComplianceDecision | None = None):
+        super().__init__(message)
+        self.compliance_decision = compliance_decision
+        self.code = compliance_decision.code if compliance_decision else None
+        self.action = compliance_decision.action if compliance_decision else None
+
+
+async def require_featuring_compliance(
+    db: AsyncSession,
+    payer: User,
+    decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
+) -> ComplianceDecision:
+    allowed: ComplianceDecision | None = None
+    for feature in (ComplianceFeature.featuring, ComplianceFeature.purchases):
+        decision = (
+            decisions.get(feature)
+            if decisions
+            else await resolve_compliance_decision(
+                db,
+                user=payer,
+                feature=feature,
+                adult_restricted=True,
+            )
+        )
+        if decision is None:
+            raise FeaturingError("Featuring compliance decision is unavailable")
+        try:
+            allowed = require_compliance_access(decision)
+        except ComplianceAccessError as exc:
+            raise FeaturingError(exc.decision.reason, exc.decision) from exc
+    assert allowed is not None
+    return allowed
 
 
 async def _owner_and_eligible(
@@ -78,11 +115,15 @@ async def _owner_and_eligible(
         if not target:
             return UUID(int=0), False
         valid_type = target.content_type.value == target_type.value
-        if target.requires_verified_consent:
-            from app.trust_safety.service import valid_verified_release_for_content
+        from app.trust_safety.service import (
+            has_verified_content_performers,
+            valid_verified_release_for_content,
+        )
 
-            if not await valid_verified_release_for_content(db, target.id):
-                return target.owner_creator_id, False
+        if (
+            target.requires_verified_consent or await has_verified_content_performers(db, target.id)
+        ) and not await valid_verified_release_for_content(db, target.id):
+            return target.owner_creator_id, False
         return target.owner_creator_id, bool(
             valid_type
             and target.status is ContentStatus.published
@@ -123,8 +164,10 @@ async def assert_target_eligibility(
         or not creator
         or creator.status is not CreatorStatus.approved
         or not creator.is_public
-        or not await has_current_adult_verification(db, creator.id)
     ):
+        raise FeaturingError("Target is not eligible for featuring")
+    eligibility = await resolve_creator_compliance_eligibility(db, profile=creator)
+    if not eligibility.public_allowed:
         raise FeaturingError("Target is not eligible for featuring")
     return creator_id
 
@@ -276,6 +319,7 @@ async def create_booking(
     starts_at: datetime,
     duration_seconds: int,
     idempotency_key: str,
+    compliance_decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
 ) -> FeatureBooking:
     if (
         not idempotency_key
@@ -292,10 +336,7 @@ async def create_booking(
     )
     if existing:
         return existing
-    try:
-        require_current_self_attestation(purchaser)
-    except PermissionError as exc:
-        raise FeaturingError("Current adult self-attestation is required") from exc
+    await require_featuring_compliance(db, purchaser, compliance_decisions)
     slot = await db.scalar(select(FeatureSlot).where(FeatureSlot.id == slot_id).with_for_update())
     if not slot or not slot.active:
         raise FeaturingError("Feature slot is unavailable")
@@ -917,6 +958,7 @@ async def initiate_payment(
     booking: FeatureBooking,
     payer: User,
     idempotency_key: str | None = None,
+    compliance_decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
 ) -> PaymentAttempt:
     if booking.purchaser_user_id != payer.id:
         raise FeaturingError("Only the selected payer can authorize this booking")
@@ -966,10 +1008,7 @@ async def initiate_payment(
             PaymentStatus.succeeded,
         }:
             return current_attempt
-    try:
-        require_current_self_attestation(payer)
-    except PermissionError as exc:
-        raise FeaturingError("Current adult self-attestation is required") from exc
+    await require_featuring_compliance(db, payer, compliance_decisions)
     attempt = PaymentAttempt(
         buyer_user_id=payer.id,
         provider=get_settings().payment_provider,

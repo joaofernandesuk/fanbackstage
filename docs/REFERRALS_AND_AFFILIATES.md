@@ -21,6 +21,7 @@ Creator referral rewards should preferably be funded from the platform commissio
 - Signup attribution is a signed, immutable snapshot. Existing accounts are not re-attributed through later referral links.
 - Subscription rewards use a policy-snapshotted, admin-configurable 90-day window measured from the first successful attributed subscription payment; it is timestamp-based, not period-count based.
 - Creator-to-creator referrals are represented as a deferred program type only. They are paused by default and create no financial reward until a separately approved milestone policy exists.
+- Super-admin creation of a referral programme, commission-policy version, or active link requires an explicit confirmation and a meaningful reason. The same transaction appends an audit event with the actor, programme/policy scope, reason, and safe before/after configuration snapshot.
 
 ## Central financial allocation boundary
 

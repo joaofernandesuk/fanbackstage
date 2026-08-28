@@ -231,6 +231,71 @@ def expire_consent_releases() -> dict[str, int]:
 
 
 @celery_app.task
+def reconcile_age_verifications() -> dict[str, int]:
+    """Expire outcomes, notify safely, and enforce connected-live authority."""
+
+    from app.compliance.age_verification import (
+        expire_due_verifications,
+        notify_expiring_verifications,
+    )
+    from app.db.session import SessionLocal
+    from app.streaming.service import reconcile_live_compliance_authority
+
+    async def run() -> dict[str, int]:
+        async with SessionLocal() as session:
+            expired = await expire_due_verifications(session)
+            expiring_notified = await notify_expiring_verifications(session)
+            live_evictions = await reconcile_live_compliance_authority(session)
+            await session.commit()
+            return {
+                "expired": expired,
+                "expiring_notified": expiring_notified,
+                "live_evictions": live_evictions,
+            }
+
+    return run_async(run())
+
+
+@celery_app.task
+def process_live_provider_control_outbox() -> dict[str, int]:
+    """Replay a bounded set of committed LiveKit control intents."""
+
+    from app.streaming.control_outbox import process_due_live_provider_control_intents
+    from app.streaming.service import finalize_live_provider_control_success
+
+    async def run() -> dict[str, int]:
+        result = await process_due_live_provider_control_intents(
+            success_hook=finalize_live_provider_control_success
+        )
+        return {
+            "processed": result.processed_count,
+            "succeeded": result.succeeded_count,
+            "retryable": result.retryable_count,
+            "terminal": result.terminal_count,
+        }
+
+    return run_async(run())
+
+
+@celery_app.task
+def reconcile_legal_acceptance_notifications() -> dict[str, int]:
+    """Activate scheduled legal terms and durably revoke affected live authority."""
+
+    from app.db.session import SessionLocal
+    from app.legal.service import notify_due_legal_acceptance_versions
+    from app.streaming.service import reconcile_live_compliance_authority
+
+    async def run() -> dict[str, int]:
+        async with SessionLocal() as session:
+            notified = await notify_due_legal_acceptance_versions(session)
+            live_evictions = await reconcile_live_compliance_authority(session)
+            await session.commit()
+            return {"notified": notified, "live_evictions": live_evictions}
+
+    return run_async(run())
+
+
+@celery_app.task
 def process_subscription_renewals() -> dict[str, int]:
     """Create one replay-safe renewal attempt per due subscription period."""
     from app.db.session import SessionLocal

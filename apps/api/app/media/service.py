@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
 from app.core.config import get_settings
+from app.creators.service import resolve_creator_compliance_eligibility
 from app.media.storage import StorageProvider, storage_provider
 from app.models.content import MediaAsset, MediaAudience, MediaStatus, MediaType
 from app.models.creator import CreatorProfile, CreatorStatus
@@ -28,10 +29,9 @@ async def approved_creator(db: AsyncSession, user: User) -> CreatorProfile:
     profile = await db.scalar(select(CreatorProfile).where(CreatorProfile.user_id == user.id))
     if not profile or profile.status is not CreatorStatus.approved:
         raise PermissionError("An approved creator profile is required")
-    from app.creators.service import has_current_adult_verification
-
-    if not await has_current_adult_verification(db, profile.id):
-        raise PermissionError("A current verified adult creator profile is required")
+    eligibility = await resolve_creator_compliance_eligibility(db, profile=profile)
+    if not eligibility.public_allowed:
+        raise PermissionError(eligibility.reason)
     return profile
 
 

@@ -1,11 +1,13 @@
 import { expect, test } from "@playwright/test";
 
+import { completeRegistrationCompliance } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 test("creator can register, verify, and submit an identity application", async ({ page }) => {
   const email = `creator-${Date.now()}@example.com`;
   const password = "creator-password-123";
   await page.goto("/register");
+  await completeRegistrationCompliance(page);
   const registrationForm = page.getByRole("main").locator("form");
   await registrationForm.getByLabel("Email").fill(email);
   await registrationForm.getByRole("textbox", { name: /^Password\b/ }).fill(password);
@@ -69,6 +71,25 @@ test("creator onboarding hides the development shortcut when the API capability 
         is_public: false,
         verification_status: "not_started",
         adult_verified: false,
+        creator_compliance: {
+          jurisdiction: "PT",
+          policy_version: 2,
+          verification_status: null,
+          verification_expires_at: null,
+          identity_required: true,
+          identity_allowed: false,
+          age_required: true,
+          age_allowed: false,
+          public_allowed: false,
+          payout_kyc_required: true,
+          payout_kyc_satisfied: false,
+          payout_allowed: false,
+          code: "CREATOR_IDENTITY_VERIFICATION_REQUIRED",
+          reason: "Current creator identity verification is required",
+          payout_code: "PAYOUT_KYC_REQUIRED",
+        },
+        performer_consent_issue_count: 0,
+        creator_compliance_action_required: true,
         rejection_reason: null,
         languages: [],
         categories: [],

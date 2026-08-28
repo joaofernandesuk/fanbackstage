@@ -3,8 +3,10 @@ from fastapi import APIRouter
 from app.api.routes import (
     account,
     admin,
+    admin_compliance,
     analytics,
     auth,
+    compliance,
     content,
     creators,
     discovery,
@@ -12,11 +14,13 @@ from app.api.routes import (
     finance,
     groups,
     health,
+    legal,
     marketplace,
     media,
     messaging,
     messaging_moderation,
     notifications,
+    performers,
     referrals,
     social,
     stories,
@@ -27,13 +31,17 @@ from app.api.routes import (
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
+api_router.include_router(compliance.router)
+api_router.include_router(legal.router)
 api_router.include_router(referrals.router)
 api_router.include_router(discovery.router)
 api_router.include_router(featuring.router)
 api_router.include_router(account.router)
 api_router.include_router(notifications.router)
+api_router.include_router(performers.router)
 api_router.include_router(analytics.router)
 api_router.include_router(admin.router)
+api_router.include_router(admin_compliance.router)
 api_router.include_router(creators.router)
 api_router.include_router(media.router)
 api_router.include_router(marketplace.router)

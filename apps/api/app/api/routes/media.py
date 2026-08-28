@@ -1,16 +1,19 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
-from app.accounts import adult_access
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
-from app.content.access import can_access_asset, can_access_preview
+from app.compliance.http import resolve_request_compliance_decision
+from app.compliance.types import ComplianceDecision
+from app.content.access import asset_delivery_feature, can_access_asset, can_access_preview
 from app.core.config import get_settings
 from app.core.rate_limit import enforce_media_rate_limit
 from app.media import service
 from app.media.storage import storage_provider
+from app.models.compliance import ComplianceFeature
 from app.models.content import MediaAsset, MediaAudience, MediaDerivative
 from app.schemas.content import UploadIntent, UploadResponse
 from app.worker.tasks import process_media_asset
@@ -18,17 +21,54 @@ from app.worker.tasks import process_media_asset
 router = APIRouter(prefix="/media", tags=["media"])
 
 
-def _delivery_ttl(asset: MediaAsset, decision: adult_access.AdultAccessDecision) -> int:
+async def require_media_authoring(db: Db, request: Request, user) -> None:
+    for feature, restricted in (
+        (ComplianceFeature.platform_access, False),
+        (ComplianceFeature.adult_media, True),
+    ):
+        decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=feature,
+            adult_restricted=restricted,
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                403,
+                {
+                    "message": decision.reason,
+                    "code": decision.code,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                },
+            )
+
+
+def _delivery_ttl(asset: MediaAsset, decision: ComplianceDecision) -> int:
     configured_ttl = get_settings().media_url_ttl_seconds
     if asset.audience is not MediaAudience.adult_restricted:
         return configured_ttl
-    return adult_access.restricted_delivery_ttl(decision, configured_ttl)
+    if not decision.allowed:
+        raise ValueError("Adult media access is not allowed")
+    verification_expires_at = getattr(decision, "verification_expires_at", None)
+    if verification_expires_at is None:
+        # Compatibility for already-issued signed self-attestation decisions.
+        verification_expires_at = getattr(decision, "expires_at", None)
+    if verification_expires_at is None:
+        return configured_ttl
+    remaining = int((verification_expires_at - datetime.now(UTC)).total_seconds())
+    ttl = min(configured_ttl, remaining)
+    if ttl <= 0:
+        raise ValueError("Restricted media delivery is unavailable")
+    return ttl
 
 
 @router.post("/uploads", response_model=UploadResponse)
 async def initiate_upload(
     payload: UploadIntent, request: Request, identity: CurrentIdentity, db: Db
 ) -> UploadResponse:
+    await require_media_authoring(db, request, identity[0])
     await enforce_media_rate_limit(request, str(identity[0].id))
     try:
         asset, upload_url = await service.begin_upload(
@@ -52,6 +92,7 @@ async def initiate_upload(
 async def finalize_upload(
     asset_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> UploadResponse:
+    await require_media_authoring(db, request, identity[0])
     await enforce_media_rate_limit(request, str(identity[0].id))
     try:
         asset = await service.finalize_upload(db, identity[0], asset_id)
@@ -72,6 +113,7 @@ async def finalize_upload(
 async def requeue_upload(
     asset_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> UploadResponse:
+    await require_media_authoring(db, request, identity[0])
     await enforce_media_rate_limit(request, str(identity[0].id))
     try:
         asset = await service.requeue_failed_upload(db, identity[0], asset_id)
@@ -107,21 +149,21 @@ async def derivative_delivery(
 ) -> RedirectResponse:
     await enforce_media_rate_limit(request, str(identity[0].id) if identity else "anonymous")
     derivative = await db.get(MediaDerivative, derivative_id)
-    decision = adult_access.resolve_adult_access(
-        identity[0] if identity else None,
-        request.cookies.get(get_settings().adult_access_cookie_name),
-    )
     asset = await db.get(MediaAsset, derivative.media_asset_id) if derivative else None
-    if (
-        not derivative
-        or not asset
-        or derivative.status.value != "ready"
-        or not await can_access_asset(
-            db,
-            derivative.media_asset_id,
-            identity[0] if identity else None,
-            decision,
-        )
+    if not derivative or not asset or derivative.status.value != "ready":
+        raise HTTPException(status_code=404, detail="Media not found")
+    decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=identity[0] if identity else None,
+        feature=await asset_delivery_feature(db, asset.id),
+        adult_restricted=bool(asset and asset.audience is MediaAudience.adult_restricted),
+    )
+    if not await can_access_asset(
+        db,
+        derivative.media_asset_id,
+        identity[0] if identity else None,
+        decision,
     ):
         raise HTTPException(status_code=404, detail="Media not found")
     try:
@@ -140,16 +182,17 @@ async def preview_delivery(
 ) -> RedirectResponse:
     await enforce_media_rate_limit(request)
     derivative = await db.get(MediaDerivative, derivative_id)
-    decision = adult_access.resolve_adult_access(
-        identity[0] if identity else None,
-        request.cookies.get(get_settings().adult_access_cookie_name),
-    )
     asset = await db.get(MediaAsset, derivative.media_asset_id) if derivative else None
-    if (
-        not derivative
-        or not asset
-        or not await can_access_preview(db, derivative, identity[0] if identity else None, decision)
-    ):
+    if not derivative or not asset:
+        raise HTTPException(status_code=404, detail="Media not found")
+    decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=identity[0] if identity else None,
+        feature=await asset_delivery_feature(db, asset.id),
+        adult_restricted=bool(asset and asset.audience is MediaAudience.adult_restricted),
+    )
+    if not await can_access_preview(db, derivative, identity[0] if identity else None, decision):
         raise HTTPException(status_code=404, detail="Media not found")
     try:
         ttl = _delivery_ttl(asset, decision)

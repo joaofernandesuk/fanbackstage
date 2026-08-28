@@ -5,9 +5,11 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
+from app.compliance.http import resolve_request_compliance_decision
 from app.featuring.service import booking_for_payment_attempt
 from app.finance import service
 from app.media.service import approved_creator
+from app.models.compliance import ComplianceFeature
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
 from app.models.finance import CommissionRule, PaymentAttempt, Purchase
@@ -27,6 +29,31 @@ from app.schemas.finance import (
 )
 
 router = APIRouter(tags=["finance"])
+
+
+async def request_ppv_decisions(db: Db, request: Request, user):
+    return {
+        feature: await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=feature,
+            adult_restricted=True,
+        )
+        for feature in (ComplianceFeature.ppv, ComplianceFeature.purchases)
+    }
+
+
+def financial_error_detail(exc: service.FinancialError):
+    decision = exc.compliance_decision
+    if decision is None:
+        return str(exc)
+    return {
+        "message": str(exc),
+        "code": decision.code,
+        "action": decision.action,
+        "reason": decision.reason,
+    }
 
 
 async def dispatch_purchase_receipt(db: Db, purchase: Purchase | None) -> None:
@@ -63,19 +90,27 @@ def purchase_response(purchase: Purchase) -> PurchaseResponse:
 @router.post("/purchases/content/{content_id}", response_model=PurchaseResponse)
 async def start_purchase(
     content_id: UUID,
+    request: Request,
     identity: CurrentIdentity,
     db: Db,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> PurchaseResponse:
     try:
         purchase = await service.initiate_purchase(
-            db, identity[0], content_id, idempotency_key or ""
+            db,
+            identity[0],
+            content_id,
+            idempotency_key or "",
+            compliance_decisions=await request_ppv_decisions(db, request, identity[0]),
         )
         await db.commit()
         return purchase_response(purchase)
     except service.FinancialError as exc:
         await db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=403 if exc.compliance_decision else 400,
+            detail=financial_error_detail(exc),
+        ) from exc
 
 
 @router.get("/purchases/mine", response_model=list[PurchaseHistoryResponse])

@@ -132,6 +132,16 @@
   padding: 13px 14px;
 }
 
+.form select {
+  background: rgb(5 8 20 / 0.86);
+  border: 1px solid rgb(159 174 220 / 0.26);
+  border-radius: 10px;
+  color: var(--text-primary);
+  min-height: 49px;
+  padding: 13px 14px;
+  width: 100%;
+}
+
 .form input:focus {
   border-color: var(--brand-cyan);
   box-shadow: 0 0 0 3px rgb(14 165 255 / 0.12);
@@ -199,6 +209,72 @@
   accent-color: var(--brand-pink);
   flex: 0 0 auto;
   margin: 2px 0 0;
+}
+
+.registrationPolicy,
+.policyNotice {
+  display: grid;
+  gap: 10px;
+}
+
+.registrationPolicy > p,
+.policyNotice span,
+.policyAllowed {
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.policyNotice {
+  background: rgb(14 165 255 / 0.07);
+  border: 1px solid rgb(14 165 255 / 0.24);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.policyNotice strong {
+  font-size: 0.75rem;
+}
+
+.policyNotice button {
+  justify-self: start;
+}
+
+.policyAllowed {
+  color: #86efac;
+}
+
+.legalAcceptances {
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+}
+
+.legalAcceptances legend {
+  font-size: 0.7rem;
+  font-weight: 850;
+  padding: 0 5px;
+}
+
+.legalAcceptances label {
+  align-items: flex-start;
+  color: var(--text-secondary);
+  display: flex;
+  gap: 9px;
+  line-height: 1.45;
+}
+
+.legalAcceptances input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.legalAcceptances a {
+  color: #7dd3ff;
 }
 
 .error {

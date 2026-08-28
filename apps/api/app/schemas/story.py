@@ -38,9 +38,19 @@ class StoryResponse(BaseModel):
     created_at: datetime
     published_at: datetime
     expires_at: datetime
-    media: StoryMediaResponse
+    media: StoryMediaResponse | None = None
+    adult_access_required: bool = False
+    adult_access_granted: bool = True
+    compliance_allowed: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None
 
 
 class StoryRailResponse(BaseModel):
     items: list[StoryResponse]
     next_cursor: str | None = None
+    compliance_allowed: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None

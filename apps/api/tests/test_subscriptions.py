@@ -8,6 +8,8 @@ import pytest
 from conftest import trusted_self_attested_accounts as accounts
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from starlette.requests import Request
+from surface_policy_helpers import publish_creator_identity_policy
 
 from app.accounts import service as raw_accounts
 from app.api.routes import subscriptions as subscription_routes
@@ -88,7 +90,11 @@ def signed_payment_event(
 async def test_unattested_subscription_api_fails_safely_without_payment_attempt(db_session):
     _owner, profile = await creator(db_session, "unattested-sub-owner@example.com")
     buyer, _ = await raw_accounts.register(
-        db_session, "unattested-sub-buyer@example.com", "strong-password-123", None
+        db_session,
+        "unattested-sub-buyer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
     )
     await subscriptions.configure_plan(
         db_session,
@@ -102,12 +108,64 @@ async def test_unattested_subscription_api_fails_safely_without_payment_attempt(
         await subscription_routes.start(
             profile.id,
             SubscriptionStart(duration="month_1"),
+            Request({"type": "http", "client": ("127.0.0.1", 50000), "headers": []}),
             (buyer, None),
             db_session,
             "unattested-subscription",
         )
-    assert exc.value.status_code == 400
-    assert "adult self-attestation" in str(exc.value.detail)
+    assert exc.value.status_code == 403
+    assert "Age verification is required" in str(exc.value.detail)
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
+
+
+@pytest.mark.asyncio
+async def test_subscription_trusted_country_conflict_creates_no_subscription_or_attempt(
+    db_session, monkeypatch
+):
+    _owner, profile = await creator(db_session, "sub-country-conflict-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session,
+        "subscription-country-conflict-buyer@example.com",
+        "strong-password-123",
+        None,
+    )
+    buyer.country_code = "PT"
+    await subscriptions.configure_plan(
+        db_session,
+        profile.id,
+        "EUR",
+        True,
+        [{"duration": "month_1", "amount_minor": 1_000, "enabled": True}],
+    )
+    monkeypatch.setattr(
+        "app.compliance.http.get_settings",
+        lambda: Settings(
+            environment="test",
+            trusted_country_header="x-country",
+            trusted_proxy_cidrs="127.0.0.1/32",
+        ),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "client": ("127.0.0.1", 50000),
+            "headers": [(b"x-country", b"GB")],
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await subscription_routes.start(
+            profile.id,
+            SubscriptionStart(duration="month_1"),
+            request,
+            (buyer, None),
+            db_session,
+            "subscription-country-conflict",
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "COUNTRY_SIGNAL_CONFLICT"
+    assert await db_session.scalar(select(Subscription.id)) is None
     assert await db_session.scalar(select(PaymentAttempt.id)) is None
 
 
@@ -1198,6 +1256,7 @@ async def test_due_renewal_suppresses_charge_when_creator_access_is_contained(
     await subscriptions.settle_payment_attempt(db_session, attempt)
     subscription.current_period_end = datetime.now(UTC) - timedelta(seconds=1)
     if containment == "kyc":
+        await publish_creator_identity_policy(db_session)
         db_session.add(
             CreatorVerification(
                 creator_profile_id=profile.id,

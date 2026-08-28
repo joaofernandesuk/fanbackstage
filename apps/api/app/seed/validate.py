@@ -12,6 +12,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.accounts import adult_access
 from app.db.session import SessionLocal
 from app.marketplace import service as marketplace
+from app.models.compliance import (
+    AgeVerificationRecord,
+    AgeVerificationStatus,
+    CompliancePolicyStatus,
+    JurisdictionPolicyRevision,
+    PerformerAgeVerification,
+    PerformerIdentity,
+    PerformerIdentityStatus,
+    PerformerIdentityVerification,
+    VerifiedContentPerformer,
+)
 from app.models.content import (
     AccessPolicy,
     ContentItem,
@@ -27,11 +38,23 @@ from app.models.content import (
     MediaType,
     VideoContent,
 )
-from app.models.creator import CreatorProfile, CreatorStatus
+from app.models.creator import (
+    CreatorProfile,
+    CreatorStatus,
+    CreatorVerification,
+    VerificationStatus,
+)
 from app.models.featuring import FeatureBooking, FeatureBookingStatus
 from app.models.finance import LedgerTransaction, Purchase, PurchaseStatus
 from app.models.groups import Group, GroupContract, GroupContractStatus
 from app.models.identity import User
+from app.models.legal import (
+    LegalAcceptance,
+    LegalDocumentStatus,
+    LegalDocumentType,
+    LegalDocumentVersion,
+    SiteSettingsVersion,
+)
 from app.models.marketplace import (
     MarketplaceListing,
     MarketplaceListingMedia,
@@ -46,6 +69,7 @@ from app.models.social import FeedPost, FeedPostStatus, Follow, PostComment, Pos
 from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
 from app.models.subscription import Subscription, SubscriptionStatus
+from app.models.trust_safety import ConsentRelease, ConsentReleaseStatus
 from app.notifications.service import email_hash
 from app.seed.demo import _assert_development
 from app.seed.manifest import (
@@ -88,6 +112,10 @@ class ValidationReport:
 
 async def _count(db: AsyncSession, model, *criteria) -> int:
     return int(await db.scalar(select(func.count()).select_from(model).where(*criteria)) or 0)
+
+
+def _demo_email(local_part: str) -> str:
+    return f"{local_part}@demo.fanbackstage.local"
 
 
 async def validate_database(db: AsyncSession) -> ValidationReport:
@@ -341,6 +369,58 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
             User.adult_attested_at.is_not(None),
             User.adult_attestation_version == adult_access.current_policy_version(),
         ),
+        "demo_country_policies": await _count(
+            db,
+            JurisdictionPolicyRevision,
+            JurisdictionPolicyRevision.is_demo.is_(True),
+            JurisdictionPolicyRevision.status == CompliancePolicyStatus.active,
+        ),
+        "demo_age_verifications": await _count(
+            db,
+            AgeVerificationRecord,
+            AgeVerificationRecord.provider == "test",
+            AgeVerificationRecord.provider_verification_id.in_(
+                [
+                    "demo-verified-fan-v1",
+                    "demo-expired-fan-v1",
+                    "demo-failed-fan-v1",
+                ]
+            ),
+        ),
+        "demo_published_legal_versions": await _count(
+            db,
+            LegalDocumentVersion,
+            LegalDocumentVersion.is_demo.is_(True),
+            LegalDocumentVersion.status == LegalDocumentStatus.published,
+            LegalDocumentVersion.requires_acceptance.is_(True),
+        ),
+        "demo_draft_legal_versions": await _count(
+            db,
+            LegalDocumentVersion,
+            LegalDocumentVersion.is_demo.is_(True),
+            LegalDocumentVersion.status == LegalDocumentStatus.draft,
+            LegalDocumentVersion.requires_legal_review.is_(True),
+        ),
+        "legal_acceptances": await _count(db, LegalAcceptance),
+        "current_site_settings_versions": await _count(
+            db, SiteSettingsVersion, SiteSettingsVersion.is_current.is_(True)
+        ),
+        "demo_performer_identities": await _count(
+            db, PerformerIdentity, PerformerIdentity.safe_reference == "Demo co-performer A"
+        ),
+        "demo_performer_links": await _count(db, VerifiedContentPerformer),
+        "demo_verified_consent_releases": await _count(
+            db,
+            ConsentRelease,
+            ConsentRelease.participant_reference == "Demo co-performer A",
+            ConsentRelease.status == ConsentReleaseStatus.verified,
+        ),
+        "demo_pending_creator_kyc": await _count(
+            db,
+            CreatorVerification,
+            CreatorVerification.provider_reference == "demo-pending-creator-kyc-reya-v1",
+            CreatorVerification.status == VerificationStatus.pending,
+        ),
     }
     failures: list[str] = []
 
@@ -396,6 +476,16 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     minimum("expired_stories", TARGET_EXPIRED_STORY_COUNT)
     exact("overdue_active_stories", 0)
     exact("story_media_owner_mismatches", 0)
+    exact("demo_country_policies", 3)
+    exact("demo_age_verifications", 3)
+    exact("demo_published_legal_versions", 3)
+    exact("demo_draft_legal_versions", len(LegalDocumentType) - 3)
+    exact("legal_acceptances", TARGET_USER_COUNT * 3)
+    exact("current_site_settings_versions", 1)
+    exact("demo_performer_identities", 1)
+    exact("demo_performer_links", 1)
+    exact("demo_verified_consent_releases", 1)
+    exact("demo_pending_creator_kyc", 1)
 
     for creator in CREATORS:
         profile = by_slug.get(creator.slug)
@@ -409,6 +499,60 @@ async def validate_database(db: AsyncSession) -> ValidationReport:
     restricted = by_slug.get(RESTRICTED_CREATOR.slug)
     if not restricted or restricted.status is not CreatorStatus.suspended or restricted.is_public:
         failures.append("reya-restricted must remain suspended and non-public")
+
+    age_fixtures = {
+        row.provider_verification_id: (row.status, user.email)
+        for row, user in (
+            await db.execute(
+                select(AgeVerificationRecord, User)
+                .join(User, User.id == AgeVerificationRecord.user_id)
+                .where(
+                    AgeVerificationRecord.provider_verification_id.in_(
+                        [
+                            "demo-verified-fan-v1",
+                            "demo-expired-fan-v1",
+                            "demo-failed-fan-v1",
+                        ]
+                    )
+                )
+            )
+        ).all()
+    }
+    expected_age_fixtures = {
+        "demo-verified-fan-v1": (AgeVerificationStatus.verified, _demo_email("subscriber")),
+        "demo-expired-fan-v1": (AgeVerificationStatus.expired, _demo_email("socialfan")),
+        "demo-failed-fan-v1": (AgeVerificationStatus.failed, _demo_email("marketing-out")),
+    }
+    if age_fixtures != expected_age_fixtures:
+        failures.append("demo fan verification status/persona matrix is incorrect")
+    newfan = await db.scalar(select(User).where(User.email == _demo_email("newfan")))
+    if newfan and await _count(
+        db, AgeVerificationRecord, AgeVerificationRecord.user_id == newfan.id
+    ):
+        failures.append("newfan must remain the unverified fan persona")
+    performer = await db.scalar(
+        select(PerformerIdentity).where(PerformerIdentity.safe_reference == "Demo co-performer A")
+    )
+    if performer:
+        current_identity = await db.scalar(
+            select(PerformerIdentityVerification)
+            .where(PerformerIdentityVerification.performer_id == performer.id)
+            .order_by(PerformerIdentityVerification.created_at.desc())
+            .limit(1)
+        )
+        current_age = await db.scalar(
+            select(PerformerAgeVerification)
+            .where(PerformerAgeVerification.performer_id == performer.id)
+            .order_by(PerformerAgeVerification.created_at.desc())
+            .limit(1)
+        )
+        if (
+            current_identity is None
+            or current_identity.status is not PerformerIdentityStatus.verified
+            or current_age is None
+            or current_age.status is not AgeVerificationStatus.verified
+        ):
+            failures.append("demo co-performer identity and age verification must be current")
 
     expected_content_titles = {
         title

@@ -228,9 +228,12 @@
   position: relative;
 }
 
-.postMedia > img {
+.postMedia > img,
+.postMedia > video {
+  height: 100%;
   object-fit: cover;
   transition: transform 320ms ease;
+  width: 100%;
 }
 
 .postCard:hover .postMedia > img {

@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.audit.service import record_event
 from app.core.config import get_settings
+from app.media.contexts import require_media_context_available
 from app.media.service import approved_creator, asset_for_owner
 from app.models.content import (
     AccessPolicy,
@@ -72,6 +73,9 @@ async def add_gallery_item(
     content = await owned_content(db, user, content_id, ContentType.gallery)
     ensure_media_editable(content)
     asset = await asset_for_owner(db, user, asset_id)
+    await require_media_context_available(
+        db, asset.id, context_type="content", context_id=content.id
+    )
     if asset.media_type is not MediaType.image:
         raise ValueError("Galleries require image assets")
     assert content.gallery
@@ -104,6 +108,7 @@ async def create_video(
     creator = await approved_creator(db, user)
     validate_ppv_price(policy, price_amount_minor, price_currency)
     asset = await asset_for_owner(db, user, asset_id)
+    await require_media_context_available(db, asset.id, context_type="content")
     if asset.media_type is not MediaType.video:
         raise ValueError("Videos require video assets")
     validate_video_preview(
@@ -234,11 +239,15 @@ async def restore_from_moderation(
 async def approve(db: AsyncSession, content: ContentItem, actor: User) -> ContentItem:
     if content.status is not ContentStatus.pending_review:
         raise ValueError("Only content pending review can be approved")
-    if content.requires_verified_consent:
-        from app.trust_safety.service import valid_verified_release_for_content
+    from app.trust_safety.service import (
+        has_verified_content_performers,
+        valid_verified_release_for_content,
+    )
 
-        if not await valid_verified_release_for_content(db, content.id):
-            raise ValueError("A valid verified consent release is required before publication")
+    if (
+        content.requires_verified_consent or await has_verified_content_performers(db, content.id)
+    ) and not await valid_verified_release_for_content(db, content.id):
+        raise ValueError("A valid verified consent release is required before publication")
     content.status, content.published_at = ContentStatus.published, datetime.now(UTC)
     content.moderation_status = ModerationStatus.approved
     await record_event(

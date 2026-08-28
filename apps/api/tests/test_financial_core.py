@@ -2,19 +2,26 @@ import asyncio
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import trusted_self_attested_accounts as accounts
+from conftest import trusted_self_attested_accounts as _trusted_self_attested_accounts
+from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError
+from starlette.requests import Request
 
 from app.accounts import adult_access
+from app.api.routes import finance as finance_routes
+from app.compliance.policy import create_jurisdiction_revision, create_template_revision
+from app.compliance.types import PolicyOverrides, PolicyRules
 from app.content.access import can_access_content
 from app.core.config import Settings, get_settings
 from app.creators import service as creators
 from app.db.session import SessionLocal
 from app.finance import service as finance
 from app.models.audit import AuditEvent
+from app.models.compliance import CompliancePolicyStatus, CompliancePolicyTemplateRevision
 from app.models.content import (
     AccessPolicy,
     ContentEntitlement,
@@ -56,6 +63,45 @@ async def approved_creator(db, email: str):
     return user, profile
 
 
+async def publish_test_policy(db, **updates) -> None:
+    revision = await db.scalar(
+        select(CompliancePolicyTemplateRevision)
+        .order_by(CompliancePolicyTemplateRevision.version.desc())
+        .limit(1)
+    )
+    assert revision is not None
+    assert revision.reviewed_by_user_id is not None
+    now = datetime.now(UTC)
+    rules = PolicyRules.model_validate(revision.rules_json).model_copy(update=updates)
+    successor = await create_template_revision(
+        db,
+        template_id=revision.template_id,
+        rules=rules,
+        status=CompliancePolicyStatus.active,
+        effective_from=now - timedelta(seconds=1),
+        effective_until=None,
+        actor_user_id=revision.reviewed_by_user_id,
+        reviewed_at=now,
+        reviewed_by_user_id=revision.reviewed_by_user_id,
+        change_reason="Apply a financial compliance test policy",
+        is_demo=True,
+    )
+    await create_jurisdiction_revision(
+        db,
+        country_code="PT",
+        template_revision_id=successor.id,
+        overrides=PolicyOverrides(),
+        status=CompliancePolicyStatus.active,
+        effective_from=now - timedelta(seconds=1),
+        effective_until=None,
+        actor_user_id=revision.reviewed_by_user_id,
+        reviewed_at=now,
+        reviewed_by_user_id=revision.reviewed_by_user_id,
+        change_reason="Apply a financial compliance test policy",
+        is_demo=True,
+    )
+
+
 def failed_payment_payload(attempt: PaymentAttempt) -> tuple[bytes, str]:
     payload = json.dumps(
         {
@@ -92,7 +138,7 @@ async def test_paid_ppv_is_idempotent_balanced_and_entitles_buyer(db_session):
     await db_session.flush()
     buyer.adult_attested_at = None
     buyer.adult_attestation_version = None
-    with pytest.raises(finance.FinancialError, match="adult self-attestation"):
+    with pytest.raises(finance.FinancialError, match="Age verification"):
         await finance.initiate_purchase(db_session, buyer, content.id, "unattested-request")
     assert await db_session.scalar(select(PaymentAttempt.id)) is None
     adult_access.attest_account(buyer)
@@ -100,6 +146,11 @@ async def test_paid_ppv_is_idempotent_balanced_and_entitles_buyer(db_session):
     assert (
         await finance.initiate_purchase(db_session, buyer, content.id, "same-request")
     ).id == purchase.id
+    await publish_test_policy(db_session, purchases_allowed=False)
+    assert (
+        await finance.initiate_purchase(db_session, buyer, content.id, "same-request")
+    ).id == purchase.id
+    assert await db_session.scalar(select(func.count()).select_from(PaymentAttempt)) == 1
     attempt = await db_session.get(PaymentAttempt, purchase.payment_attempt_id)
     assert attempt
     payload, signature = finance.development_webhook_payload(attempt)
@@ -155,6 +206,64 @@ async def test_paid_ppv_is_idempotent_balanced_and_entitles_buyer(db_session):
         )
         await db_session.flush()
     await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_ppv_trusted_country_conflict_creates_no_purchase_or_payment_attempt(
+    db_session, monkeypatch
+):
+    owner, profile = await approved_creator(
+        db_session, "finance-country-conflict-owner@example.com"
+    )
+    buyer, _ = await accounts.register(
+        db_session,
+        "finance-country-conflict-buyer@example.com",
+        "strong-password-123",
+        None,
+    )
+    buyer.country_code = "PT"
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Country-conflict PPV",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=999,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+    monkeypatch.setattr(
+        "app.compliance.http.get_settings",
+        lambda: Settings(
+            environment="test",
+            trusted_country_header="x-country",
+            trusted_proxy_cidrs="127.0.0.1/32",
+        ),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "client": ("127.0.0.1", 50000),
+            "headers": [(b"x-country", b"GB")],
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await finance_routes.start_purchase(
+            content.id,
+            request,
+            (buyer, None),
+            db_session,
+            "ppv-country-conflict",
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "COUNTRY_SIGNAL_CONFLICT"
+    assert await db_session.scalar(select(Purchase.id)) is None
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
 
 
 @pytest.mark.asyncio
@@ -823,6 +932,45 @@ async def test_ppv_blocked_relationship_cannot_create_payment_attempt(
 
 
 @pytest.mark.asyncio
+async def test_ppv_requires_purchase_umbrella_before_payment_attempt(
+    db_session, reviewed_pt_compliance_policy
+):
+    await publish_test_policy(
+        db_session,
+        ppv_allowed=True,
+        purchases_allowed=False,
+    )
+
+    owner, profile = await approved_creator(db_session, "ppv-purchases-policy-owner@example.com")
+    buyer, _ = await accounts.register(
+        db_session,
+        "ppv-purchases-policy-buyer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    content = ContentItem(
+        owner_creator_id=profile.id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Purchase umbrella PPV",
+        status=ContentStatus.published,
+        moderation_status=ModerationStatus.approved,
+        access_policy=AccessPolicy.ppv,
+        price_amount_minor=999,
+        price_currency="EUR",
+    )
+    db_session.add(content)
+    await db_session.flush()
+
+    with pytest.raises(finance.FinancialError, match="unavailable") as denied:
+        await finance.initiate_purchase(db_session, buyer, content.id, "purchases-policy-denied")
+    assert denied.value.code == "FEATURE_UNAVAILABLE"
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
+    assert await db_session.scalar(select(Purchase.id)) is None
+
+
+@pytest.mark.asyncio
 async def test_full_refund_reverses_value_and_revokes_entitlement(db_session):
     owner, profile = await approved_creator(db_session, "refund-owner@example.com")
     buyer, _ = await accounts.register(
@@ -1156,3 +1304,19 @@ async def test_earnings_release_is_balanced_and_does_not_reuse_a_previous_balanc
     )
     assert attempt.status is PaymentStatus.chargeback
     assert purchase.status is PurchaseStatus.chargeback
+
+
+class _FinancialAccounts:
+    """Legacy finance fixtures model PT users unless a test says otherwise."""
+
+    async def register(self, db, email, password, correlation_id, **kwargs):
+        kwargs.setdefault("country_code", "PT")
+        return await _trusted_self_attested_accounts.register(
+            db, email, password, correlation_id, **kwargs
+        )
+
+    def __getattr__(self, name):
+        return getattr(_trusted_self_attested_accounts, name)
+
+
+accounts = _FinancialAccounts()

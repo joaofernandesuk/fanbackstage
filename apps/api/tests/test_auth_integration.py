@@ -14,7 +14,7 @@ from app.models.notification import NotificationIntent
 
 
 @pytest.fixture
-async def client():
+async def client(reviewed_pt_compliance_policy):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as value:
@@ -28,6 +28,8 @@ async def register(client: httpx.AsyncClient, email: str = "fan@example.com") ->
             "email": email,
             "password": "strong-password-123",
             "adult_confirmed": True,
+            "country_code": "PT",
+            "legal_version_ids": [],
         },
     )
 
@@ -72,6 +74,8 @@ async def test_registration_requires_explicit_adult_self_attestation(client):
             "email": "declined@example.com",
             "password": "strong-password-123",
             "adult_confirmed": False,
+            "country_code": "PT",
+            "legal_version_ids": [],
         },
     )
     assert missing.status_code == declined.status_code == 422
@@ -103,6 +107,29 @@ async def test_login_logout_and_revoked_session_cannot_authenticate(client, db_s
 
 
 @pytest.mark.asyncio
+async def test_configured_session_cookie_name_is_used_for_login_authentication_and_logout(
+    client,
+    db_session,
+    monkeypatch,
+):
+    settings = get_settings().model_copy(update={"session_cookie_name": "custom_fan_session"})
+    monkeypatch.setattr("app.api.deps.get_settings", lambda: settings)
+    monkeypatch.setattr("app.api.routes.auth.get_settings", lambda: settings)
+
+    await register(client, "custom-cookie@example.com")
+    await mark_email_verified(db_session, "custom-cookie@example.com")
+    response = await login(client, "custom-cookie@example.com")
+
+    assert response.status_code == 200
+    assert "custom_fan_session=" in response.headers["set-cookie"]
+    assert (await client.get("/api/v1/me")).status_code == 200
+    logout = await client.post("/api/v1/auth/logout")
+    assert logout.status_code == 200
+    assert "custom_fan_session=" in logout.headers["set-cookie"]
+    assert (await client.get("/api/v1/me")).status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_login_and_account_response_support_seeded_local_demo_email(client, db_session):
     email = "subscriber@demo.fanbackstage.local"
     user, _ = await service.register(
@@ -129,6 +156,8 @@ async def test_login_and_account_response_support_seeded_local_demo_email(client
             "email": "another@demo.fanbackstage.local",
             "password": "strong-password-123",
             "adult_confirmed": True,
+            "country_code": "PT",
+            "legal_version_ids": [],
         },
     )
     assert rejected.status_code == 422

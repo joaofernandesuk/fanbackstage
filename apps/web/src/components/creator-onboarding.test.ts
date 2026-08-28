@@ -22,6 +22,25 @@ const pendingProfile: CreatorOnboardingProfile = {
   is_public: false,
   verification_status: "not_started",
   adult_verified: false,
+  creator_compliance: {
+    jurisdiction: "PT",
+    policy_version: 2,
+    verification_status: null,
+    verification_expires_at: null,
+    identity_required: true,
+    identity_allowed: false,
+    age_required: true,
+    age_allowed: false,
+    public_allowed: false,
+    payout_kyc_required: true,
+    payout_kyc_satisfied: false,
+    payout_allowed: false,
+    code: "CREATOR_IDENTITY_VERIFICATION_REQUIRED",
+    reason: "Current creator identity verification is required",
+    payout_code: "PAYOUT_KYC_REQUIRED",
+  },
+  performer_consent_issue_count: 0,
+  creator_compliance_action_required: true,
   rejection_reason: null,
   languages: [],
   categories: [],
@@ -45,19 +64,31 @@ describe("creator onboarding", () => {
     })).toBe(false);
   });
 
-  it("does not treat an approved profile as currently verified after a failed KYC outcome", () => {
+  it("uses the current policy decision instead of the raw provider outcome", () => {
     expect(creatorHasCurrentVerification({
       ...pendingProfile,
       status: "approved",
       is_public: true,
-      verification_status: "failed",
-      adult_verified: false,
+      verification_status: "verified",
+      adult_verified: true,
     })).toBe(false);
     expect(creatorHasCurrentVerification({
       ...pendingProfile,
       status: "approved",
       verification_status: "verified",
       adult_verified: true,
+      creator_compliance: {
+        ...pendingProfile.creator_compliance,
+        verification_status: "verified",
+        verification_expires_at: "2026-09-26T00:00:00Z",
+        identity_allowed: true,
+        age_allowed: true,
+        public_allowed: true,
+        payout_kyc_satisfied: true,
+        code: "CREATOR_COMPLIANCE_ALLOWED",
+        reason: "Creator identity and age requirements are satisfied",
+        payout_code: "PAYOUT_NOT_CONFIGURED",
+      },
     })).toBe(true);
   });
 

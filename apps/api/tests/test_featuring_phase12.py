@@ -8,9 +8,10 @@ import pytest
 from conftest import trusted_self_attested_accounts as accounts
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from starlette.requests import Request
 
 from app.api.routes import featuring as featuring_routes
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.creators import service as creators
 from app.db.session import SessionLocal
 from app.discovery import service as discovery
@@ -48,7 +49,13 @@ from app.schemas.featuring import BookingInput
 
 
 async def creator(db, email: str):
-    user, _ = await accounts.register(db, email, "strong-password-123", None)
+    user, _ = await accounts.register(
+        db,
+        email,
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
     profile = await creators.get_or_create_profile(db, user)
     await creators.update_profile(
         db,
@@ -101,12 +108,65 @@ async def test_unattested_featuring_api_fails_safely_without_booking_or_attempt(
                 starts_at=datetime.now(UTC) + timedelta(hours=2),
                 duration_seconds=3600,
             ),
+            Request({"type": "http", "client": ("127.0.0.1", 50000), "headers": []}),
             (owner, None),
             db_session,
             "feature-unattested",
         )
-    assert exc.value.status_code == 400
-    assert "adult self-attestation" in str(exc.value.detail)
+    assert exc.value.status_code == 403
+    assert "Age verification is required" in str(exc.value.detail)
+    assert await db_session.scalar(select(FeatureBooking.id)) is None
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
+
+
+@pytest.mark.asyncio
+async def test_featuring_trusted_country_conflict_creates_no_booking_or_attempt(
+    db_session, monkeypatch
+):
+    admin, _ = await accounts.register(
+        db_session,
+        "feature-country-conflict-admin@example.com",
+        "strong-password-123",
+        None,
+    )
+    owner, profile = await creator(db_session, "feature-country-conflict-owner@example.com")
+    owner.country_code = "PT"
+    surface = await service.create_surface(db_session, admin, "discover_creators")
+    slot = await service.create_slot(db_session, admin, surface.id, "country-conflict-slot", 0)
+    await service.create_price(db_session, admin, slot.id, "creator", 3600, 900, "EUR")
+    monkeypatch.setattr(
+        "app.compliance.http.get_settings",
+        lambda: Settings(
+            environment="test",
+            trusted_country_header="x-country",
+            trusted_proxy_cidrs="127.0.0.1/32",
+        ),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "client": ("127.0.0.1", 50000),
+            "headers": [(b"x-country", b"GB")],
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await featuring_routes.create_booking(
+            BookingInput(
+                slot_id=slot.id,
+                target_type="creator",
+                target_id=profile.id,
+                starts_at=datetime.now(UTC) + timedelta(hours=2),
+                duration_seconds=3600,
+            ),
+            request,
+            (owner, None),
+            db_session,
+            "feature-country-conflict",
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "COUNTRY_SIGNAL_CONFLICT"
     assert await db_session.scalar(select(FeatureBooking.id)) is None
     assert await db_session.scalar(select(PaymentAttempt.id)) is None
 

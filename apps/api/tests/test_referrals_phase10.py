@@ -2,11 +2,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import trusted_self_attested_accounts as accounts
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
+from app.api.routes import admin as admin_routes
 from app.content.access import can_access_content
 from app.creators import service as creators
 from app.finance import service as finance
+from app.models.audit import AuditEvent
 from app.models.content import (
     AccessPolicy,
     ContentItem,
@@ -23,6 +26,7 @@ from app.models.finance import (
     LedgerTransaction,
     LedgerTransactionType,
 )
+from app.models.identity import Role, User
 from app.models.referral import (
     ReferralActorType,
     ReferralCommissionAllocation,
@@ -33,6 +37,7 @@ from app.models.referral import (
     SignupAttribution,
 )
 from app.referrals import service as referrals
+from app.schemas.referral import ReferralLinkInput, ReferralPolicyInput, ReferralProgramInput
 
 
 async def approved_creator(db, email: str):
@@ -47,6 +52,98 @@ async def approved_creator(db, email: str):
     profile.is_public = True
     await db.flush()
     return user, profile
+
+
+def test_referral_admin_changes_require_meaningful_reason_and_confirmation():
+    common = {
+        "actor_type": "platform_campaign",
+        "program_type": "user_user_referral",
+    }
+    with pytest.raises(ValidationError):
+        ReferralProgramInput(**common, reason="reviewed", confirmed=False)
+    with pytest.raises(ValidationError):
+        ReferralProgramInput(**common, reason="        ", confirmed=True)
+
+
+@pytest.mark.asyncio
+async def test_super_admin_referral_configuration_is_confirmed_reasoned_and_audited(db_session):
+    super_admin = User(
+        email="referral-audit-super-admin@example.test",
+        password_hash="not-authenticatable",
+        country_code="PT",
+        roles=[Role(name="super_admin", description="Referral audit test role")],
+    )
+    beneficiary = User(
+        email="referral-audit-beneficiary@example.test",
+        password_hash="not-authenticatable",
+        country_code="PT",
+    )
+    db_session.add_all([super_admin, beneficiary])
+    await db_session.flush()
+    identity = (super_admin, None)
+
+    program_response = await admin_routes.create_referral_program(
+        ReferralProgramInput(
+            actor_type="user",
+            program_type="user_user_referral",
+            owner_user_id=beneficiary.id,
+            reason="Approve a bounded fan referral programme",
+            confirmed=True,
+        ),
+        identity,
+        db_session,
+    )
+    program_id = program_response["id"]
+    policy_response = await admin_routes.create_referral_policy(
+        program_id,
+        ReferralPolicyInput(
+            basis_points=750,
+            eligible_revenue_types=["ppv", "subscription"],
+            attribution_window_days=30,
+            subscription_reward_window_days=90,
+            reason="Approve the initial commission policy",
+            confirmed=True,
+        ),
+        identity,
+        db_session,
+    )
+    await admin_routes.create_referral_link(
+        program_id,
+        ReferralLinkInput(
+            policy_id=policy_response["id"],
+            code="AUDIT-REFERRAL",
+            destination_path="/discover",
+            source="admin-test",
+            reason="Activate the reviewed referral link",
+            confirmed=True,
+        ),
+        identity,
+        db_session,
+    )
+
+    events = {
+        event.event_type: event
+        for event in (
+            await db_session.scalars(
+                select(AuditEvent).where(AuditEvent.actor_user_id == super_admin.id)
+            )
+        ).all()
+    }
+    assert set(events) == {
+        "referral.program_created",
+        "referral.policy_created",
+        "referral.link_created",
+    }
+    for event in events.values():
+        assert event.actor_user_id == super_admin.id
+        assert event.metadata_json["confirmed"] is True
+        assert event.metadata_json["reason"]
+        assert event.metadata_json["scope"]["program_id"] == str(program_id)
+        assert event.metadata_json["before"] == "none"
+        assert event.metadata_json["after"]
+    assert events["referral.program_created"].metadata_json["after"]["status"] == "active"
+    assert events["referral.policy_created"].metadata_json["after"]["basis_points"] == 750
+    assert events["referral.link_created"].metadata_json["after"]["code"] == "AUDIT-REFERRAL"
 
 
 @pytest.mark.asyncio

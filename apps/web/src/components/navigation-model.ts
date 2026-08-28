@@ -62,6 +62,7 @@ export function accountNavigation(identity: NavigationIdentity): NavigationItem[
     { label: "Subscriptions", href: "/subscriptions", group: "account" },
     { label: "Notifications", href: "/notifications", group: "account" },
     { label: "Settings", href: "/notification-settings", group: "account" },
+    { label: "Legal history", href: "/account/legal", group: "account" },
   ];
 
   if (hasAnyRole(identity, ["creator"])) {
@@ -95,6 +96,9 @@ export function accountNavigation(identity: NavigationIdentity): NavigationItem[
       { label: "Discovery Controls", href: "/admin/discovery", group: "operations" },
       { label: "Featuring Admin", href: "/admin/featuring", group: "operations" },
       { label: "Referral Admin", href: "/admin/referrals", group: "operations" },
+      { label: "Compliance", href: "/admin/compliance", group: "operations" },
+      { label: "Legal & Policies", href: "/admin/legal", group: "operations" },
+      { label: "Site Settings", href: "/admin/site-settings", group: "operations" },
     );
   }
 

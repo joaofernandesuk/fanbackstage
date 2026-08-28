@@ -1,16 +1,17 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
-from app.creators.service import (
-    current_adult_verification_predicate,
-    require_public_creator_access,
-)
+from app.compliance.http import resolve_request_compliance_decision
+from app.compliance.types import JurisdictionSignals
+from app.creators.service import require_public_creator_access
 from app.groups.service import has_delegated_permission
 from app.marketplace import service
+from app.media.projection import safe_public_profile_media_reference
 from app.media.service import approved_creator
+from app.models.compliance import ComplianceFeature
 from app.models.content import ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import GroupPermission
@@ -38,6 +39,38 @@ from app.schemas.marketplace import (
 from app.schemas.social import ReportInput
 
 router = APIRouter(prefix="/marketplace", tags=["marketplace"])
+
+
+async def require_marketplace_authoring(db: Db, request: Request, user) -> None:
+    for feature in (ComplianceFeature.platform_access, ComplianceFeature.marketplace):
+        decision = await resolve_request_compliance_decision(
+            db,
+            request,
+            user=user,
+            feature=feature,
+            adult_restricted=False,
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                403,
+                {
+                    "message": decision.reason,
+                    "code": decision.code,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                },
+            )
+
+
+def marketplace_error_detail(exc: service.MarketplaceError) -> str | dict[str, object]:
+    if not exc.compliance_decision:
+        return str(exc)
+    return {
+        "message": str(exc),
+        "code": exc.code,
+        "action": exc.action,
+        "reason": exc.compliance_decision.reason,
+    }
 
 
 def listing_response(listing: MarketplaceListing) -> MarketplaceListingResponse:
@@ -69,7 +102,7 @@ async def public_listing_response(
             creator_id=creator.id,
             username=creator.username,
             display_name=creator.display_name or creator.username,
-            avatar_reference=creator.avatar_reference,
+            avatar_reference=safe_public_profile_media_reference(creator.avatar_reference),
             verified=True,
         )
     result.media = [
@@ -133,16 +166,25 @@ async def _create(
 
 @router.post("/listings", response_model=MarketplaceListingResponse)
 async def create_listing(
-    payload: MarketplaceListingCreate, identity: CurrentIdentity, db: Db
+    payload: MarketplaceListingCreate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> MarketplaceListingResponse:
+    await require_marketplace_authoring(db, request, identity[0])
     creator = await approved_creator(db, identity[0])
     return await _create(payload, identity, db, creator.id)
 
 
 @router.post("/managed/{creator_id}/listings", response_model=MarketplaceListingResponse)
 async def create_managed_listing(
-    creator_id: UUID, payload: MarketplaceListingCreate, identity: CurrentIdentity, db: Db
+    creator_id: UUID,
+    payload: MarketplaceListingCreate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> MarketplaceListingResponse:
+    await require_marketplace_authoring(db, request, identity[0])
     if not await has_delegated_permission(
         db, identity[0].id, creator_id, GroupPermission.manage_marketplace
     ):
@@ -165,8 +207,9 @@ async def my_listings(identity: CurrentIdentity, db: Db) -> list[MarketplaceList
 
 @router.post("/listings/{listing_id}/submit", response_model=MarketplaceListingResponse)
 async def submit_listing(
-    listing_id: UUID, identity: CurrentIdentity, db: Db
+    listing_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> MarketplaceListingResponse:
+    await require_marketplace_authoring(db, request, identity[0])
     creator = await approved_creator(db, identity[0])
     try:
         listing = await service.submit_listing_for_review(db, identity[0], listing_id, creator.id)
@@ -179,8 +222,28 @@ async def submit_listing(
 
 @router.get("/listings", response_model=list[MarketplaceListingResponse])
 async def public_listings(
-    db: Db, identity: OptionalIdentity, creator_id: UUID | None = None
+    request: Request,
+    db: Db,
+    identity: OptionalIdentity,
+    creator_id: UUID | None = None,
 ) -> list[MarketplaceListingResponse]:
+    decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=identity[0] if identity else None,
+        feature=ComplianceFeature.marketplace,
+        adult_restricted=False,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": decision.reason,
+                "code": decision.code,
+                "action": decision.action,
+                "reason": decision.reason,
+            },
+        )
     query = (
         select(MarketplaceListing)
         .join(CreatorProfile, CreatorProfile.id == MarketplaceListing.owner_creator_id)
@@ -189,7 +252,6 @@ async def public_listings(
             MarketplaceListing.moderation_status == ModerationStatus.approved,
             CreatorProfile.status == CreatorStatus.approved,
             CreatorProfile.is_public.is_(True),
-            current_adult_verification_predicate(CreatorProfile.id),
         )
     )
     if creator_id:
@@ -208,8 +270,25 @@ async def public_listings(
 
 @router.get("/listings/{public_id}", response_model=MarketplaceListingResponse)
 async def public_listing(
-    public_id: str, db: Db, identity: OptionalIdentity
+    public_id: str, request: Request, db: Db, identity: OptionalIdentity
 ) -> MarketplaceListingResponse:
+    decision = await resolve_request_compliance_decision(
+        db,
+        request,
+        user=identity[0] if identity else None,
+        feature=ComplianceFeature.marketplace,
+        adult_restricted=False,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": decision.reason,
+                "code": decision.code,
+                "action": decision.action,
+                "reason": decision.reason,
+            },
+        )
     listing = await db.scalar(
         select(MarketplaceListing)
         .join(CreatorProfile, CreatorProfile.id == MarketplaceListing.owner_creator_id)
@@ -219,7 +298,6 @@ async def public_listing(
             MarketplaceListing.moderation_status == ModerationStatus.approved,
             CreatorProfile.status == CreatorStatus.approved,
             CreatorProfile.is_public.is_(True),
-            current_adult_verification_predicate(CreatorProfile.id),
         )
     )
     if not listing:
@@ -533,6 +611,7 @@ async def order_detail(
 async def checkout(
     public_id: str,
     payload: MarketplaceCheckoutInput,
+    request: Request,
     identity: CurrentIdentity,
     db: Db,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -543,6 +622,17 @@ async def checkout(
     if not listing:
         raise HTTPException(status_code=404, detail="Marketplace listing not found")
     try:
+        decisions = {
+            feature: await resolve_request_compliance_decision(
+                db,
+                request,
+                user=identity[0],
+                feature=feature,
+                adult_restricted=False,
+                signals=JurisdictionSignals(billing_country=payload.destination_country_code),
+            )
+            for feature in (ComplianceFeature.marketplace, ComplianceFeature.purchases)
+        }
         order = await service.initiate_order(
             db,
             identity[0],
@@ -552,6 +642,7 @@ async def checkout(
             idempotency_key or "",
             payload.destination_region_code,
             payload.shipping_address.model_dump(),
+            decisions,
         )
         await db.commit()
         return order_response(order)
@@ -568,7 +659,10 @@ async def checkout(
         ) from exc
     except service.MarketplaceError as exc:
         await db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=403 if exc.compliance_decision else 400,
+            detail=marketplace_error_detail(exc),
+        ) from exc
 
 
 @router.get(

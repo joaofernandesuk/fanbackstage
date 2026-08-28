@@ -59,6 +59,12 @@ class LiveRoomResponse(BaseModel):
     viewer_count: int
     started_at: datetime | None
     ended_at: datetime | None
+    adult_access_required: bool = True
+    adult_access_granted: bool = False
+    compliance_allowed: bool = False
+    compliance_code: str = "AGE_VERIFICATION_REQUIRED"
+    compliance_action: str | None = "VERIFY_AGE"
+    compliance_reason: str | None = None
 
 
 class PrivateRequestResponse(BaseModel):

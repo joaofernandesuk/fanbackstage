@@ -1,0 +1,14 @@
+.card { margin: 22px 0; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); }
+.grid article { background: rgb(255 255 255 / 0.025); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 16px; }
+.grid h3 { font-size: 0.95rem; margin: 0; }
+.row { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+.badge { background: rgb(14 165 255 / 0.12); border: 1px solid rgb(14 165 255 / 0.28); border-radius: 999px; color: #a5e3ff; font-size: 0.62rem; font-weight: 850; padding: 5px 8px; white-space: nowrap; }
+.badge[data-status="verified"] { background: rgb(34 197 94 / 0.12); border-color: rgb(34 197 94 / 0.28); color: #86efac; }
+.badge[data-status="failed"], .badge[data-status="expired"], .badge[data-status="revoked"], .badge[data-status="action_required"] { background: rgb(244 63 94 / 0.11); border-color: rgb(244 63 94 / 0.3); color: #fda4af; }
+.grid dl { display: grid; gap: 8px; margin: 14px 0 0; }
+.grid dl > div { align-items: baseline; display: flex; gap: 12px; justify-content: space-between; }
+.grid dt, .grid dd, .grid p, .note, .error { color: var(--text-secondary); font-size: 0.7rem; line-height: 1.5; }
+.grid dd { margin: 0; text-align: right; }
+.note { margin-bottom: 0; }
+.error { border: 1px solid rgb(244 63 94 / 0.3); border-radius: 12px; padding: 12px; }

@@ -60,7 +60,7 @@ done
 # host-gateway address. Binding only loopback makes the API readiness probe pass
 # while silently dropping those provider callbacks in Linux CI. Start the API
 # only after both workers reply so its readiness URL gates the complete stack.
-sh -c "exec ${runner}uvicorn app.main:app --host 0.0.0.0 --port $api_port" &
+sh -c "exec ${runner}uvicorn app.main:app --host 0.0.0.0 --port $api_port --no-access-log --no-proxy-headers" &
 api_pid=$!
 attempt=0
 until response=$(curl -fsS "$api_url/health" 2>/dev/null) && printf '%s' "$response" | grep -q '"service":"fanbackstage-api"'; do

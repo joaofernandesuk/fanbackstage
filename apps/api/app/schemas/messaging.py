@@ -30,6 +30,12 @@ class AttachmentAccessResponse(BaseModel):
     currency: str | None
     preview_delivery_path: str | None
     full_delivery_path: str | None
+    adult_access_required: bool = False
+    adult_access_granted: bool = True
+    compliance_allowed: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None
 
 
 class MessageResponse(BaseModel):

@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import select
 
 from app.accounts import service as accounts
@@ -49,8 +49,10 @@ async def test_central_report_preserves_context_aggregates_case_and_retains_dupl
     reporter, _ = await accounts.register(
         db_session, "ts-reporter@example.com", "strong-password-123", None
     )
+    profile = await creators.get_or_create_profile(db_session, owner)
+    profile.status, profile.is_public = CreatorStatus.approved, True
     post = FeedPost(
-        creator_id=(await creators.get_or_create_profile(db_session, owner)).id,
+        creator_id=profile.id,
         created_by_user_id=owner.id,
         post_type=FeedPostType.text,
         body="original context that may later change",
@@ -107,10 +109,13 @@ async def test_underage_report_is_critical_and_unknown_targets_fail_closed(db_se
     assert report.case_id == case.id
     assert case.severity is ModerationSeverity.critical
     assert case.priority == 100
+    assert case.status is service.ModerationCaseStatus.action_required
 
 
 @pytest.mark.asyncio
-async def test_containment_is_replay_safe_and_restoration_preserves_action_history(db_session):
+async def test_user_report_requires_permissioned_containment_and_preserves_action_history(
+    db_session,
+):
     owner, _ = await accounts.register(
         db_session, "ts-content-owner@example.com", "strong-password-123", None
     )
@@ -139,7 +144,22 @@ async def test_containment_is_replay_safe_and_restoration_preserves_action_histo
         reason=ReportReason.underage_concern,
         details="credible",
     )
-    assert content.status is ContentStatus.removed
+    _, same_case, duplicate = await service.open_or_attach_report(
+        db_session,
+        reporter,
+        target_type=ReportTargetType.media,
+        target_id=content.id,
+        reason=ReportReason.underage_concern,
+        details="repeated signal",
+    )
+    assert same_case.id == case.id and duplicate is True
+    assert case.status is service.ModerationCaseStatus.action_required
+    assert content.status is ContentStatus.published
+    assert not list(
+        await db_session.scalars(
+            select(service.ModerationAction).where(service.ModerationAction.case_id == case.id)
+        )
+    )
     action = await service.enforce_content_containment(
         db_session, case, moderator, content.id, "urgent containment"
     )
@@ -152,6 +172,77 @@ async def test_containment_is_replay_safe_and_restoration_preserves_action_histo
     )
     assert action.reversal_action_id == reversal.id and action.reversed_at
     assert content.status is ContentStatus.pending_review
+
+
+@pytest.mark.asyncio
+async def test_reporter_cannot_probe_unavailable_content(db_session):
+    owner, _ = await accounts.register(
+        db_session, "ts-private-owner@example.com", "strong-password-123", None
+    )
+    reporter, _ = await accounts.register(
+        db_session, "ts-private-reporter@example.com", "strong-password-123", None
+    )
+    content = ContentItem(
+        owner_creator_id=(await creators.get_or_create_profile(db_session, owner)).id,
+        created_by_user_id=owner.id,
+        content_type=ContentType.gallery,
+        title="Unavailable report target",
+        status=ContentStatus.draft,
+        moderation_status=ModerationStatus.not_reviewed,
+    )
+    db_session.add(content)
+    await db_session.flush()
+
+    with pytest.raises(service.TrustSafetyError, match="Report target not found"):
+        await service.open_or_attach_report(
+            db_session,
+            reporter,
+            target_type=ReportTargetType.media,
+            target_id=content.id,
+            reason=ReportReason.underage_concern,
+            details="Cannot access this object",
+        )
+    assert not list(await db_session.scalars(select(TrustSafetyReport)))
+
+
+@pytest.mark.asyncio
+async def test_report_route_applies_write_rate_limit_before_mutation(db_session, monkeypatch):
+    reporter, _ = await accounts.register(
+        db_session, "ts-rate-limited@example.com", "strong-password-123", None
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def reject_report(_request, subject: str, action: str) -> None:
+        calls.append((subject, action))
+        raise HTTPException(429, "Too many social actions. Please try again later.")
+
+    monkeypatch.setattr(trust_safety_routes, "enforce_social_rate_limit", reject_report)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/trust-safety/reports",
+            "headers": [],
+            "client": ("127.0.0.1", 50000),
+        }
+    )
+    payload = trust_safety_routes.TrustSafetyReportInput(
+        target_type="media",
+        target_id=uuid4(),
+        reason="underage_concern",
+        details="Signal",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await trust_safety_routes.create_report(
+            payload,
+            request,
+            (reporter, None),
+            db_session,
+        )
+    assert exc_info.value.status_code == 429
+    assert calls == [(str(reporter.id), "trust_safety_report")]
+    assert not list(await db_session.scalars(select(TrustSafetyReport)))
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ import {
   discoverySearchPath,
   groupDiscovery,
 } from "../lib/public-api";
+import { AdultAccessGate } from "./adult-access-gate";
 import { ContentCard, CreatorCard, MarketplaceCard, MarketplaceDiscoveryCard } from "./consumer-cards";
 import { EmptyState, SectionHeader, Skeleton } from "./consumer-ui";
 import { StoryRailSource } from "./story-experience";
@@ -133,6 +134,14 @@ export function Discovery({ initialQuery = "" }: { initialQuery?: string }) {
 
       {loading ? (
         <div className={styles.loadingGrid}>{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} />)}</div>
+      ) : page?.compliance_allowed === false ? (
+        <AdultAccessGate
+          access={page}
+          adultRestricted={false}
+          feature="platform_access"
+          onGranted={() => load()}
+          title="discovery"
+        />
       ) : page && page.items.length ? (
         <>
           {filter === "all" && (

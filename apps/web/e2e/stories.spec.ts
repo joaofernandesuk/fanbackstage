@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
-import { expectAuthenticatedAs } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -22,7 +22,13 @@ type Story = {
   id: string;
   status: string;
   expires_at: string;
-  media: { delivery_path: string };
+  caption: string | null;
+  alt_text: string | null;
+  media: { delivery_path: string } | null;
+  compliance_allowed: boolean;
+  compliance_code: string;
+  compliance_action: string | null;
+  compliance_reason: string | null;
 };
 
 async function api<T>(
@@ -56,6 +62,7 @@ async function login(page: Page, email: string, password: string) {
 
 async function register(page: Page, email: string, password: string) {
   await page.goto("/register");
+  await completeRegistrationCompliance(page);
   await page.getByLabel("Email").fill(email);
   await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await page.getByRole("checkbox", { name: /I confirm I am at least 18/ }).check();
@@ -63,6 +70,37 @@ async function register(page: Page, email: string, password: string) {
   await page.goto(await securityLink(email, "/verify-email"));
   await page.getByRole("button", { name: "Verify email" }).click();
   await login(page, email, password);
+}
+
+async function uploadStoryAsset(page: Page, filename: string): Promise<string> {
+  const upload = await api<{
+    id: string;
+    status: string;
+    upload_url: string | null;
+  }>(page, "/media/uploads", "POST", {
+    filename,
+    mime_type: "image/png",
+  });
+  expect(upload.status, JSON.stringify(upload.body)).toBe(200);
+  expect(upload.body.upload_url).toBeTruthy();
+  const stored = await fetch(upload.body.upload_url!, {
+    method: "PUT",
+    headers: { "Content-Type": "image/png" },
+    body: image,
+  });
+  expect(stored.status).toBe(200);
+  const finalized = await api<{ status: string }>(
+    page,
+    `/media/${upload.body.id}/finalize`,
+    "POST",
+  );
+  expect(finalized.status, JSON.stringify(finalized.body)).toBe(200);
+  expect(finalized.body.status).toBe("queued");
+  await expect.poll(async () => {
+    const assets = await api<{ id: string; status: string }[]>(page, "/media/mine");
+    return assets.body.find((asset) => asset.id === upload.body.id)?.status;
+  }, { timeout: 30_000 }).toBe("ready");
+  return upload.body.id;
 }
 
 function expireStory(storyId: string) {
@@ -116,40 +154,16 @@ test("active Stories render from safe derivatives and expired Stories stay absen
     timeout: 15_000,
   }).toMatchObject({ status: "approved", is_public: true });
 
-  const upload = await api<{
-    id: string;
-    status: string;
-    upload_url: string | null;
-  }>(page, "/media/uploads", "POST", {
-    filename: "story.png",
-    mime_type: "image/png",
-  });
-  expect(upload.status, JSON.stringify(upload.body)).toBe(200);
-  expect(upload.body.upload_url).toBeTruthy();
-  const stored = await fetch(upload.body.upload_url!, {
-    method: "PUT",
-    headers: { "Content-Type": "image/png" },
-    body: image,
-  });
-  expect(stored.status).toBe(200);
-  const finalized = await api<{ status: string }>(
-    page,
-    `/media/${upload.body.id}/finalize`,
-    "POST",
-  );
-  expect(finalized.status, JSON.stringify(finalized.body)).toBe(200);
-  expect(finalized.body.status).toBe("queued");
-  await expect.poll(async () => {
-    const assets = await api<{ id: string; status: string }[]>(page, "/media/mine");
-    return assets.body.find((asset) => asset.id === upload.body.id)?.status;
-  }, { timeout: 30_000 }).toBe("ready");
+  const expiredAssetId = await uploadStoryAsset(page, `story-expired-${stamp}.png`);
+  const firstAssetId = await uploadStoryAsset(page, `story-first-${stamp}.png`);
+  const secondAssetId = await uploadStoryAsset(page, `story-second-${stamp}.png`);
 
   const expired = await api<Story>(
     page,
     "/stories",
     "POST",
     {
-      media_asset_id: upload.body.id,
+      media_asset_id: expiredAssetId,
       caption: "This Story must expire",
       alt_text: "Expired Story image",
       access_policy: "free",
@@ -163,7 +177,7 @@ test("active Stories render from safe derivatives and expired Stories stay absen
     "/stories",
     "POST",
     {
-      media_asset_id: upload.body.id,
+      media_asset_id: firstAssetId,
       caption: "First active Story",
       alt_text: "First active Story image",
       access_policy: "free",
@@ -177,7 +191,7 @@ test("active Stories render from safe derivatives and expired Stories stay absen
     "/stories",
     "POST",
     {
-      media_asset_id: upload.body.id,
+      media_asset_id: secondAssetId,
       caption: "Second active Story",
       alt_text: "Second active Story image",
       access_policy: "free",
@@ -194,16 +208,39 @@ test("active Stories render from safe derivatives and expired Stories stay absen
 
   const viewerContext = await browser.newContext();
   const viewer = await viewerContext.newPage();
-  const adultAccessResponse = await viewer.request.post(
-    `${apiBase}/api/v1/auth/adult-access`,
-    { data: { adult_confirmed: true } },
+  const deniedRailResponse = await viewer.request.get(
+    `${apiBase}/api/v1/stories/rail?creator_username=${encodeURIComponent(username)}`,
   );
-  expect(adultAccessResponse.status()).toBe(200);
-  expect(await adultAccessResponse.json()).toMatchObject({
-    allowed: true,
-    assurance: "self_attested",
-    source: "cookie",
+  expect(deniedRailResponse.status()).toBe(200);
+  const deniedRail = await deniedRailResponse.json() as {
+    items: Story[];
+    compliance_allowed: boolean;
+    compliance_code: string;
+    compliance_action: string | null;
+  };
+  expect(deniedRail).toMatchObject({
+    items: [],
+    compliance_allowed: false,
+    compliance_code: "AGE_VERIFICATION_REQUIRED",
+    compliance_action: "VERIFY_AGE",
   });
+  expect(JSON.stringify(deniedRail)).not.toContain("derivative_id");
+  expect(JSON.stringify(deniedRail)).not.toContain("original/");
+  expect(JSON.stringify(deniedRail)).not.toContain("Second active Story");
+  const deniedMedia = await viewer.request.get(
+    `${apiBase}/api/v1/stories/${second.body.id}/media`,
+    { maxRedirects: 0 },
+  );
+  expect(deniedMedia.status()).toBe(404);
+
+  await viewer.goto("/stories");
+  await expect(
+    viewer.getByRole("heading", { name: "Verify your age to view Stories" }),
+  ).toBeVisible();
+  await viewer.getByRole("button", { name: "Verify age" }).click();
+  await expect(viewer).toHaveURL(/\/stories$/);
+  await expect(viewer.getByRole("list", { name: "Creator stories" })).toBeVisible();
+
   const railResponse = await viewer.request.get(
     `${apiBase}/api/v1/stories/rail?creator_username=${encodeURIComponent(username)}`,
   );
@@ -211,7 +248,10 @@ test("active Stories render from safe derivatives and expired Stories stay absen
   const rail = await railResponse.json() as { items: Story[] };
   expect(rail.items.map((story) => story.id)).toEqual([second.body.id, first.body.id]);
   expect(JSON.stringify(rail)).not.toContain("original/");
-  expect(rail.items.every((story) => story.media.delivery_path === `/stories/${story.id}/media`)).toBe(true);
+  expect(rail.items.every((story) =>
+    story.compliance_allowed
+    && story.media?.delivery_path === `/stories/${story.id}/media`
+  )).toBe(true);
   const mediaRedirect = await viewer.request.get(
     `${apiBase}/api/v1/stories/${second.body.id}/media`,
     { maxRedirects: 0 },
@@ -225,8 +265,6 @@ test("active Stories render from safe derivatives and expired Stories stay absen
   );
   expect(expiredDetail.status()).toBe(404);
 
-  await viewer.goto("/stories");
-  await expect(viewer.getByRole("list", { name: "Creator stories" })).toBeVisible();
   const opener = viewer.getByRole("button", {
     name: `Open ${displayName}'s 2 stories`,
   });

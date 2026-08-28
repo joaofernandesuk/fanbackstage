@@ -1,4 +1,5 @@
 import { api } from "./api";
+import type { ComplianceAccess } from "./compliance-api";
 
 export type DiscoveryEntityType =
   | "creator"
@@ -8,7 +9,7 @@ export type DiscoveryEntityType =
   | "marketplace_listing"
   | "live_room";
 
-export type DiscoveryResult = {
+export type DiscoveryResult = Partial<ComplianceAccess> & {
   entity_type: DiscoveryEntityType;
   id: string;
   title: string;
@@ -35,13 +36,13 @@ export type DiscoveryResult = {
   sponsored_surface?: string | null;
 };
 
-export type DiscoveryPage = {
+export type DiscoveryPage = Partial<ComplianceAccess> & {
   items: DiscoveryResult[];
   next_cursor: string | null;
   ranking_version: number;
 };
 
-export type PublicCreator = {
+export type PublicCreator = ComplianceAccess & {
   id: string;
   username: string;
   display_name: string;

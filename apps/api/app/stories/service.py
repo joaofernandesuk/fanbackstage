@@ -4,12 +4,13 @@ from uuid import UUID
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.accounts.adult_access import AdultAccessDecision, resolve_adult_access
 from app.audit.service import record_event
+from app.compliance.types import ComplianceDecision
 from app.creators.service import (
-    current_adult_verification_predicate,
-    require_current_adult_verification,
+    resolve_creator_compliance_eligibilities,
+    resolve_creator_compliance_eligibility,
 )
+from app.media.contexts import has_single_media_context, require_media_context_available
 from app.media.service import approved_creator
 from app.models.content import (
     AccessPolicy,
@@ -19,7 +20,6 @@ from app.models.content import (
     Gallery,
     GalleryItem,
     MediaAsset,
-    MediaAudience,
     MediaDerivative,
     MediaStatus,
     MediaType,
@@ -120,10 +120,9 @@ async def create_story(
     )
     if not creator:
         raise PermissionError("An approved creator profile is required")
-    try:
-        await require_current_adult_verification(db, creator.id)
-    except ValueError as exc:
-        raise PermissionError("A current verified adult creator profile is required") from exc
+    eligibility = await resolve_creator_compliance_eligibility(db, profile=creator)
+    if not eligibility.public_allowed:
+        raise PermissionError(eligibility.reason)
     normalized_key = idempotency_key.strip()
     if not 8 <= len(normalized_key) <= 128:
         raise ValueError("A valid Idempotency-Key is required")
@@ -160,6 +159,7 @@ async def create_story(
         raise ValueError(
             "Story media must not be shared with content, posts, messages, or marketplace listings"
         )
+    await require_media_context_available(db, asset.id, context_type="story")
     published_at = now or datetime.now(UTC)
     if published_at.tzinfo is None:
         raise ValueError("Story publication time must include a timezone")
@@ -275,9 +275,8 @@ async def expire_due_stories(db: AsyncSession, *, now: datetime | None = None) -
 def _active_public_query(
     user: User | None,
     current_time: datetime,
-    access_decision: AdultAccessDecision | None = None,
+    access_decision: ComplianceDecision | None = None,
 ):
-    decision = access_decision or resolve_adult_access(user, None, now=current_time)
     ready_derivative = exists(
         select(MediaDerivative.id).where(
             MediaDerivative.media_asset_id == Story.media_asset_id,
@@ -321,10 +320,10 @@ def _active_public_query(
                 )
             ),
         )
-        if {role.name for role in user.roles} & {"admin", "moderator", "super_admin"}:
-            access = True
-        else:
-            access = or_(access, owner_access, follower_access, subscription_access)
+        # Ownership, follows and subscriptions are entitlement sources. Staff
+        # roles are not viewer entitlements; sensitive review uses the audited
+        # Trust & Safety evidence path instead of consumer Story delivery.
+        access = or_(access, owner_access, follower_access, subscription_access)
         blocked = exists(
             select(UserBlock.id).where(
                 or_(
@@ -351,14 +350,12 @@ def _active_public_query(
             CreatorProfile.status == CreatorStatus.approved,
             CreatorProfile.is_public.is_(True),
             CreatorProfile.username.is_not(None),
-            current_adult_verification_predicate(Story.creator_id),
             MediaAsset.owner_creator_id == Story.creator_id,
             MediaAsset.status == MediaStatus.ready,
             MediaAsset.deleted_at.is_(None),
             MediaAsset.moderation_status.notin_(UNSAFE_MODERATION_STATUSES),
             ready_derivative,
             ~external_asset_reference(Story.media_asset_id),
-            True if decision.allowed else MediaAsset.audience == MediaAudience.safe_public,
             ~blocked if user else True,
             access,
         )
@@ -388,7 +385,7 @@ async def public_rail(
     cursor: str | None,
     limit: int,
     creator_username: str | None = None,
-    access_decision: AdultAccessDecision | None = None,
+    access_decision: ComplianceDecision | None = None,
     *,
     now: datetime | None = None,
 ) -> tuple[list[Story], str | None]:
@@ -407,11 +404,28 @@ async def public_rail(
         )
     rows = (
         await db.scalars(
-            query.order_by(Story.published_at.desc(), Story.id.desc()).limit(limit + 1)
+            query.order_by(Story.published_at.desc(), Story.id.desc()).limit((limit + 1) * 4)
         )
     ).all()
-    page = rows[:limit]
-    return page, encode_cursor(page[-1]) if len(rows) > limit and page else None
+    profiles = list(
+        await db.scalars(
+            select(CreatorProfile).where(
+                CreatorProfile.id.in_({story.creator_id for story in rows})
+            )
+        )
+    )
+    eligibility = await resolve_creator_compliance_eligibilities(db, profiles=profiles)
+    eligible_rows = []
+    for story in rows:
+        creator_eligibility = eligibility.get(story.creator_id)
+        if (
+            creator_eligibility
+            and creator_eligibility.public_allowed
+            and await has_single_media_context(db, story.media_asset_id)
+        ):
+            eligible_rows.append(story)
+    page = eligible_rows[:limit]
+    return page, encode_cursor(page[-1]) if len(eligible_rows) > limit and page else None
 
 
 async def public_story(
@@ -420,12 +434,23 @@ async def public_story(
     user: User | None,
     *,
     now: datetime | None = None,
-    access_decision: AdultAccessDecision | None = None,
+    access_decision: ComplianceDecision | None = None,
 ) -> Story | None:
     current_time = now or datetime.now(UTC)
-    return await db.scalar(
+    story = await db.scalar(
         _active_public_query(user, current_time, access_decision).where(Story.id == story_id)
     )
+    if not story:
+        return None
+    if not await has_single_media_context(db, story.media_asset_id):
+        return None
+    creator = await db.get(CreatorProfile, story.creator_id)
+    if (
+        not creator
+        or not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed
+    ):
+        return None
+    return story
 
 
 async def own_stories(

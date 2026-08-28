@@ -10,10 +10,18 @@ from sqlalchemy import case, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.accounts.adult_access import require_current_self_attestation
 from app.audit.service import record_event
+from app.compliance.policy import resolve_compliance_decision
+from app.compliance.types import (
+    ComplianceAccessError,
+    ComplianceDecision,
+    require_compliance_access,
+)
 from app.core.config import get_settings
-from app.creators.service import require_public_creator_access
+from app.creators.service import (
+    require_public_creator_access,
+    resolve_creator_compliance_eligibility,
+)
 from app.finance.service import (
     _account,
     commission_amount,
@@ -23,7 +31,9 @@ from app.finance.service import (
     lock_payment_idempotency,
     post_entries,
 )
+from app.media.contexts import require_media_context_available
 from app.models.audit import AuditEvent
+from app.models.compliance import ComplianceFeature
 from app.models.content import (
     DerivativeType,
     Gallery,
@@ -35,7 +45,7 @@ from app.models.content import (
     ModerationStatus,
     VideoContent,
 )
-from app.models.creator import CreatorProfile
+from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.finance import (
     ExcessCaptureSource,
     LedgerAccount,
@@ -67,7 +77,35 @@ from app.notifications.service import emit_transactional
 
 
 class MarketplaceError(ValueError):
-    pass
+    def __init__(self, message: str, compliance_decision: ComplianceDecision | None = None):
+        super().__init__(message)
+        self.compliance_decision = compliance_decision
+        self.code = compliance_decision.code if compliance_decision else None
+        self.action = compliance_decision.action if compliance_decision else None
+
+
+async def require_marketplace_purchase_compliance(
+    db: AsyncSession,
+    buyer: User,
+    decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
+) -> None:
+    for feature in (ComplianceFeature.marketplace, ComplianceFeature.purchases):
+        decision = (
+            decisions.get(feature)
+            if decisions
+            else await resolve_compliance_decision(
+                db,
+                user=buyer,
+                feature=feature,
+                adult_restricted=False,
+            )
+        )
+        if decision is None:
+            raise MarketplaceError("Marketplace compliance decision is unavailable")
+        try:
+            require_compliance_access(decision)
+        except ComplianceAccessError as exc:
+            raise MarketplaceError(exc.decision.reason, exc.decision) from exc
 
 
 class MarketplaceTerminalPaymentError(MarketplaceError):
@@ -319,7 +357,6 @@ async def create_listing(
 ) -> MarketplaceListing:
     """Create a creator-owned physical listing; actor attribution never changes ownership."""
     from app.models.content import MediaAsset, MediaStatus
-    from app.models.creator import CreatorProfile
     from app.models.marketplace import MarketplaceCondition, MarketplaceShippingMode
 
     if not title.strip() or not category.strip():
@@ -329,8 +366,10 @@ async def create_listing(
     if len(media_asset_ids) != len(set(media_asset_ids)) or len(media_asset_ids) > 12:
         raise MarketplaceError("Listing media must be unique and limited to 12 assets")
     creator = await db.get(CreatorProfile, creator_id)
-    if not creator:
+    if not creator or creator.status is not CreatorStatus.approved:
         raise MarketplaceError("Creator not found")
+    if not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed:
+        raise MarketplaceError("Creator is not eligible for marketplace authoring")
     if (await seller_risk_profile(db, creator_id)).marketplace_suspended:
         raise MarketplaceError("Marketplace selling is suspended for this creator")
     if actor.id != creator.user_id:
@@ -371,6 +410,8 @@ async def create_listing(
             raise MarketplaceError(
                 "Listing media must be approved, safe-public, creator-owned, and dedicated to marketplace display"
             )
+        for asset in assets:
+            await require_media_context_available(db, asset.id, context_type="marketplace")
     listing = MarketplaceListing(
         public_id=f"ml_{secrets.token_urlsafe(12)}",
         owner_creator_id=creator_id,
@@ -417,6 +458,12 @@ async def submit_listing_for_review(
         raise MarketplaceError("Marketplace listing not found")
     if listing.status not in {MarketplaceListingStatus.draft, MarketplaceListingStatus.paused}:
         raise MarketplaceError("Listing cannot be submitted for review")
+    creator = await db.get(CreatorProfile, listing.owner_creator_id)
+    if (
+        not creator
+        or not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed
+    ):
+        raise MarketplaceError("Creator is not eligible for marketplace authoring")
     listing.status = MarketplaceListingStatus.pending_review
     listing.moderation_status = ModerationStatus.queued
     await record_event(
@@ -438,6 +485,15 @@ async def decide_listing_moderation(
     )
     if not listing or listing.status is not MarketplaceListingStatus.pending_review:
         raise MarketplaceError("Marketplace listing is not awaiting review")
+    if approved:
+        creator = await db.get(CreatorProfile, listing.owner_creator_id)
+        if (
+            not creator
+            or not (
+                await resolve_creator_compliance_eligibility(db, profile=creator)
+            ).public_allowed
+        ):
+            raise MarketplaceError("Creator is not eligible for marketplace publication")
     listing.moderation_status = ModerationStatus.approved if approved else ModerationStatus.rejected
     listing.status = (
         MarketplaceListingStatus.published if approved else MarketplaceListingStatus.rejected
@@ -668,6 +724,7 @@ async def initiate_order(
     idempotency_key: str,
     destination_region_code: str | None = None,
     shipping_address: dict[str, str | None] | None = None,
+    compliance_decisions: dict[ComplianceFeature, ComplianceDecision] | None = None,
 ) -> MarketplaceOrder:
     """Reserve stock and snapshot server-owned pricing and shipping treatment."""
     if not idempotency_key or len(idempotency_key) > 128:
@@ -700,10 +757,7 @@ async def initiate_order(
         raise MarketplaceError("Marketplace listing is not available") from exc
     if seller.user_id == buyer.id:
         raise MarketplaceError("Creators cannot purchase their own listing")
-    try:
-        require_current_self_attestation(buyer)
-    except PermissionError as exc:
-        raise MarketplaceError("Current adult self-attestation is required") from exc
+    await require_marketplace_purchase_compliance(db, buyer, compliance_decisions)
     if (await seller_risk_profile(db, listing.owner_creator_id)).marketplace_suspended:
         raise MarketplaceError("Marketplace listing is not available")
     if listing.moderation_status is not ModerationStatus.approved:

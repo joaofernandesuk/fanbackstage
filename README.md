@@ -17,7 +17,7 @@ The web app is at `http://localhost:3000`; the API is at `http://localhost:8000`
 
 ## Validation
 
-Run `make lint` and `make test`. Run `make e2e` for the real local media journey; it starts the full dependency stack and launches the API, worker, and browser application through Playwright. CI also runs a production web build, real-stack browser journeys, and fresh reversible Alembic migration checks against PostgreSQL.
+Run `make lint` and `make test`. Run `make e2e` for the real local media journey after provisioning explicit loopback-only E2E PostgreSQL, Redis, Mailpit, and MinIO endpoints. Set `FANBACKSTAGE_E2E_ISOLATED=1`, and use a PostgreSQL database name containing `e2e` or `test`; the runner refuses to migrate or seed inherited production endpoints. It launches an isolated API, worker, browser application, and signed-webhook LiveKit instance through Playwright. CI also runs a production web build, real-stack browser journeys, and fresh reversible Alembic migration checks against PostgreSQL.
 
 Release validation may use a separate Compose project and non-default host ports. In that case, pass the same explicit isolated PostgreSQL, Redis, Mailpit, and MinIO endpoint variables to the API, worker, and Playwright runner. In particular, the browser-reachable MinIO endpoint must belong to that Compose project; pointing the signed-upload flow at a shared local MinIO instance invalidates media-test isolation without changing production storage policy.
 

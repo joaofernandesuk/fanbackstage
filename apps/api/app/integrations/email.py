@@ -24,7 +24,7 @@ class EmailProvider(ABC):
 
 
 class SmtpEmailProvider(EmailProvider):
-    """Local Mailpit-compatible adapter; production adapters share this boundary."""
+    """SMTP adapter supporting local Mailpit and authenticated production TLS."""
 
     name = "smtp"
 
@@ -57,7 +57,15 @@ class SmtpEmailProvider(EmailProvider):
         if link:
             body = f"{body}\n\nOpen your secure FanBackstage link: {link}"
         message.set_content(body)
-        await aiosmtplib.send(message, hostname=settings.smtp_host, port=settings.smtp_port)
+        await aiosmtplib.send(
+            message,
+            hostname=settings.smtp_host,
+            port=settings.smtp_port,
+            username=settings.smtp_username or None,
+            password=settings.smtp_password or None,
+            use_tls=settings.smtp_use_tls,
+            start_tls=settings.smtp_start_tls,
+        )
         return idempotency_key
 
 

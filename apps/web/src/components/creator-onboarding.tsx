@@ -4,12 +4,16 @@ import Link from "next/link";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import {
+  creatorComplianceIsCurrent,
+  type CreatorComplianceProjection,
+} from "../lib/creator-compliance";
 import styles from "./creator-onboarding.module.css";
 
 type TaxonomyItem = { id: string; code: string; label: string };
 type SocialLink = { label: string; url: string };
 
-export type CreatorOnboardingProfile = {
+export type CreatorOnboardingProfile = CreatorComplianceProjection & {
   username: string | null;
   display_name: string | null;
   bio: string | null;
@@ -20,8 +24,6 @@ export type CreatorOnboardingProfile = {
   timezone: string | null;
   status: string;
   is_public: boolean;
-  verification_status: string;
-  adult_verified: boolean;
   rejection_reason: string | null;
   languages: TaxonomyItem[];
   categories: TaxonomyItem[];
@@ -39,7 +41,7 @@ export function canRunDevelopmentVerification(profile: CreatorOnboardingProfile)
 }
 
 export function creatorHasCurrentVerification(profile: CreatorOnboardingProfile): boolean {
-  return profile.verification_status === "verified" && profile.adult_verified;
+  return creatorComplianceIsCurrent(profile);
 }
 
 export function creatorProfilePayload(form: FormData, canPublish: boolean): Record<string, unknown> {
@@ -102,7 +104,7 @@ function statusCopy(profile: CreatorOnboardingProfile): { heading: string; body:
       if (!creatorHasCurrentVerification(profile)) {
         return {
           heading: "Creator verification needs attention",
-          body: "Your profile remains unavailable until a current verified adult KYC outcome is recorded. Saved profile details and your publication preference remain intact.",
+          body: `${profile.creator_compliance.reason}. Saved profile details and your publication preference remain intact.`,
         };
       }
       return profile.is_public
@@ -345,9 +347,12 @@ export function CreatorOnboarding() {
             <li className={profile.status === "pending_review" ? styles.currentStage : undefined}>Moderation review</li>
             <li className={profile.status === "approved" ? styles.currentStage : undefined}>Approved and publication choice</li>
           </ol>
-          {profile.adult_verified && (
-            <p className={styles.verifiedNote}>A current creator adult-KYC outcome is recorded. Fan adult access remains a separate check.</p>
-          )}
+          <p className={currentVerification ? styles.verifiedNote : styles.mediaBoundary}>
+            Current creator policy: {currentVerification
+              ? "identity and age requirements are satisfied"
+              : profile.creator_compliance.reason}. Latest provider evidence: {profile.verification_status.replaceAll("_", " ")}.
+            Fan adult access remains a separate check.
+          </p>
           <p className={styles.mediaBoundary}>
             Avatar and cover editing will appear only after the media domain exposes an owner-authorised profile association command.
           </p>

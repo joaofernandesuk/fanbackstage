@@ -7,7 +7,7 @@ from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.content import service as content_service
 from app.creators import service as creator_service
-from app.creators.service import current_adult_verification_predicate
+from app.creators.service import resolve_creator_compliance_eligibilities
 from app.finance import service as finance_service
 from app.finance.service import currency_code
 from app.groups import service
@@ -588,11 +588,13 @@ async def public_affiliations(group_id: UUID, db: Db) -> list[dict[str, str]]:
                 GroupCreatorMembership.affiliation_public.is_(True),
                 CreatorProfile.status == CreatorStatus.approved,
                 CreatorProfile.is_public.is_(True),
-                current_adult_verification_predicate(CreatorProfile.id),
             )
             .order_by(CreatorProfile.username)
         )
     ).all()
+    eligibility = await resolve_creator_compliance_eligibilities(
+        db, profiles=[creator for _, creator in rows]
+    )
     return [
         {
             "creator_id": str(membership.creator_id),
@@ -600,6 +602,7 @@ async def public_affiliations(group_id: UUID, db: Db) -> list[dict[str, str]]:
             "display_name": creator.display_name or "",
         }
         for membership, creator in rows
+        if eligibility[creator.id].public_allowed
     ]
 
 

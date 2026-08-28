@@ -109,5 +109,9 @@ class ContentResponse(BaseModel):
     preview_duration_seconds: int | None = None
     adult_access_required: bool = False
     adult_access_granted: bool = True
+    compliance_allowed: bool = True
+    compliance_code: str = "ALLOWED"
+    compliance_action: str | None = None
+    compliance_reason: str | None = None
     previews: list[ContentPreview] = Field(default_factory=list)
     media: list[ContentPreview] = Field(default_factory=list)

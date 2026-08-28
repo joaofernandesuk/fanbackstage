@@ -4,16 +4,19 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../lib/api";
+import {
+  creatorComplianceIsCurrent,
+  type CreatorComplianceProjection,
+} from "../lib/creator-compliance";
+import { ComplianceStatusCard } from "./compliance-status-card";
 import styles from "./creator-studio-progress.module.css";
 
-type CreatorProfile = {
+type CreatorProfile = CreatorComplianceProjection & {
   username: string | null;
   display_name: string | null;
   bio: string | null;
   status: string;
   is_public: boolean;
-  verification_status: string;
-  adult_verified: boolean;
 };
 
 type ManagedContent = {
@@ -48,8 +51,7 @@ export function creatorProgressItems(snapshot: CreatorProgressSnapshot): Creator
       complete: Boolean(
         profile?.status === "approved" &&
         profile.is_public &&
-        profile.verification_status === "verified" &&
-        profile.adult_verified &&
+        creatorComplianceIsCurrent(profile) &&
         profile.username &&
         profile.display_name &&
         profile.bio?.trim(),
@@ -153,7 +155,9 @@ export function CreatorStudioProgress() {
   const completed = items.filter((item) => item.complete).length;
 
   return (
-    <section aria-labelledby="studio-progress-heading" className={styles.progressCard}>
+    <>
+      <ComplianceStatusCard creator />
+      <section aria-labelledby="studio-progress-heading" className={styles.progressCard}>
       <header className={styles.header}>
         <div>
           <p className={styles.eyebrow}>GET STARTED</p>
@@ -195,6 +199,7 @@ export function CreatorStudioProgress() {
       ) : (
         <p aria-busy="true" className={styles.loading}>Checking saved creator setup…</p>
       )}
-    </section>
+      </section>
+    </>
   );
 }

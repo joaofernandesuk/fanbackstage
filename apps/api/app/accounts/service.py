@@ -63,6 +63,7 @@ async def register(
     correlation_id: str | None,
     *,
     adult_confirmed: bool = False,
+    country_code: str | None = None,
 ) -> tuple[User, str]:
     """Create an account, persisting self-attestation only from a trusted caller signal.
 
@@ -74,7 +75,12 @@ async def register(
         raise ValueError("An account with this email already exists")
     await ensure_roles(db)
     viewer = await db.scalar(select(Role).where(Role.name == "viewer"))
-    user = User(email=normalized, password_hash=password_hash.hash(password), roles=[viewer])
+    user = User(
+        email=normalized,
+        password_hash=password_hash.hash(password),
+        roles=[viewer],
+        country_code=country_code,
+    )
     if adult_confirmed:
         attest_account(user)
     db.add(user)
@@ -89,6 +95,7 @@ async def register(
         correlation_id=correlation_id,
         metadata={
             "adult_assurance": "self_attested" if adult_confirmed else "none",
+            "country_code": country_code,
             **({"adult_attestation_version": current_policy_version()} if adult_confirmed else {}),
         },
     )
@@ -169,6 +176,15 @@ async def revoke_session(
         target_id=str(session.id),
         correlation_id=correlation_id,
     )
+    from app.streaming.service import evict_user_from_active_live
+
+    await db.flush()
+    await evict_user_from_active_live(
+        db,
+        session.user_id,
+        reason="account_session_revoked",
+        force=True,
+    )
 
 
 async def revoke_all_sessions(db: AsyncSession, user_id: UUID) -> None:
@@ -176,6 +192,14 @@ async def revoke_all_sessions(db: AsyncSession, user_id: UUID) -> None:
         update(UserSession)
         .where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
         .values(revoked_at=_now())
+    )
+    from app.streaming.service import evict_user_from_active_live
+
+    await evict_user_from_active_live(
+        db,
+        user_id,
+        reason="all_account_sessions_revoked",
+        force=True,
     )
 
 
@@ -200,4 +224,12 @@ async def revoke_other_sessions(
             target_id=str(user_id),
             correlation_id=correlation_id,
             metadata={"revoked_count": result.rowcount},
+        )
+        from app.streaming.service import evict_user_from_active_live
+
+        await evict_user_from_active_live(
+            db,
+            user_id,
+            reason="other_account_sessions_revoked",
+            force=True,
         )

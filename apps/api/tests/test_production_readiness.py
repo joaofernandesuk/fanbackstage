@@ -5,38 +5,282 @@ from app.media import storage
 from app.seed.demo import _assert_development
 
 
+def _production_settings(**overrides) -> Settings:
+    values = {
+        "environment": "production",
+        "session_secret": "s" * 40,
+        "notification_webhook_secret": "n" * 40,
+        "internal_country_handoff_secret": "i" * 40,
+        "payment_webhook_secret": "p" * 40,
+        "cookie_secure": True,
+        "web_origin": "https://fanbackstage.example",
+        "api_origin": "https://api.fanbackstage.example",
+        "database_url": (
+            "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage?ssl=verify-full"
+        ),
+        "redis_url": "rediss://:redis-password-with-32-characters@redis.internal:6380/0",
+        "smtp_host": "smtp.example.com",
+        "smtp_username": "fanbackstage-smtp-user",
+        "smtp_password": "smtp-password-with-at-least-32-characters",
+        "smtp_start_tls": True,
+        "storage_endpoint_url": "https://storage.example.com",
+        "storage_access_key": "production-storage-access",
+        "storage_secret_key": "storage-secret-with-at-least-32-characters",
+        "livekit_url": "wss://livekit.example.com",
+        "livekit_api_key": "livekit-production-key",
+        "livekit_api_secret": "livekit-secret-with-at-least-24-characters",
+        "age_assurance_provider": "verifymyage",
+        "verifymyage_environment": "production",
+        "verifymyage_client_id": "vma-client-id",
+        "verifymyage_client_secret": "vma-client-secret-long",
+        "compliance_fallback_country": "PT",
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
 def test_production_rejects_unimplemented_payment_provider():
     with pytest.raises(RuntimeError, match="PAYMENT_PROVIDER is not implemented"):
-        Settings(
-            environment="production",
-            session_secret="safe",
-            cookie_secure=True,
-            web_origin="https://fanbackstage.com",
-            payment_provider="provider",
-            notification_webhook_secret="safe",
-            livekit_api_secret="safe",
-            smtp_host="smtp.example.com",
-            storage_endpoint_url="https://storage.example.com",
-            storage_access_key="safe",
-            storage_secret_key="safe",
-        ).validate_production()
+        _production_settings(payment_provider="provider").validate_production()
 
 
 def test_production_rejects_enabled_demo_seed():
     with pytest.raises(RuntimeError, match="DEMO_SEED"):
-        Settings(
-            environment="production",
-            session_secret="safe",
-            cookie_secure=True,
-            web_origin="https://fanbackstage.com",
+        _production_settings(
+            payment_provider="provider", demo_seed_enabled=True
+        ).validate_production()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("session_secret", "x", "SESSION_SECRET"),
+        ("notification_webhook_secret", "x", "NOTIFICATION_WEBHOOK_SECRET"),
+        ("payment_webhook_secret", "development-payment-webhook-secret", "PAYMENT_WEBHOOK"),
+        ("livekit_api_key", "devkey", "LIVEKIT_API_KEY"),
+        ("livekit_api_secret", "x", "LIVEKIT_API_SECRET"),
+        ("storage_access_key", "x", "STORAGE_ACCESS_KEY"),
+        ("storage_secret_key", "x", "STORAGE_SECRET_KEY"),
+        ("verifymyage_client_id", "x", "VERIFYMYAGE_CLIENT_ID"),
+        ("verifymyage_client_secret", "x", "VERIFYMYAGE_CLIENT_SECRET"),
+        (
+            "database_url",
+            "postgresql+asyncpg://fanbackstage:fanbackstage@localhost:5432/fanbackstage",
+            "DATABASE_URL",
+        ),
+        ("redis_url", "redis://localhost:6379/0", "REDIS_URL"),
+    ],
+)
+def test_production_rejects_weak_secrets_and_default_stateful_endpoints(field, value, message):
+    with pytest.raises(RuntimeError, match=message):
+        _production_settings(**{field: value}).validate_production()
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        (
+            "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage"
+        ),
+        (
+            "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage?ssl=disable"
+        ),
+        (
+            "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage?ssl=allow"
+        ),
+        (
+            "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage?ssl=prefer"
+        ),
+        (
+            "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage?sslmode=verify-full"
+        ),
+        (
+            "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage?ssl=require&ssl=disable"
+        ),
+        (
+            "postgresql://fan_prod:database-password-with-32-characters"
+            "@db.internal:5432/fanbackstage?ssl=verify-full"
+        ),
+    ],
+)
+def test_production_rejects_missing_fallback_or_incompatible_database_tls(database_url):
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        _production_settings(database_url=database_url).validate_production()
+
+
+@pytest.mark.parametrize("tls_mode", ["require", "verify-ca", "verify-full"])
+def test_production_accepts_explicit_asyncpg_database_tls_modes(tls_mode):
+    database_url = (
+        "postgresql+asyncpg://fan_prod:database-password-with-32-characters"
+        f"@db.internal:5432/fanbackstage?ssl={tls_mode}"
+    )
+    with pytest.raises(RuntimeError, match="PAYMENT_PROVIDER is not implemented"):
+        _production_settings(
+            database_url=database_url,
             payment_provider="provider",
-            notification_webhook_secret="safe",
-            livekit_api_secret="safe",
-            smtp_host="smtp.example.com",
-            storage_endpoint_url="https://storage.example.com",
-            storage_access_key="safe",
-            storage_secret_key="safe",
-            demo_seed_enabled=True,
+        ).validate_production()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("web_origin", "http://fanbackstage.example", "WEB_ORIGIN"),
+        ("web_origin", "https://localhost:3000", "WEB_ORIGIN"),
+        ("web_origin", "https://user:password@fanbackstage.example", "WEB_ORIGIN"),
+        ("web_origin", "https://fanbackstage.example/", "WEB_ORIGIN"),
+        ("web_origin", "https://fanbackstage.example?source=test", "WEB_ORIGIN"),
+        ("web_origin", "https://fanbackstage.example#fragment", "WEB_ORIGIN"),
+        ("api_origin", "https:///api", "API_ORIGIN"),
+        ("api_origin", "https://api.fanbackstage.example/v1", "API_ORIGIN"),
+        ("api_origin", "https://api.fanbackstage.example:invalid", "API_ORIGIN"),
+        ("storage_endpoint_url", "http://storage.example.com", "STORAGE_ENDPOINT_URL"),
+        ("storage_endpoint_url", "https://127.0.0.1:9000", "STORAGE_ENDPOINT_URL"),
+        (
+            "storage_endpoint_url",
+            "https://access-key@storage.example.com",
+            "STORAGE_ENDPOINT_URL",
+        ),
+        (
+            "storage_endpoint_url",
+            "https://storage.example.com?region=eu-west-1",
+            "STORAGE_ENDPOINT_URL",
+        ),
+        (
+            "storage_public_endpoint_url",
+            "https://cdn.example.com#asset",
+            "STORAGE_PUBLIC_ENDPOINT_URL",
+        ),
+        ("livekit_url", "ws://livekit.example.com", "LIVEKIT_URL"),
+        ("livekit_url", "wss://[::1]:7880", "LIVEKIT_URL"),
+        ("livekit_url", "wss://token@livekit.example.com", "LIVEKIT_URL"),
+        ("livekit_url", "wss://livekit.example.com?token=secret", "LIVEKIT_URL"),
+    ],
+)
+def test_production_rejects_malformed_or_local_transport_endpoints(field, value, message):
+    with pytest.raises(RuntimeError, match=message):
+        _production_settings(**{field: value}).validate_production()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"trusted_country_header": "X-Country"}, "configured together"),
+        ({"trusted_proxy_cidrs": "203.0.113.10/32"}, "configured together"),
+        (
+            {
+                "trusted_country_header": "X Country",
+                "trusted_proxy_cidrs": "203.0.113.10/32",
+            },
+            "TRUSTED_COUNTRY_HEADER",
+        ),
+        (
+            {
+                "trusted_country_header": "X-Country",
+                "trusted_proxy_cidrs": "0.0.0.0/0",
+            },
+            "TRUSTED_PROXY_CIDRS",
+        ),
+        (
+            {
+                "trusted_country_header": "X-Country",
+                "trusted_proxy_cidrs": "::/0",
+            },
+            "TRUSTED_PROXY_CIDRS",
+        ),
+        (
+            {
+                "trusted_country_header": "X-Country",
+                "trusted_proxy_cidrs": "10.0.0.0/8",
+            },
+            "TRUSTED_PROXY_CIDRS",
+        ),
+        (
+            {
+                "trusted_country_header": "X-Country",
+                "trusted_proxy_cidrs": "127.0.0.1/32",
+            },
+            "TRUSTED_PROXY_CIDRS",
+        ),
+        (
+            {
+                "trusted_country_header": "X-Country",
+                "trusted_proxy_cidrs": "203.0.113.11/24",
+            },
+            "TRUSTED_PROXY_CIDRS",
+        ),
+    ],
+)
+def test_production_rejects_dangerous_trusted_country_proxy_configuration(
+    overrides,
+    message,
+):
+    with pytest.raises(RuntimeError, match=message):
+        _production_settings(**overrides).validate_production()
+
+
+def test_production_accepts_narrow_paired_trusted_country_proxy_configuration():
+    with pytest.raises(RuntimeError, match="PAYMENT_PROVIDER is not implemented"):
+        _production_settings(
+            payment_provider="provider",
+            trusted_country_header="X-Edge-Country",
+            trusted_proxy_cidrs="203.0.113.10/32,2001:db8:abcd::/64",
+        ).validate_production()
+
+
+@pytest.mark.parametrize("ttl", [0, 301])
+def test_livekit_tokens_must_remain_short_lived(ttl):
+    with pytest.raises(RuntimeError, match="LIVEKIT_TOKEN_TTL_SECONDS"):
+        Settings(environment="test", livekit_token_ttl_seconds=ttl).validate_production()
+
+
+@pytest.mark.parametrize("ttl", [0, 301, 86_400])
+def test_protected_media_urls_must_remain_short_lived(ttl):
+    with pytest.raises(RuntimeError, match="MEDIA_URL_TTL_SECONDS"):
+        Settings(environment="test", media_url_ttl_seconds=ttl).validate_production()
+
+
+def test_production_accepts_paths_on_non_origin_service_endpoints():
+    with pytest.raises(RuntimeError, match="PAYMENT_PROVIDER is not implemented"):
+        _production_settings(
+            payment_provider="provider",
+            storage_endpoint_url="https://storage.example.com/s3",
+            storage_public_endpoint_url="https://cdn.example.com/media",
+            livekit_url="wss://livekit.example.com/rtc",
+        ).validate_production()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"smtp_port": 0}, "SMTP_PORT"),
+        ({"smtp_host": "localhost"}, "SMTP_HOST"),
+        ({"smtp_host": "[::1]"}, "SMTP_HOST"),
+        ({"smtp_host": "mailpit."}, "SMTP_HOST"),
+        ({"smtp_host": "mail.internal.local"}, "SMTP_HOST"),
+        ({"smtp_start_tls": False}, "requires implicit TLS or forced STARTTLS"),
+        ({"smtp_use_tls": True}, "cannot both be true"),
+        ({"smtp_username": ""}, "SMTP_USERNAME"),
+        ({"smtp_password": ""}, "SMTP_PASSWORD"),
+    ],
+)
+def test_production_rejects_insecure_or_unauthenticated_smtp(overrides, message):
+    with pytest.raises(RuntimeError, match=message):
+        _production_settings(**overrides).validate_production()
+
+
+def test_production_accepts_authenticated_implicit_tls_smtp():
+    with pytest.raises(RuntimeError, match="PAYMENT_PROVIDER is not implemented"):
+        _production_settings(
+            payment_provider="provider",
+            smtp_start_tls=False,
+            smtp_use_tls=True,
         ).validate_production()
 
 

@@ -1,15 +1,22 @@
 import re
 import secrets
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.accounts.service import assign_role
 from app.audit.service import record_event
+from app.compliance.policy import effective_policy_for_country
+from app.compliance.types import JurisdictionSignals, resolve_jurisdiction_candidates
+from app.core.config import get_settings
+from app.models.compliance import CountryRegistry
 from app.models.creator import (
     CreatorCategory,
     CreatorLanguage,
@@ -55,6 +62,25 @@ TRANSITIONS = {
 }
 
 
+@dataclass(frozen=True)
+class CreatorComplianceEligibility:
+    jurisdiction: str | None
+    policy_version: int | None
+    verification_status: str | None
+    verification_expires_at: datetime | None
+    identity_required: bool
+    age_required: bool
+    payout_kyc_required: bool
+    identity_allowed: bool
+    age_allowed: bool
+    public_allowed: bool
+    payout_kyc_satisfied: bool
+    payout_allowed: bool
+    code: str
+    reason: str
+    payout_code: str
+
+
 def normalize_username(value: str) -> str:
     normalized = value.strip().lower()
     if not USERNAME_RE.fullmatch(normalized) or normalized in RESERVED_USERNAMES:
@@ -84,6 +110,37 @@ def current_adult_verification_predicate(creator_profile_id):
             candidate.id == latest_id,
             candidate.status == VerificationStatus.verified,
             candidate.adult_verified.is_(True),
+            # Legacy query consumers cannot interpret jurisdiction JSON. Keep
+            # them conservatively stricter until they use the policy resolver.
+            candidate.identity_verified.is_(True),
+            candidate.revoked_at.is_(None),
+            candidate.expires_at.is_not(None),
+            candidate.expires_at > func.now(),
+        )
+    )
+
+
+def current_identity_verification_predicate(creator_profile_id):
+    """Correlated latest normalized identity/KYC outcome predicate."""
+
+    latest = aliased(CreatorVerification)
+    candidate = aliased(CreatorVerification)
+    latest_id = (
+        select(latest.id)
+        .where(latest.creator_profile_id == creator_profile_id)
+        .order_by(latest.created_at.desc(), latest.id.desc())
+        .limit(1)
+        .correlate_except(latest)
+        .scalar_subquery()
+    )
+    return exists(
+        select(candidate.id).where(
+            candidate.id == latest_id,
+            candidate.status == VerificationStatus.verified,
+            candidate.identity_verified.is_(True),
+            candidate.revoked_at.is_(None),
+            candidate.expires_at.is_not(None),
+            candidate.expires_at > func.now(),
         )
     )
 
@@ -99,13 +156,216 @@ async def latest_verification(
     )
 
 
+async def resolve_creator_compliance_eligibility(
+    db: AsyncSession,
+    *,
+    profile: CreatorProfile,
+    now: datetime | None = None,
+) -> CreatorComplianceEligibility:
+    """Resolve creator identity/adult eligibility separately from fan assurance."""
+
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    verification = await latest_verification(db, profile.id)
+    account = await db.get(User, profile.user_id)
+    current_kyc_country = (
+        verification.country_code
+        if verification
+        and verification.status is VerificationStatus.verified
+        and verification.verified_at is not None
+        and verification.revoked_at is None
+        and verification.expires_at is not None
+        and verification.expires_at > current
+        else None
+    )
+    try:
+        countries = resolve_jurisdiction_candidates(
+            JurisdictionSignals(
+                kyc_country=current_kyc_country,
+                account_country=account.country_code if account else None,
+            ),
+            fallback_country=get_settings().effective_compliance_fallback_country(),
+            allow_untrusted_selection=False,
+        )
+    except ValueError:
+        countries = ()
+    if len(countries) != 1:
+        return CreatorComplianceEligibility(
+            jurisdiction=countries[0] if countries else None,
+            policy_version=None,
+            verification_status=verification.status.value if verification else None,
+            verification_expires_at=None,
+            identity_required=True,
+            age_required=True,
+            payout_kyc_required=True,
+            identity_allowed=False,
+            age_allowed=False,
+            public_allowed=False,
+            payout_kyc_satisfied=False,
+            payout_allowed=False,
+            code=(
+                "CREATOR_COUNTRY_CONFLICT"
+                if len(countries) > 1
+                else "CREATOR_JURISDICTION_UNRESOLVED"
+            ),
+            reason="Creator jurisdiction is unresolved or conflicting",
+            payout_code="PAYOUT_COMPLIANCE_UNAVAILABLE",
+        )
+    country = countries[0]
+    registry = await db.get(CountryRegistry, country)
+    if registry is None or not registry.enabled:
+        return CreatorComplianceEligibility(
+            jurisdiction=country,
+            policy_version=None,
+            verification_status=verification.status.value if verification else None,
+            verification_expires_at=None,
+            identity_required=True,
+            age_required=True,
+            payout_kyc_required=True,
+            identity_allowed=False,
+            age_allowed=False,
+            public_allowed=False,
+            payout_kyc_satisfied=False,
+            payout_allowed=False,
+            code="CREATOR_JURISDICTION_BLOCKED",
+            reason="Creator access is unavailable in this jurisdiction",
+            payout_code="PAYOUT_COMPLIANCE_UNAVAILABLE",
+        )
+    policy = await effective_policy_for_country(db, country, now=current)
+    if policy is None or not policy.rules.enabled:
+        return CreatorComplianceEligibility(
+            jurisdiction=country,
+            policy_version=None,
+            verification_status=verification.status.value if verification else None,
+            verification_expires_at=None,
+            identity_required=True,
+            age_required=True,
+            payout_kyc_required=True,
+            identity_allowed=False,
+            age_allowed=False,
+            public_allowed=False,
+            payout_kyc_satisfied=False,
+            payout_allowed=False,
+            code="CREATOR_POLICY_UNAVAILABLE",
+            reason="No reviewed creator compliance policy is available",
+            payout_code="PAYOUT_COMPLIANCE_UNAVAILABLE",
+        )
+    rules = policy.rules
+    expiry_bounds: list[datetime] = []
+    if verification and verification.expires_at is not None:
+        expiry_bounds.append(verification.expires_at)
+    if (
+        verification
+        and verification.verified_at is not None
+        and rules.reverify_after_days is not None
+    ):
+        expiry_bounds.append(verification.verified_at + timedelta(days=rules.reverify_after_days))
+    effective_expiry = min(expiry_bounds) if expiry_bounds else None
+    verification_current = bool(
+        verification
+        and verification.status is VerificationStatus.verified
+        and verification.verified_at is not None
+        and verification.revoked_at is None
+        and effective_expiry is not None
+        and effective_expiry > current
+    )
+    identity_allowed = not rules.creator_identity_required or bool(
+        verification_current and verification and verification.identity_verified
+    )
+    age_allowed = not rules.creator_age_verification_required or bool(
+        verification_current and verification and verification.adult_verified
+    )
+    payout_kyc_satisfied = not rules.payout_kyc_required or bool(
+        verification_current and verification and verification.identity_verified
+    )
+    if not identity_allowed:
+        code = "CREATOR_IDENTITY_VERIFICATION_REQUIRED"
+        reason = "Current creator identity verification is required"
+    elif not age_allowed:
+        code = "CREATOR_AGE_VERIFICATION_REQUIRED"
+        reason = "Current creator adult verification is required"
+    else:
+        code = "CREATOR_COMPLIANCE_ALLOWED"
+        reason = "Creator identity and age requirements are satisfied"
+    return CreatorComplianceEligibility(
+        jurisdiction=country,
+        policy_version=policy.jurisdiction_revision.version,
+        verification_status=verification.status.value if verification else None,
+        verification_expires_at=effective_expiry,
+        identity_required=rules.creator_identity_required,
+        age_required=rules.creator_age_verification_required,
+        payout_kyc_required=rules.payout_kyc_required,
+        identity_allowed=identity_allowed,
+        age_allowed=age_allowed,
+        public_allowed=identity_allowed and age_allowed,
+        payout_kyc_satisfied=payout_kyc_satisfied,
+        # No payout rail exists yet. Never present policy/KYC satisfaction as
+        # operational payout eligibility.
+        payout_allowed=False,
+        code=code,
+        reason=reason,
+        payout_code=("PAYOUT_NOT_CONFIGURED" if payout_kyc_satisfied else "PAYOUT_KYC_REQUIRED"),
+    )
+
+
+async def resolve_creator_compliance_eligibilities(
+    db: AsyncSession,
+    *,
+    profiles: Sequence[CreatorProfile],
+    now: datetime | None = None,
+) -> dict[UUID, CreatorComplianceEligibility]:
+    """Resolve a pre-paginated creator list through the canonical policy path."""
+
+    current = now or datetime.now(UTC)
+    return {
+        profile.id: await resolve_creator_compliance_eligibility(
+            db,
+            profile=profile,
+            now=current,
+        )
+        for profile in profiles
+    }
+
+
 async def has_current_adult_verification(db: AsyncSession, creator_profile_id: UUID) -> bool:
     verification = await latest_verification(db, creator_profile_id)
     return bool(
         verification
         and verification.status is VerificationStatus.verified
         and verification.adult_verified
+        and verification.revoked_at is None
+        and verification.expires_at is not None
+        and verification.expires_at > datetime.now(UTC)
     )
+
+
+async def has_current_identity_verification(db: AsyncSession, creator_profile_id: UUID) -> bool:
+    verification = await latest_verification(db, creator_profile_id)
+    return bool(
+        verification
+        and verification.status is VerificationStatus.verified
+        and verification.identity_verified
+        and verification.revoked_at is None
+        and verification.expires_at is not None
+        and verification.expires_at > datetime.now(UTC)
+    )
+
+
+async def require_current_identity_verification(
+    db: AsyncSession, creator_profile_id: UUID
+) -> CreatorVerification:
+    verification = await latest_verification(db, creator_profile_id)
+    if not (
+        verification
+        and verification.status is VerificationStatus.verified
+        and verification.identity_verified
+        and verification.revoked_at is None
+        and verification.expires_at is not None
+        and verification.expires_at > datetime.now(UTC)
+    ):
+        raise ValueError("A current verified creator identity/KYC outcome is required")
+    return verification
 
 
 async def require_current_adult_verification(
@@ -116,6 +376,9 @@ async def require_current_adult_verification(
         verification
         and verification.status is VerificationStatus.verified
         and verification.adult_verified
+        and verification.revoked_at is None
+        and verification.expires_at is not None
+        and verification.expires_at > datetime.now(UTC)
     ):
         raise ValueError("A current verified adult KYC outcome is required")
     return verification
@@ -126,7 +389,7 @@ async def require_public_creator_access(
     creator_profile_id: UUID,
     viewer_user_id: UUID | None = None,
 ) -> CreatorProfile:
-    """Require a currently public, approved, adult-verified creator relationship.
+    """Require a currently public, approved, policy-eligible creator relationship.
 
     This is a pre-charge/public-surface invariant. It deliberately includes
     two-way blocks when a viewer is known so payment cannot create access that
@@ -137,10 +400,12 @@ async def require_public_creator_access(
             CreatorProfile.id == creator_profile_id,
             CreatorProfile.status == CreatorStatus.approved,
             CreatorProfile.is_public.is_(True),
-            current_adult_verification_predicate(CreatorProfile.id),
         )
     )
     if not profile:
+        raise ValueError("Creator is not publicly available")
+    eligibility = await resolve_creator_compliance_eligibility(db, profile=profile)
+    if not eligibility.public_allowed:
         raise ValueError("Creator is not publicly available")
     if viewer_user_id is not None and viewer_user_id != profile.user_id:
         blocked = await db.scalar(
@@ -190,14 +455,41 @@ async def set_status(
     actor_user_id: UUID | None,
     reason: str | None = None,
 ) -> None:
+    # Creator publication and every live-room/session creation serialize on
+    # this same row. Reloading under the lock prevents a stale approved object
+    # from racing a concurrent suspension or creating delivery after the
+    # suspension scan has completed.
+    locked_profile = await db.scalar(
+        select(CreatorProfile)
+        .where(CreatorProfile.id == profile.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if locked_profile is None:
+        raise ValueError("Creator profile not found")
+    profile = locked_profile
     if status not in TRANSITIONS.get(profile.status, set()):
         raise ValueError(f"Cannot transition from {profile.status.value} to {status.value}")
     if status is CreatorStatus.approved:
-        await require_current_adult_verification(db, profile.id)
+        eligibility = await resolve_creator_compliance_eligibility(db, profile=profile)
+        if not eligibility.public_allowed:
+            raise ValueError(
+                f"Creator compliance requirements are not satisfied ({eligibility.code})"
+            )
     previous = profile.status
     profile.status = status
     if status in {CreatorStatus.suspended, CreatorStatus.disabled, CreatorStatus.rejected}:
         profile.is_public = False
+        # A DB-only suspension cannot disconnect an already-connected LiveKit
+        # broadcaster. Apply provider controls immediately; failures are
+        # audited and the scheduled authority reconciler retries them.
+        from app.streaming.service import terminate_creator_active_live
+
+        await terminate_creator_active_live(
+            db,
+            profile.id,
+            reason=f"creator_status_{status.value}",
+        )
     if status == CreatorStatus.rejected:
         profile.rejection_reason = reason or "Application was not approved"
     if status == CreatorStatus.approved:
@@ -390,12 +682,38 @@ async def development_verify(
 ) -> CreatorVerification:
     if profile.status is not CreatorStatus.pending_verification:
         raise ValueError("Development verification requires a pending creator verification")
+    current = datetime.now(UTC)
+    account = await db.get(User, profile.user_id)
+    try:
+        countries = resolve_jurisdiction_candidates(
+            JurisdictionSignals(account_country=account.country_code if account else None),
+            fallback_country=get_settings().effective_compliance_fallback_country(),
+            allow_untrusted_selection=False,
+        )
+    except ValueError:
+        countries = ()
+    if len(countries) != 1:
+        raise ValueError("Creator account jurisdiction is unresolved or conflicting")
+    country_code = countries[0]
+    policy = (
+        await effective_policy_for_country(db, country_code, now=current) if country_code else None
+    )
+    validity_days = (
+        policy.rules.reverify_after_days
+        if policy and policy.rules.reverify_after_days is not None
+        else get_settings().manual_age_review_max_days
+    )
     verification = CreatorVerification(
         creator_profile_id=profile.id,
         provider="development",
         provider_reference=f"dev_{secrets.token_urlsafe(16)}",
         status=VerificationStatus.verified if adult else VerificationStatus.failed,
         adult_verified=adult,
+        identity_verified=adult,
+        country_code=country_code,
+        verified_at=current if adult else None,
+        expires_at=current + timedelta(days=validity_days) if adult else None,
+        failure_reason_code=None if adult else "AGE_OR_IDENTITY_NOT_VERIFIED",
     )
     db.add(verification)
     await record_event(
