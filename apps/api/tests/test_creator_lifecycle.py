@@ -18,11 +18,13 @@ from app.models.creator import (
     CreatorLanguage,
     CreatorProfile,
     CreatorStatus,
+    CreatorStatusHistory,
     CreatorVerification,
     VerificationStatus,
 )
 from app.models.identity import User
 from app.models.messaging import UserBlock
+from app.models.notification import InAppNotification
 
 
 async def mark_email_verified(db_session, email: str) -> None:
@@ -670,3 +672,115 @@ async def test_admin_approval_allows_owner_to_publish_a_public_safe_profile(
         assert {"creator.status_approved", "role.assigned"} <= {
             event.event_type for event in events
         }
+
+
+@pytest.mark.asyncio
+async def test_admin_creator_queue_notifies_reviewers_and_records_decision_reason(
+    db_session, monkeypatch, reviewed_pt_compliance_policy
+):
+    """A verified creator application becomes an actionable, audited admin queue item."""
+    from app.core.config import Settings
+
+    monkeypatch.setattr(
+        "app.api.routes.creators.get_settings",
+        lambda: Settings(environment="test", development_kyc_http_enabled=True),
+    )
+    admin, _ = await accounts.register(
+        db_session,
+        "creator-queue-admin@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    admin.email_verified_at = accounts._now()
+    await accounts.assign_role(db_session, admin, "admin", admin.id, None)
+    await db_session.commit()
+
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as applicant_client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as admin_client,
+    ):
+        applicant_email = "creator-queue-applicant@example.com"
+        assert (
+            await applicant_client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": applicant_email,
+                    "password": "strong-password-123",
+                    "adult_confirmed": True,
+                    "country_code": "PT",
+                    "legal_version_ids": [],
+                },
+            )
+        ).status_code == 201
+        await mark_email_verified(db_session, applicant_email)
+        assert (
+            await applicant_client.post(
+                "/api/v1/auth/login",
+                json={"email": applicant_email, "password": "strong-password-123"},
+            )
+        ).status_code == 200
+        assert (await applicant_client.post("/api/v1/creators/me/application")).status_code == 200
+        assert (
+            await applicant_client.patch(
+                "/api/v1/creators/me",
+                json={"username": "creator-queue", "display_name": "Queue Creator"},
+            )
+        ).status_code == 200
+        assert (await applicant_client.post("/api/v1/creators/me/submit")).status_code == 200
+        started_notification = await db_session.scalar(
+            select(InAppNotification).where(
+                InAppNotification.recipient_user_id == admin.id,
+                InAppNotification.notification_type == "CREATOR_APPLICATION_KYC_STARTED",
+            )
+        )
+        assert started_notification is not None
+        assert started_notification.target_path == "/admin/creators?status=pending_verification"
+        assert (
+            await applicant_client.post("/api/v1/creators/me/verification/development")
+        ).status_code == 200
+
+        notification = await db_session.scalar(
+            select(InAppNotification).where(
+                InAppNotification.recipient_user_id == admin.id,
+                InAppNotification.notification_type == "CREATOR_APPLICATION_REVIEW_REQUIRED",
+            )
+        )
+        assert notification is not None
+        assert notification.target_path == "/admin/creators?status=pending_review"
+        assert applicant_email not in notification.body
+
+        assert (
+            await admin_client.post(
+                "/api/v1/auth/login",
+                json={"email": admin.email, "password": "strong-password-123"},
+            )
+        ).status_code == 200
+        queue = await admin_client.get("/api/v1/admin/creator-applications?status=pending_review")
+        assert queue.status_code == 200
+        application = queue.json()[0]
+        assert application["email"] == applicant_email
+        assert application["review_ready"] is True
+        assert application["verification"]["status"] == "verified"
+        approved = await admin_client.post(
+            f"/api/v1/admin/creator-applications/{application['id']}/approve",
+            json={"reason": "Identity and application details reviewed."},
+        )
+        assert approved.status_code == 200
+
+    profile = await db_session.scalar(
+        select(CreatorProfile).where(CreatorProfile.username == "creator-queue")
+    )
+    assert profile is not None
+    assert profile.status is CreatorStatus.approved
+    history = await db_session.scalar(
+        select(CreatorStatusHistory)
+        .where(CreatorStatusHistory.creator_profile_id == profile.id)
+        .order_by(CreatorStatusHistory.created_at.desc())
+    )
+    assert history is not None
+    assert history.reason == "Identity and application details reviewed."

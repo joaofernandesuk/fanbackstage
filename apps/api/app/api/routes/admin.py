@@ -13,6 +13,7 @@ from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import Group, GroupCreatorMembership
+from app.models.identity import User
 from app.models.marketplace import (
     MarketplaceEarningsHoldPolicy,
     MarketplaceListing,
@@ -25,7 +26,7 @@ from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatu
 from app.models.story import Story
 from app.permissions.policies import Permission, authorize
 from app.referrals import service as referral_service
-from app.schemas.admin import MediaAudienceUpdate
+from app.schemas.admin import CreatorApplicationDecisionInput, MediaAudienceUpdate
 from app.schemas.auth import MessageResponse
 from app.schemas.marketplace import (
     MarketplaceHoldPolicyInput,
@@ -647,7 +648,11 @@ async def foundation(identity: CurrentIdentity) -> MessageResponse:
 
 
 async def review_action(
-    profile_id: str, target: CreatorStatus, identity: CurrentIdentity, db: Db
+    profile_id: str,
+    target: CreatorStatus,
+    payload: CreatorApplicationDecisionInput,
+    identity: CurrentIdentity,
+    db: Db,
 ) -> MessageResponse:
     authorize(identity[0], Permission.ADMIN_ACCESS)
     profile = await db.scalar(
@@ -656,7 +661,15 @@ async def review_action(
     if not profile:
         raise HTTPException(status_code=404, detail="Creator application not found")
     try:
-        await creator_service.set_status(db, profile, target, identity[0].id)
+        await creator_service.set_status(
+            db,
+            profile,
+            target,
+            identity[0].id,
+            payload.reason.strip()
+            if payload.reason
+            else "Creator application reviewed by an authorised administrator",
+        )
         await db.commit()
     except ValueError as exc:
         await db.rollback()
@@ -669,34 +682,99 @@ async def creator_applications(
     identity: CurrentIdentity, db: Db, status: CreatorStatus | None = None
 ):
     authorize(identity[0], Permission.ADMIN_ACCESS)
-    query = select(CreatorProfile)
+    query = select(CreatorProfile, User).join(User, User.id == CreatorProfile.user_id)
     if status:
         query = query.where(CreatorProfile.status == status)
-    rows = (await db.scalars(query.order_by(CreatorProfile.created_at))).all()
-    return [
-        {
-            "id": str(row.id),
-            "username": row.username,
-            "display_name": row.display_name,
-            "status": row.status.value,
-        }
-        for row in rows
-    ]
+    rows = (await db.execute(query.order_by(CreatorProfile.created_at))).all()
+    result = []
+    for profile, user in rows:
+        verification = await creator_service.latest_verification(db, profile.id)
+        result.append(
+            {
+                "id": str(profile.id),
+                "user_id": str(user.id),
+                "email": user.email,
+                "username": profile.username,
+                "display_name": profile.display_name,
+                "status": profile.status.value,
+                "submitted_at": profile.created_at.isoformat(),
+                "country_code": user.country_code,
+                "verification": {
+                    "status": verification.status.value if verification else "not_started",
+                    "provider": verification.provider if verification else None,
+                    "identity_verified": verification.identity_verified if verification else False,
+                    "adult_verified": verification.adult_verified if verification else False,
+                    "expires_at": verification.expires_at.isoformat()
+                    if verification and verification.expires_at
+                    else None,
+                    "failure_reason_code": verification.failure_reason_code
+                    if verification
+                    else None,
+                },
+                "review_ready": profile.status is CreatorStatus.pending_review,
+                "rejection_reason": profile.rejection_reason,
+                "profile": {
+                    "bio": profile.bio,
+                    "categories": [category.label for category in profile.categories],
+                    "languages": [language.label for language in profile.languages],
+                    "location": ", ".join(
+                        value
+                        for value in (profile.city, profile.region, user.country_code)
+                        if value
+                    )
+                    or None,
+                },
+            }
+        )
+    return result
 
 
 @router.post("/creator-applications/{profile_id}/approve", response_model=MessageResponse)
-async def approve_creator(profile_id: str, identity: CurrentIdentity, db: Db) -> MessageResponse:
-    return await review_action(profile_id, CreatorStatus.approved, identity, db)
+async def approve_creator(
+    profile_id: str,
+    identity: CurrentIdentity,
+    db: Db,
+    payload: CreatorApplicationDecisionInput | None = None,
+) -> MessageResponse:
+    return await review_action(
+        profile_id,
+        CreatorStatus.approved,
+        payload or CreatorApplicationDecisionInput(),
+        identity,
+        db,
+    )
 
 
 @router.post("/creator-applications/{profile_id}/reject", response_model=MessageResponse)
-async def reject_creator(profile_id: str, identity: CurrentIdentity, db: Db) -> MessageResponse:
-    return await review_action(profile_id, CreatorStatus.rejected, identity, db)
+async def reject_creator(
+    profile_id: str,
+    identity: CurrentIdentity,
+    db: Db,
+    payload: CreatorApplicationDecisionInput | None = None,
+) -> MessageResponse:
+    return await review_action(
+        profile_id,
+        CreatorStatus.rejected,
+        payload or CreatorApplicationDecisionInput(),
+        identity,
+        db,
+    )
 
 
 @router.post("/creator-applications/{profile_id}/suspend", response_model=MessageResponse)
-async def suspend_creator(profile_id: str, identity: CurrentIdentity, db: Db) -> MessageResponse:
-    return await review_action(profile_id, CreatorStatus.suspended, identity, db)
+async def suspend_creator(
+    profile_id: str,
+    identity: CurrentIdentity,
+    db: Db,
+    payload: CreatorApplicationDecisionInput | None = None,
+) -> MessageResponse:
+    return await review_action(
+        profile_id,
+        CreatorStatus.suspended,
+        payload or CreatorApplicationDecisionInput(),
+        identity,
+        db,
+    )
 
 
 async def content_review_action(

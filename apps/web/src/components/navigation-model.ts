@@ -93,6 +93,7 @@ export function accountNavigation(identity: NavigationIdentity): NavigationItem[
   if (hasAnyRole(identity, ["admin", "super_admin"])) {
     items.push(
       { label: "Platform Analytics", href: "/admin/analytics", group: "operations" },
+      { label: "Creator applications", href: "/admin/creators", group: "operations" },
       { label: "Discovery Controls", href: "/admin/discovery", group: "operations" },
       { label: "Featuring Admin", href: "/admin/featuring", group: "operations" },
       { label: "Referral Admin", href: "/admin/referrals", group: "operations" },

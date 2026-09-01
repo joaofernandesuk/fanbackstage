@@ -28,8 +28,9 @@ from app.models.creator import (
     CreatorVerification,
     VerificationStatus,
 )
-from app.models.identity import User
+from app.models.identity import Role, User
 from app.models.messaging import UserBlock
+from app.notifications.service import emit_transactional
 
 RESERVED_USERNAMES = frozenset(
     {
@@ -496,6 +497,46 @@ async def set_status(
         user = await db.get(User, profile.user_id)
         assert user is not None
         await assign_role(db, user, "creator", actor_user_id, None)
+    if status in {CreatorStatus.pending_verification, CreatorStatus.pending_review}:
+        # Admins can see the application from submission, but an approval
+        # notification is deliberately emitted only after identity verification
+        # has completed. Neither notification contains applicant PII or KYC evidence.
+        reviewers = (
+            await db.scalars(
+                select(User)
+                .join(User.roles)
+                .where(Role.name.in_(("admin", "super_admin")))
+                .distinct()
+            )
+        ).all()
+        for reviewer in reviewers:
+            await emit_transactional(
+                db,
+                recipient_user_id=reviewer.id,
+                notification_type=(
+                    "CREATOR_APPLICATION_REVIEW_REQUIRED"
+                    if status is CreatorStatus.pending_review
+                    else "CREATOR_APPLICATION_KYC_STARTED"
+                ),
+                source_domain="creator_application",
+                source_id=str(profile.id),
+                title=(
+                    "Creator application ready for review"
+                    if status is CreatorStatus.pending_review
+                    else "Creator application awaiting identity verification"
+                ),
+                body=(
+                    "A creator identity check is complete and an application is ready for an authorised decision."
+                    if status is CreatorStatus.pending_review
+                    else "A creator application has been submitted and is awaiting its identity-verification result."
+                ),
+                target_path=(
+                    "/admin/creators?status=pending_review"
+                    if status is CreatorStatus.pending_review
+                    else "/admin/creators?status=pending_verification"
+                ),
+                email=False,
+            )
     db.add(
         CreatorStatusHistory(
             creator_profile_id=profile.id,
