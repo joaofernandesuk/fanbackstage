@@ -1,0 +1,36 @@
+.dashboard { display: grid; gap: 22px; }
+.filters, .panel { background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-md); padding: 18px; }
+.filters { display: grid; gap: 14px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.filters legend { color: var(--text-primary); font-weight: 800; padding: 0 6px; }
+.filters label { color: var(--text-secondary); display: grid; font-size: .8rem; font-weight: 750; gap: 7px; }
+.filters input, .filters select { background: var(--surface-soft); border: 1px solid var(--border-strong); border-radius: 10px; min-height: 42px; padding: 0 12px; }
+.kpis { display: grid; gap: 14px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.kpis article { background: linear-gradient(145deg, rgb(22 32 61 / .94), rgb(16 19 39 / .95)); border: 1px solid var(--border-strong); border-radius: var(--radius-md); min-height: 138px; padding: 18px; }
+.kpis span, .panelHeader span, .composition header span { color: var(--text-muted); font-size: .76rem; font-weight: 700; }
+.kpis strong { display: block; font-size: clamp(1.75rem, 3vw, 2.6rem); margin: 13px 0 7px; }
+.kpis small { color: var(--success); font-weight: 750; }
+.panelHeader, .composition header { align-items: baseline; display: flex; gap: 10px; justify-content: space-between; }
+.panelHeader h2 { font-size: 1.2rem; margin: 0; }
+.composition { display: grid; gap: 16px; margin-top: 16px; }
+.composition article { border-top: 1px solid var(--border-subtle); padding-top: 14px; }
+.composition header { display: grid; grid-template-columns: 1fr auto; }
+.composition header span { grid-column: 1 / -1; }
+.compositionRow { align-items: center; display: grid; gap: 12px; grid-template-columns: minmax(130px, .9fr) minmax(80px, 2fr) auto; margin-top: 12px; }
+.compositionRow span { color: var(--text-secondary); font-size: .78rem; }
+.compositionRow i, .funnelRow i { background: var(--brand-gradient); border-radius: 999px; display: block; height: 8px; min-width: 3px; }
+.compositionRow b { color: var(--text-primary); font-size: .78rem; text-align: right; }
+.split { display: grid; gap: 22px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.funnel { display: grid; gap: 15px; margin-top: 18px; }
+.funnelRow > div { display: flex; justify-content: space-between; margin-bottom: 7px; }
+.funnelRow span { color: var(--text-muted); font-size: .85rem; }
+.retention { display: grid; gap: 14px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 18px; }
+.retention > div { border-left: 3px solid var(--brand-cyan); padding-left: 12px; }
+.retention b { color: var(--success); display: block; font-size: 1.5rem; margin-top: 8px; }
+.retention p { font-size: .78rem; margin: 5px 0 0; }
+.footer { align-items: center; display: flex; gap: 16px; justify-content: space-between; }
+.footer p { font-size: .82rem; margin: 0; max-width: 760px; }
+.loading, .error { border-radius: var(--radius-md); padding: 16px; }
+.loading { background: var(--surface-raised); }
+.error { background: rgb(255 98 124 / .12); border: 1px solid rgb(255 98 124 / .36); color: #ffd2dc; }
+@media (max-width: 900px) { .kpis, .retention { grid-template-columns: repeat(2, minmax(0, 1fr)); } .filters, .split { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .kpis, .retention { grid-template-columns: 1fr; } .footer { align-items: flex-start; flex-direction: column; } .compositionRow { grid-template-columns: 1fr minmax(70px, 1fr); } .compositionRow b { grid-column: 1 / -1; text-align: left; } }

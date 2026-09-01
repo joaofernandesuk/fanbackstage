@@ -1119,8 +1119,9 @@ async def platform_cohorts_retention_and_churn(
     creator_entries = (
         await db.execute(
             select(LedgerAccount.owner_creator_id, LedgerTransaction.effective_at)
-            .join(LedgerEntry)
-            .join(LedgerTransaction)
+            .select_from(LedgerEntry)
+            .join(LedgerAccount, LedgerAccount.id == LedgerEntry.ledger_account_id)
+            .join(LedgerTransaction, LedgerTransaction.id == LedgerEntry.transaction_id)
             .where(
                 LedgerAccount.owner_creator_id.is_not(None),
                 LedgerAccount.kind.in_(

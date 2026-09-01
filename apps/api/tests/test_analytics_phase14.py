@@ -144,6 +144,18 @@ async def test_attribution_dimensions_coexist_without_reclassifying_sponsored_as
 
 
 @pytest.mark.asyncio
+async def test_platform_cohort_query_has_an_explicit_creator_ledger_join(db_session):
+    now = datetime.now(UTC)
+
+    report = await service.platform_cohorts_retention_and_churn(
+        db_session, now - timedelta(days=1), now + timedelta(days=1)
+    )
+
+    assert report["metric_definition_version"] == "phase14.v1"
+    assert "creator_activity" in report["retention"]
+
+
+@pytest.mark.asyncio
 async def test_platform_and_creator_analytics_reconcile_immutable_reversal_history(db_session):
     owner, _ = await accounts.register(
         db_session, "analytics-reconcile@example.com", "strong-password-123", None

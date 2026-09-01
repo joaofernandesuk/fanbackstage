@@ -166,8 +166,8 @@ test("Phase 14 group analytics keeps historical allocations after contract chang
   const before = await api(page, `/analytics/groups/${group.body.id}/overview`);
   expect(before.status).toBe(200);
   expect(currency(before.body, "EUR").group_net_minor).toBe(order.group_amount_minor);
-  await page.goto("/groups/analytics"); await page.getByLabel("Group ID").fill(group.body.id); await page.getByRole("button", { name: "Load analytics" }).click();
-  await expect(page.getByText("Group KPIs")).toBeVisible();
+  await page.goto("/groups/analytics"); await expect(page.getByRole("heading", { name: "Group analytics", level: 1 })).toBeVisible();
+  await expect(page.getByText("Open a group workspace to review its authorised group analytics.")).toBeVisible();
   const amendment = await api(page, `/groups/memberships/${membership.body.id}/amendments`, "POST", { creator_basis_points: 8000 });
   await login(page, creator.email, creator.password);
   expect((await api(page, `/groups/contracts/${amendment.body.id}/accept`, "POST")).status).toBe(200);
