@@ -24,6 +24,7 @@ celery_app.conf.task_queues = tuple(
         "analytics",
         "financial",
         "scheduled",
+        "live_control",
     )
 )
 celery_app.conf.task_routes = {
@@ -35,13 +36,21 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.publish_scheduled_posts": {"queue": "scheduled"},
     "app.worker.tasks.expire_stories": {"queue": "scheduled"},
     "app.worker.tasks.process_scheduled_mass_messages": {"queue": "scheduled"},
-    "app.worker.tasks.reconcile_private_session_grace": {"queue": "scheduled"},
+    "app.worker.tasks.reconcile_private_session_grace": {
+        "queue": "live_control" if get_settings().environment == "development" else "scheduled"
+    },
+    "app.worker.tasks.expire_live_paid_requests": {"queue": "scheduled"},
     "app.worker.tasks.release_marketplace_earnings": {"queue": "financial"},
     "app.worker.tasks.expire_marketplace_reservations": {"queue": "scheduled"},
     "app.worker.tasks.reconcile_featuring_lifecycle": {"queue": "scheduled"},
     "app.worker.tasks.expire_consent_releases": {"queue": "scheduled"},
     "app.worker.tasks.reconcile_age_verifications": {"queue": "scheduled"},
-    "app.worker.tasks.process_live_provider_control_outbox": {"queue": "scheduled"},
+    "app.worker.tasks.process_live_provider_control_outbox": {
+        # Native macOS LiveKit is loopback-only. In development a small
+        # host-native worker owns this queue; deployed environments keep the
+        # task on the normal scheduled worker.
+        "queue": "live_control" if get_settings().environment == "development" else "scheduled"
+    },
     "app.worker.tasks.reconcile_legal_acceptance_notifications": {"queue": "scheduled"},
     "app.worker.tasks.deliver_notification": {"queue": "notifications"},
     "app.worker.tasks.reconcile_notification_delivery": {"queue": "notifications"},
@@ -79,6 +88,10 @@ celery_app.conf.beat_schedule = {
     "private-session-reconnect-grace": {
         "task": "app.worker.tasks.reconcile_private_session_grace",
         "schedule": 10.0,
+    },
+    "live-paid-request-expiry": {
+        "task": "app.worker.tasks.expire_live_paid_requests",
+        "schedule": 30.0,
     },
     "marketplace-earnings-release": {
         "task": "app.worker.tasks.release_marketplace_earnings",

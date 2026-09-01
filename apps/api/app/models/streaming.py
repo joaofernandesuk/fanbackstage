@@ -15,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, Timestamped, UUIDPrimaryKey
@@ -158,6 +159,217 @@ class LiveChatMessage(UUIDPrimaryKey, Timestamped, Base):
         Enum(LiveChatKind, name="live_chat_kind"), default=LiveChatKind.text
     )
     body: Mapped[str] = mapped_column(Text)
+
+
+class LiveEvent(UUIDPrimaryKey, Timestamped, Base):
+    """Canonical, replay-safe public activity projection for a Live context.
+
+    Product facts such as a ledger settlement or moderation command remain in
+    their owning domain. This append-only row is the one recoverable activity
+    source exposed to Live clients after reconnect, and references that fact
+    rather than duplicating its authority.
+    """
+
+    __tablename__ = "live_events"
+    __table_args__ = (
+        CheckConstraint(
+            "(live_room_id IS NOT NULL) OR (private_session_id IS NOT NULL)",
+            name="ck_live_event_context",
+        ),
+        CheckConstraint("btrim(event_type) <> ''", name="ck_live_event_type"),
+        CheckConstraint(
+            "amount_minor IS NULL OR amount_minor > 0", name="ck_live_event_positive_amount"
+        ),
+        UniqueConstraint("idempotency_key", name="uq_live_events_idempotency"),
+        Index("ix_live_events_room_occurred", "live_room_id", "occurred_at", "id"),
+        Index("ix_live_events_session_occurred", "private_session_id", "occurred_at", "id"),
+    )
+    live_room_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_rooms.id", ondelete="RESTRICT"), index=True
+    )
+    private_session_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("private_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    ledger_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ledger_transactions.id", ondelete="RESTRICT"), unique=True
+    )
+    source_type: Mapped[str | None] = mapped_column(String(80))
+    source_id: Mapped[str | None] = mapped_column(String(255))
+    amount_minor: Mapped[int | None] = mapped_column(Integer)
+    currency: Mapped[str | None] = mapped_column(String(3))
+    presentation_hidden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+class LiveCommerceKind(str, enum.Enum):
+    tip = "tip"
+    gift = "gift"
+    paid_request = "paid_request"
+
+
+class LiveCommerceStatus(str, enum.Enum):
+    pending_payment = "pending_payment"
+    paid_pending_creator = "paid_pending_creator"
+    accepted = "accepted"
+    declined = "declined"
+    completed = "completed"
+    refunded = "refunded"
+    expired = "expired"
+    disputed = "disputed"
+
+
+class LiveReactionType(str, enum.Enum):
+    love = "love"
+    fire = "fire"
+    applause = "applause"
+    wow = "wow"
+
+
+class LiveGiftCatalogItem(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "live_gift_catalog_items"
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_live_gift_amount_positive"),
+        CheckConstraint("btrim(name) <> ''", name="ck_live_gift_name"),
+    )
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    icon: Mapped[str] = mapped_column(String(120))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    category: Mapped[str | None] = mapped_column(String(48))
+
+
+class LiveTipMenuItem(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "live_tip_menu_items"
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_live_tip_menu_amount_positive"),
+        CheckConstraint("btrim(label) <> ''", name="ck_live_tip_menu_label"),
+        UniqueConstraint("creator_id", "sort_order", name="uq_live_tip_menu_creator_order"),
+    )
+    creator_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="CASCADE"), index=True
+    )
+    label: Mapped[str] = mapped_column(String(100))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class LivePaidRequestOption(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "live_paid_request_options"
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_live_paid_request_option_amount_positive"),
+        CheckConstraint("btrim(label) <> ''", name="ck_live_paid_request_option_label"),
+    )
+    creator_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="CASCADE"), index=True
+    )
+    label: Mapped[str] = mapped_column(String(100))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    requires_creator_acceptance: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+
+
+class LiveGoal(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "live_goals"
+    __table_args__ = (
+        CheckConstraint("target_amount_minor > 0", name="ck_live_goal_target_positive"),
+        CheckConstraint("btrim(title) <> ''", name="ck_live_goal_title"),
+    )
+    creator_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(140))
+    target_amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveCommerceCharge(UUIDPrimaryKey, Timestamped, Base):
+    """One payment-backed Live action with frozen settlement inputs."""
+
+    __tablename__ = "live_commerce_charges"
+    __table_args__ = (
+        CheckConstraint("gross_amount_minor > 0", name="ck_live_charge_gross_positive"),
+        CheckConstraint("commission_basis_points >= 0", name="ck_live_charge_commission"),
+        Index("ix_live_charge_room_status", "live_room_id", "status", "created_at"),
+    )
+    live_room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("live_rooms.id", ondelete="RESTRICT"), index=True
+    )
+    creator_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="RESTRICT"), index=True
+    )
+    buyer_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    kind: Mapped[LiveCommerceKind] = mapped_column(
+        Enum(LiveCommerceKind, name="live_commerce_kind"), index=True
+    )
+    status: Mapped[LiveCommerceStatus] = mapped_column(
+        Enum(LiveCommerceStatus, name="live_commerce_status"), index=True
+    )
+    gift_catalog_item_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_gift_catalog_items.id", ondelete="RESTRICT")
+    )
+    tip_menu_item_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_tip_menu_items.id", ondelete="RESTRICT")
+    )
+    paid_request_option_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_paid_request_options.id", ondelete="RESTRICT")
+    )
+    request_label: Mapped[str | None] = mapped_column(String(100))
+    request_message: Mapped[str | None] = mapped_column(String(500))
+    gross_amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    commission_basis_points: Mapped[int] = mapped_column(Integer)
+    payment_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="RESTRICT"), unique=True
+    )
+    ledger_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ledger_transactions.id", ondelete="RESTRICT"), unique=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    creator_acceptance_required: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+
+
+class LiveReactionAggregate(UUIDPrimaryKey, Timestamped, Base):
+    """Bounded per-room counters; individual reaction bursts are deliberately ephemeral."""
+
+    __tablename__ = "live_reaction_aggregates"
+    __table_args__ = (
+        CheckConstraint(
+            "reaction_count >= 0", name="ck_live_reaction_aggregate_nonnegative"
+        ),
+        UniqueConstraint(
+            "live_room_id",
+            "reaction_type",
+            name="uq_live_reaction_aggregate_room_type",
+        ),
+    )
+    live_room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("live_rooms.id", ondelete="CASCADE"), index=True
+    )
+    reaction_type: Mapped[LiveReactionType] = mapped_column(
+        Enum(LiveReactionType, name="live_reaction_type")
+    )
+    reaction_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class LiveBan(UUIDPrimaryKey, Timestamped, Base):

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Room } from "livekit-client";
 
 import { api, ApiError } from "../lib/api";
+import { completePaymentCheckout } from "../lib/payments";
 
 type PrivateSession = {
   id: string;
@@ -50,8 +51,11 @@ export function PrivateSessionRoom() {
       // The development provider endpoint exercises the same signed Phase 3
       // settlement path used by its webhook; production checkout stays owned
       // by the configured payment provider.
-      await api(`/payments/development/${session.payment_attempt_id}/complete`, { method: "POST" });
-      setMessage("Payment authorization verified. You can now join the private room.");
+      setMessage(
+        await completePaymentCheckout(session.payment_attempt_id)
+          ? "Payment authorization verified. You can now join the private room."
+          : "Payment started. Room access activates after provider confirmation.",
+      );
       await refresh();
     } catch (caught) {
       setMessage(caught instanceof ApiError ? caught.message : "Payment authorization failed");

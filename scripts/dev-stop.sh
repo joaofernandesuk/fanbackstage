@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+./scripts/livekit-control-local.sh stop
+./scripts/livekit-local.sh stop
+
 state_dir=".fanbackstage-dev"
 if [ -d "$state_dir" ]; then
   for pid_file in "$state_dir"/*.pid; do

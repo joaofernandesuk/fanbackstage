@@ -16,7 +16,7 @@ from app.models.finance import CommissionRule, PaymentAttempt, Purchase
 from app.models.marketplace import MarketplaceOrder
 from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
 from app.models.notification import NotificationIntent
-from app.models.streaming import PrivateSession
+from app.models.streaming import LiveCommerceCharge, PrivateSession
 from app.models.subscription import SubscriptionPeriod
 from app.permissions.policies import Permission, authorize
 from app.schemas.finance import (
@@ -192,6 +192,15 @@ async def complete_development_payment(
         return DevelopmentPaymentCompletionResponse(
             id=private_session.id,
             status=private_session.status.value,
+            payment_attempt_id=attempt.id,
+        )
+    live_charge = await db.scalar(
+        select(LiveCommerceCharge).where(LiveCommerceCharge.payment_attempt_id == attempt.id)
+    )
+    if live_charge is not None:
+        return DevelopmentPaymentCompletionResponse(
+            id=live_charge.id,
+            status=live_charge.status.value,
             payment_attempt_id=attempt.id,
         )
     order = await db.scalar(

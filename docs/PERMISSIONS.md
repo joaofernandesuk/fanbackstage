@@ -42,6 +42,8 @@ audits only an actual state change. Creator KYC state is not editable by creator
 managers. Public serving uses the latest verification outcome and fails closed when it is
 not currently verified and adult-confirming.
 
+In Live, viewers may submit only currently enabled server-priced request options and bounded reactions after room access is re-authorised. Only the owning creator may accept or decline that room's pending paid requests. Reports resolve through central Trust & Safety authorization. `moderation.enforce` may remove a non-creator participant by creating an audited, durable LiveKit control intent; creator removal requires the separate room-termination authority. None of these permissions permits editing ledger history or leaderboard truth.
+
 # 21. Group / Agency Management
 
 Group management is a core contract and permission system, not a simple foreign key from creator to agency.

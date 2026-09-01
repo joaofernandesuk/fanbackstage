@@ -168,6 +168,8 @@ def test_production_accepts_explicit_asyncpg_database_tls_modes(tls_mode):
         ("livekit_url", "wss://[::1]:7880", "LIVEKIT_URL"),
         ("livekit_url", "wss://token@livekit.example.com", "LIVEKIT_URL"),
         ("livekit_url", "wss://livekit.example.com?token=secret", "LIVEKIT_URL"),
+        ("livekit_control_url", "ws://livekit.internal", "LIVEKIT_CONTROL_URL"),
+        ("livekit_control_url", "wss://127.0.0.1:7880", "LIVEKIT_CONTROL_URL"),
     ],
 )
 def test_production_rejects_malformed_or_local_transport_endpoints(field, value, message):

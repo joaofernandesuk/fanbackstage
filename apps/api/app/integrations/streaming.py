@@ -16,6 +16,12 @@ class StreamingProviderError(RuntimeError):
     pass
 
 
+def _livekit_control_base_url() -> str:
+    settings = get_settings()
+    control_url = settings.livekit_control_url or settings.livekit_url
+    return control_url.replace("ws://", "http://").replace("wss://", "https://")
+
+
 class _RejectLiveKitRedirects(HTTPRedirectHandler):
     """Never forward a signed RoomService JWT to a redirect destination."""
 
@@ -160,8 +166,7 @@ class LiveKitStreamingProvider(StreamingProvider):
         *,
         missing_ok: bool,
     ) -> None:
-        settings = get_settings()
-        base_url = settings.livekit_url.replace("ws://", "http://").replace("wss://", "https://")
+        base_url = _livekit_control_base_url()
         room_name = payload.get("room")
         token = await self._service_token(
             room_name=room_name if method == "RemoveParticipant" else None,
@@ -238,8 +243,7 @@ class LiveKitStreamingProvider(StreamingProvider):
 
     async def list_participant_identities(self, room_name: str) -> set[str]:
         """Read provider room membership for replay-safe repair; never trusts browsers."""
-        settings = get_settings()
-        base_url = settings.livekit_url.replace("ws://", "http://").replace("wss://", "https://")
+        base_url = _livekit_control_base_url()
         token = await self._service_token(room_name=room_name)
 
         def request() -> set[str]:

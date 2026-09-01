@@ -1173,8 +1173,12 @@
 .liveChat {
   border-left: 1px solid var(--border-subtle);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
+}
+
+.liveChatCreator {
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .liveChat h2 {
@@ -1182,6 +1186,80 @@
   font-size: 0.95rem;
   margin: 0;
   padding: 18px;
+}
+
+.liveInteractions {
+  background:
+    radial-gradient(circle at 0 0, rgb(39 158 255 / 0.16), transparent 60%),
+    linear-gradient(135deg, rgb(157 86 247 / 0.11), rgb(236 72 153 / 0.05));
+  border-bottom: 1px solid var(--border-subtle);
+  display: grid;
+  gap: 9px;
+  padding: 15px;
+}
+
+.liveInteractions > div {
+  display: grid;
+  gap: 4px;
+}
+
+.liveInteractions span {
+  color: var(--brand-cyan);
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+}
+
+.liveInteractions strong {
+  font-size: 0.83rem;
+}
+
+.liveInteractions p {
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.privateRequestButton {
+  background: linear-gradient(100deg, var(--brand-cyan), var(--brand-purple), var(--brand-pink));
+  border: 0;
+  border-radius: 999px;
+  box-shadow: 0 12px 24px rgb(67 92 255 / 0.17);
+  color: var(--brand-midnight);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 900;
+  min-height: 38px;
+  padding: 9px 13px;
+}
+
+.privateRequestButton:disabled {
+  cursor: wait;
+  opacity: 0.66;
+}
+
+.liveInteractionSuccess {
+  background: rgb(52 211 153 / 0.1);
+  border: 1px solid rgb(52 211 153 / 0.28);
+  border-radius: 11px;
+  color: #a7f3d0 !important;
+  padding: 9px 10px;
+}
+
+.liveInteractionPrice {
+  color: var(--text-muted) !important;
+}
+
+.liveProfileLink {
+  color: var(--brand-cyan);
+  font-size: 0.68rem;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.liveProfileLink:hover {
+  text-decoration: underline;
 }
 
 .liveChatMessages {
@@ -1215,6 +1293,7 @@
 }
 
 .liveChat form button {
+  align-self: center;
   background: var(--brand-cyan);
   border: 0;
   border-radius: 999px;
@@ -1223,6 +1302,7 @@
   font-size: 0.68rem;
   font-weight: 900;
   padding: 8px 13px;
+  white-space: nowrap;
 }
 
 /* Inbox */

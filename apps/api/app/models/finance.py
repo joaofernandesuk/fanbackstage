@@ -45,6 +45,9 @@ class LedgerTransactionType(str, enum.Enum):
     subscription_charge = "subscription_charge"
     messaging_charge = "messaging_charge"
     private_live_session = "private_live_session"
+    live_tip = "live_tip"
+    live_gift = "live_gift"
+    live_paid_request = "live_paid_request"
     marketplace_order = "marketplace_order"
     featuring_charge = "featuring_charge"
     excess_capture_liability = "excess_capture_liability"
@@ -82,6 +85,7 @@ class ExcessCaptureSource(str, enum.Enum):
     message_unlock = "message_unlock"
     paid_message_send = "paid_message_send"
     private_live_session = "private_live_session"
+    live_paid_request = "live_paid_request"
 
 
 class LedgerAccount(UUIDPrimaryKey, Timestamped, Base):

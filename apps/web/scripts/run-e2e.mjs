@@ -20,7 +20,7 @@ const livekitPort = process.env.E2E_LIVEKIT_PORT ?? "17890";
 const livekitTcpPort = process.env.E2E_LIVEKIT_TCP_PORT ?? "17891";
 const livekitUdpPort = process.env.E2E_LIVEKIT_UDP_PORT ?? "17892";
 const livekitContainer = `fanbackstage-e2e-livekit-${process.pid}`;
-const livekitImage = process.env.E2E_LIVEKIT_IMAGE ?? "livekit/livekit-server:latest";
+const livekitImage = process.env.E2E_LIVEKIT_IMAGE ?? "livekit/livekit-server:v1.13.5";
 const databaseUrl = process.env.FANBACKSTAGE_DATABASE_URL;
 const storageEndpoint =
   process.env.E2E_STORAGE_ENDPOINT_URL ?? process.env.FANBACKSTAGE_STORAGE_ENDPOINT_URL;

@@ -83,6 +83,8 @@ marketplace, featuring, messaging and private live. It freezes the source,
 amount, currency, liability ledger transaction, eventual compensating reversal
 and provider resolution reference; it is not an entitlement or mutable balance.
 
+Phase 7 Live commerce keeps creator-owned `LivePaidRequestOption` rows separate from immutable request snapshots on `LiveCommerceCharge`. Acceptance-required charges move from verified payment to a creator decision before their single settlement/event can exist. `LiveReactionAggregate` stores one bounded counter per room and reaction type; it is engagement state, not a canonical financial event. Current-room supporter rankings are queries over eligible ledger-linked `LiveEvent` rows and therefore have no editable leaderboard table.
+
 
 ## 36.2 Subscription
 

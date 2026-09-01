@@ -3,6 +3,9 @@ bind_addresses: ["0.0.0.0"]
 rtc:
   use_external_ip: false
   node_ip: 127.0.0.1
+  # Docker Desktop publishes this local media port back to the host. Retain
+  # the loopback candidate so a host browser can form an ICE pair with it.
+  enable_loopback_candidate: true
   tcp_port: 7881
   udp_port: 7882
 keys:

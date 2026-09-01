@@ -94,9 +94,20 @@ async def enforce_streaming_rate_limit(request: Request, subject: str, action: s
     redis = Redis.from_url(settings.redis_url)
     try:
         attempts = await redis.incr(key)
+        is_reaction = action == "live_reaction"
+        window = (
+            settings.streaming_reaction_rate_limit_window_seconds
+            if is_reaction
+            else settings.streaming_rate_limit_window_seconds
+        )
+        limit = (
+            settings.streaming_reaction_rate_limit_attempts
+            if is_reaction
+            else settings.streaming_rate_limit_attempts
+        )
         if attempts == 1:
-            await redis.expire(key, settings.streaming_rate_limit_window_seconds)
-        if attempts > settings.streaming_rate_limit_attempts:
+            await redis.expire(key, window)
+        if attempts > limit:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many streaming actions. Please try again later.",

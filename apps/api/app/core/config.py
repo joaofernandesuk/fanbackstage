@@ -205,13 +205,16 @@ class Settings(BaseSettings):
     subscription_grace_period_days: int = 3
     subscription_renewal_retry_limit: int = 3
     subscription_renewal_retry_seconds: int = 300
-    livekit_url: str = "ws://localhost:7880"
+    livekit_url: str = "ws://localhost:17880"
+    livekit_control_url: str | None = None
     livekit_api_key: str = "devkey"
     livekit_api_secret: str = "fanbackstage-livekit-development-secret-2026"
     livekit_token_ttl_seconds: int = 300
     streaming_reconnect_grace_seconds: int = 30
     streaming_rate_limit_attempts: int = 30
     streaming_rate_limit_window_seconds: int = 60
+    streaming_reaction_rate_limit_attempts: int = 8
+    streaming_reaction_rate_limit_window_seconds: int = 5
     discovery_rate_limit_attempts: int = 60
     discovery_rate_limit_window_seconds: int = 60
     demo_seed_enabled: bool = False
@@ -332,6 +335,12 @@ class Settings(BaseSettings):
             self.trusted_proxy_cidrs,
         )
         _require_production_endpoint("FANBACKSTAGE_LIVEKIT_URL", self.livekit_url, scheme="wss")
+        if self.livekit_control_url:
+            _require_production_endpoint(
+                "FANBACKSTAGE_LIVEKIT_CONTROL_URL",
+                self.livekit_control_url,
+                scheme="wss",
+            )
         try:
             database = make_url(self.database_url)
         except (TypeError, ValueError) as exc:

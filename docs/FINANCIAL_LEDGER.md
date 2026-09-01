@@ -4,6 +4,8 @@ Phase 6 message unlocks and paid sends are `messaging_charge` ledger transaction
 
 Phase 7 private sessions use the `private_live_session` transaction type. The request snapshots the per-minute rate, minimum charge, currency, authorization cap, participant mode and commission before acceptance. Server-persisted billable seconds—not browser timers—produce one deterministic final charge: `ceil(rate_minor * billable_seconds / 60)`, bounded by the authorization cap and raised to the configured minimum where applicable. Settlement and refunds use the existing immutable-ledger compensating-entry path; never mutable session balances.
 
+Phase 7 public Live tips, gifts, and accepted paid requests settle through the `live_commerce` transaction type. A paid request snapshots its server-owned option price and acceptance requirement. Verified capture is necessary but does not settle an acceptance-required request; creator acceptance creates exactly one ledger transaction. Decline, expiry, or late success after expiry records a `live_paid_request` excess-capture refund requirement and liability transaction. Supporter rankings and goals read eligible canonical Live events linked to these immutable transactions and exclude reversed/refunded value.
+
 Financial source-of-truth rules. Any feature creating economic value must integrate here rather than maintaining its own balance.
 
 # 22. Unified Wallet and Immutable Financial Ledger

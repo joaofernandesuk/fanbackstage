@@ -25,7 +25,13 @@ from app.models.identity import User
 from app.models.marketplace import MarketplaceListing, MarketplaceOrder
 from app.models.messaging import Message
 from app.models.social import FeedPost, PostComment
-from app.models.streaming import LiveChatMessage, LiveRoom
+from app.models.streaming import (
+    LiveChatMessage,
+    LiveCommerceCharge,
+    LiveCommerceKind,
+    LiveParticipant,
+    LiveRoom,
+)
 from app.models.trust_safety import (
     AppealStatus,
     ConsentRelease,
@@ -84,6 +90,7 @@ async def target_snapshot(
         ReportTargetType.message: (Message, "id"),
         ReportTargetType.live_room: (LiveRoom, "id"),
         ReportTargetType.live_chat_message: (LiveChatMessage, "id"),
+        ReportTargetType.live_paid_request: (LiveCommerceCharge, "id"),
         ReportTargetType.marketplace_listing: (MarketplaceListing, "id"),
         ReportTargetType.marketplace_order: (MarketplaceOrder, "id"),
         ReportTargetType.featured_placement: (FeatureBooking, "id"),
@@ -150,6 +157,33 @@ async def target_snapshot(
         )
         if reporter.id not in {row.buyer_user_id, seller_user_id}:
             raise TrustSafetyError("Report target not found")
+    elif isinstance(row, LiveRoom):
+        participant = await db.scalar(
+            select(LiveParticipant.id).where(
+                LiveParticipant.live_room_id == row.id,
+                LiveParticipant.user_id == reporter.id,
+            )
+        )
+        if participant is None:
+            raise TrustSafetyError("Report target not found")
+    elif isinstance(row, LiveChatMessage):
+        participant = await db.scalar(
+            select(LiveParticipant.id).where(
+                LiveParticipant.live_room_id == row.live_room_id,
+                LiveParticipant.user_id == reporter.id,
+            )
+        )
+        if participant is None:
+            raise TrustSafetyError("Report target not found")
+    elif isinstance(row, LiveCommerceCharge):
+        creator_user_id = await db.scalar(
+            select(CreatorProfile.user_id).where(CreatorProfile.id == row.creator_id)
+        )
+        if (
+            row.kind is not LiveCommerceKind.paid_request
+            or reporter.id not in {row.buyer_user_id, creator_user_id}
+        ):
+            raise TrustSafetyError("Report target not found")
 
     snapshot = {"target_type": target_type.value, "target_id": str(target_id)}
     for field in ("public_id", "owner_creator_id", "creator_id", "sender_user_id", "status"):
@@ -171,7 +205,11 @@ def queue_for(target_type: ReportTargetType, reason: ReportReason) -> Moderation
         ReportTargetType.marketplace_order,
     }:
         return ModerationQueue.marketplace
-    if target_type in {ReportTargetType.live_room, ReportTargetType.live_chat_message}:
+    if target_type in {
+        ReportTargetType.live_room,
+        ReportTargetType.live_chat_message,
+        ReportTargetType.live_paid_request,
+    }:
         return ModerationQueue.live
     return (
         ModerationQueue.content
@@ -479,6 +517,43 @@ async def enforce_live_termination(
         action_type=ModerationActionType.live_terminate,
         target_type=ReportTargetType.live_room,
         target_id=room_id,
+        actor_user_id=actor.id,
+        reason=reason,
+    )
+    db.add(action)
+    await db.flush()
+    return action
+
+
+async def enforce_live_participant_removal(
+    db: AsyncSession,
+    case: ModerationCase,
+    actor: User,
+    user_id: UUID,
+    reason: str,
+) -> ModerationAction:
+    if case.primary_target_type is not ReportTargetType.live_room:
+        raise TrustSafetyError("Participant removal requires a Live room case")
+    existing = await db.scalar(
+        select(ModerationAction).where(
+            ModerationAction.case_id == case.id,
+            ModerationAction.action_type == ModerationActionType.live_participant_remove,
+            ModerationAction.target_type == ReportTargetType.user,
+            ModerationAction.target_id == user_id,
+        )
+    )
+    if existing:
+        return existing
+    from app.streaming import service as streaming_service
+
+    await streaming_service.remove_live_participant_for_moderation(
+        db, actor, case.primary_target_id, user_id, reason
+    )
+    action = ModerationAction(
+        case_id=case.id,
+        action_type=ModerationActionType.live_participant_remove,
+        target_type=ReportTargetType.user,
+        target_id=user_id,
         actor_user_id=actor.id,
         reason=reason,
     )

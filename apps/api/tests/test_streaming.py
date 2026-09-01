@@ -34,7 +34,12 @@ from app.models.messaging import UserBlock
 from app.models.streaming import (
     LiveAccessMode,
     LiveChatMessage,
+    LiveCommerceCharge,
+    LiveCommerceStatus,
+    LiveEvent,
+    LiveGiftCatalogItem,
     LiveParticipant,
+    LiveReactionAggregate,
     LiveRecording,
     LiveRecordingStatus,
     LiveReport,
@@ -48,8 +53,10 @@ from app.models.streaming import (
     ProviderLiveEvent,
     SessionParticipant,
 )
+from app.models.trust_safety import ReportReason, ReportTargetType
 from app.streaming import service as streaming
 from app.streaming.control_outbox import process_due_live_provider_control_intents
+from app.trust_safety import service as trust_safety
 
 
 class _StreamingAccounts:
@@ -195,6 +202,13 @@ async def test_livekit_room_controls_use_authenticated_twirp_and_token_exp_is_au
         return Response()
 
     monkeypatch.setattr(streaming_integration, "_open_livekit_request", capture)
+    settings = get_settings().model_copy(
+        update={
+            "livekit_url": "ws://browser-livekit.example:17880",
+            "livekit_control_url": "ws://control-livekit.internal:17880",
+        }
+    )
+    monkeypatch.setattr(streaming_integration, "get_settings", lambda: settings)
     provider = LiveKitStreamingProvider()
     authority_expiry = datetime.now(UTC) + timedelta(seconds=30)
     token = await provider.participant_token(
@@ -218,6 +232,7 @@ async def test_livekit_room_controls_use_authenticated_twirp_and_token_exp_is_au
         "RemoveParticipant",
         "DeleteRoom",
     ]
+    assert all(request.full_url.startswith("http://control-livekit.internal:17880/") for request in requests)
     assert json.loads(requests[0].data) == {
         "room": "room-authority",
         "identity": "fan-authority",
@@ -306,6 +321,17 @@ async def creator(db, email):
     await creators.set_status(db, profile, CreatorStatus.approved, user.id)
     profile.is_public = True
     return user, profile
+
+
+@pytest.mark.asyncio
+async def test_creator_can_recover_only_their_current_public_live_room(db_session):
+    owner, _ = await creator(db_session, "live-recovery-owner@example.com")
+    other, _ = await creator(db_session, "live-recovery-other@example.com")
+    room = await streaming.start_live(db_session, owner, "Already live", LiveAccessMode.public)
+    await streaming.start_live(db_session, other, "Someone else's live", LiveAccessMode.public)
+
+    assert (await streaming.current_creator_public_live_room(db_session, owner)).id == room.id
+    assert (await streaming.current_creator_public_live_room(db_session, other)).id != room.id
 
 
 @pytest.mark.asyncio
@@ -445,6 +471,275 @@ async def test_creator_compliance_denial_precedes_private_acceptance_and_payment
         is None
     )
     assert await db_session.scalar(select(PaymentAttempt.id)) is None
+
+
+@pytest.mark.asyncio
+async def test_creator_can_decline_pending_private_request_without_creating_payment(
+    db_session,
+):
+    owner, profile = await creator(db_session, "private-decline-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session,
+        "private-decline-viewer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    request = await streaming.request_private_session(
+        db_session, viewer, profile.id, PrivateSessionMode.one_to_one
+    )
+
+    declined = await streaming.decline_private_request(db_session, owner, request.id)
+
+    assert declined.status is PrivateRequestStatus.rejected
+    assert await db_session.scalar(select(PaymentAttempt.id)) is None
+    with pytest.raises(streaming.StreamingError, match="not pending"):
+        await streaming.decline_private_request(db_session, owner, request.id)
+
+
+@pytest.mark.asyncio
+async def test_live_tip_and_gift_settle_once_then_emit_one_activity_event(db_session):
+    owner, _ = await creator(db_session, "live-commerce-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session, "live-commerce-viewer@example.com", "strong-password-123", None, country_code="PT"
+    )
+    room = await streaming.start_live(db_session, owner, "Commerce live", LiveAccessMode.public)
+    await streaming.join_live(db_session, viewer, room.id)
+    tip = await streaming.initiate_live_tip(db_session, viewer, room.id, "tip-1", amount_minor=250)
+    tip_attempt = await db_session.get(PaymentAttempt, tip.payment_attempt_id)
+    assert tip_attempt and tip.status is LiveCommerceStatus.pending_payment
+    payload, signature = finance.development_webhook_payload(tip_attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    await finance.process_development_webhook(db_session, payload, signature)
+    assert tip.status is LiveCommerceStatus.completed and tip.ledger_transaction_id
+    assert len((await db_session.scalars(select(LedgerTransaction).where(LedgerTransaction.id == tip.ledger_transaction_id))).all()) == 1
+    events = await streaming.live_activity_history(db_session, viewer, room.id)
+    assert [event.event_type for event in events] == ["tip"]
+
+    gift = LiveGiftCatalogItem(name="Rose", icon="/live/gifts/rose.svg", amount_minor=300, currency="EUR")
+    db_session.add(gift)
+    await db_session.flush()
+    charge = await streaming.initiate_live_gift(db_session, viewer, room.id, gift.id, "gift-1")
+    attempt = await db_session.get(PaymentAttempt, charge.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    assert charge.status is LiveCommerceStatus.completed and charge.ledger_transaction_id
+    assert len((await db_session.scalars(select(LiveCommerceCharge))).all()) == 2
+    assert [event.event_type for event in await streaming.live_activity_history(db_session, viewer, room.id)] == ["tip", "gift"]
+
+
+@pytest.mark.asyncio
+async def test_paid_request_snapshots_price_waits_for_creator_and_settles_once(db_session):
+    owner, _ = await creator(db_session, "paid-request-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session,
+        "paid-request-viewer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    room = await streaming.start_live(db_session, owner, "Requests", LiveAccessMode.public)
+    await streaming.join_live(db_session, viewer, room.id)
+    option = await streaming.save_paid_request_option(
+        db_session,
+        owner,
+        label="Choose the next song",
+        amount_minor=700,
+        enabled=True,
+        sort_order=0,
+        requires_creator_acceptance=True,
+    )
+    charge = await streaming.initiate_live_paid_request(
+        db_session, viewer, room.id, option.id, "My request", "request-1"
+    )
+    option.amount_minor = 999
+    attempt = await db_session.get(PaymentAttempt, charge.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+
+    assert charge.status is LiveCommerceStatus.paid_pending_creator
+    assert charge.gross_amount_minor == 700
+    assert charge.ledger_transaction_id is None
+    assert await db_session.scalar(
+        select(LedgerTransaction.id).where(
+            LedgerTransaction.transaction_type == LedgerTransactionType.live_paid_request
+        )
+    ) is None
+
+    accepted = await streaming.accept_paid_request(db_session, owner, charge.id)
+    replay = await streaming.accept_paid_request(db_session, owner, charge.id)
+    assert accepted.id == replay.id
+    assert accepted.status is LiveCommerceStatus.completed
+    assert accepted.ledger_transaction_id
+    assert len(
+        (
+            await db_session.scalars(
+                select(LedgerTransaction).where(
+                    LedgerTransaction.transaction_type
+                    == LedgerTransactionType.live_paid_request
+                )
+            )
+        ).all()
+    ) == 1
+    assert [
+        event.event_type
+        for event in await streaming.live_activity_history(db_session, viewer, room.id)
+    ] == ["paid_request_pending", "paid_request"]
+    ranking = await streaming.live_supporter_ranking(db_session, viewer, room.id)
+    assert ranking == [
+        {
+            "rank": 1,
+            "amount_minor": 700,
+            "currency": "EUR",
+            "supporter_label": "You",
+            "viewer_is_current_user": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_paid_request_decline_and_expiry_require_refunds_without_success_ledger(
+    db_session,
+):
+    owner, _ = await creator(db_session, "paid-request-refund-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session,
+        "paid-request-refund-viewer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    room = await streaming.start_live(db_session, owner, "Refund requests", LiveAccessMode.public)
+    await streaming.join_live(db_session, viewer, room.id)
+    option = await streaming.save_paid_request_option(
+        db_session,
+        owner,
+        label="Request",
+        amount_minor=500,
+        enabled=True,
+        sort_order=0,
+        requires_creator_acceptance=True,
+    )
+
+    declined = await streaming.initiate_live_paid_request(
+        db_session, viewer, room.id, option.id, "Decline me", "request-decline"
+    )
+    attempt = await db_session.get(PaymentAttempt, declined.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    await streaming.decline_paid_request(db_session, owner, declined.id)
+    assert declined.status is LiveCommerceStatus.declined
+
+    expiring = await streaming.initiate_live_paid_request(
+        db_session, viewer, room.id, option.id, "Expire me", "request-expire"
+    )
+    expiring_attempt = await db_session.get(PaymentAttempt, expiring.payment_attempt_id)
+    assert expiring_attempt
+    payload, signature = finance.development_webhook_payload(expiring_attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    expiring.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert await streaming.expire_paid_requests(db_session) == 1
+    assert expiring.status is LiveCommerceStatus.expired
+    assert len((await db_session.scalars(select(PaymentRefundRequirement))).all()) == 2
+    assert await db_session.scalar(
+        select(LedgerTransaction.id).where(
+            LedgerTransaction.transaction_type == LedgerTransactionType.live_paid_request
+        )
+    ) is None
+    assert [
+        event.event_type
+        for event in await streaming.live_activity_history(db_session, viewer, room.id)
+    ] == [
+        "paid_request_pending",
+        "paid_request_declined",
+        "paid_request_pending",
+        "paid_request_expired",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_live_reactions_are_bounded_aggregates_and_reversed_value_leaves_ranking(
+    db_session,
+):
+    owner, _ = await creator(db_session, "reaction-ranking-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session,
+        "reaction-ranking-viewer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    room = await streaming.start_live(db_session, owner, "React", LiveAccessMode.public)
+    await streaming.join_live(db_session, viewer, room.id)
+    await streaming.add_live_reaction(db_session, viewer, room.id, "love")
+    counts = await streaming.add_live_reaction(db_session, viewer, room.id, "love")
+    assert counts == {"love": 2}
+    assert len((await db_session.scalars(select(LiveReactionAggregate))).all()) == 1
+    assert await db_session.scalar(
+        select(LiveEvent.id).where(LiveEvent.event_type == "reaction")
+    ) is None
+    with pytest.raises(streaming.StreamingError, match="Unsupported"):
+        await streaming.add_live_reaction(db_session, viewer, room.id, "unbounded")
+
+    tip = await streaming.initiate_live_tip(
+        db_session, viewer, room.id, "ranking-tip", amount_minor=250
+    )
+    attempt = await db_session.get(PaymentAttempt, tip.payment_attempt_id)
+    assert attempt
+    payload, signature = finance.development_webhook_payload(attempt)
+    await finance.process_development_webhook(db_session, payload, signature)
+    assert (await streaming.live_supporter_ranking(db_session, viewer, room.id))[0][
+        "amount_minor"
+    ] == 250
+    await streaming.reverse_live_commerce_charge(
+        db_session,
+        attempt,
+        resolution_type=LedgerTransactionType.refund,
+        provider_event_id="ranking-refund",
+    )
+    assert await streaming.live_supporter_ranking(db_session, viewer, room.id) == []
+
+
+@pytest.mark.asyncio
+async def test_live_report_uses_trust_safety_and_participant_removal_uses_outbox(
+    db_session, livekit_control
+):
+    owner, _ = await creator(db_session, "ts-live-owner@example.com")
+    viewer, _ = await accounts.register(
+        db_session,
+        "ts-live-viewer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    moderator, _ = await accounts.register(
+        db_session,
+        "ts-live-moderator@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
+    )
+    room = await streaming.start_live(db_session, owner, "Moderated", LiveAccessMode.public)
+    await streaming.join_live(db_session, viewer, room.id)
+    _, case, _ = await trust_safety.open_or_attach_report(
+        db_session,
+        viewer,
+        target_type=ReportTargetType.live_room,
+        target_id=room.id,
+        reason=ReportReason.harassment,
+        details="Remove the participant",
+    )
+    action = await trust_safety.enforce_live_participant_removal(
+        db_session, case, moderator, viewer.id, "harassment"
+    )
+    assert action.target_id == viewer.id
+    assert livekit_control.removed_participants == []
+    await db_session.commit()
+    assert await process_committed_live_controls() == 1
+    assert livekit_control.removed_participants == [(room.provider_room_name, str(viewer.id))]
 
 
 @pytest.mark.asyncio
@@ -830,7 +1125,9 @@ async def test_failed_moderation_delete_is_durable_and_retried(
 @pytest.mark.asyncio
 async def test_pending_public_termination_keeps_its_original_durable_command(db_session):
     owner, _ = await creator(db_session, "pending-public-command-owner@example.com")
-    room = await streaming.start_live(db_session, owner, "Pending authority close", LiveAccessMode.public)
+    room = await streaming.start_live(
+        db_session, owner, "Pending authority close", LiveAccessMode.public
+    )
 
     assert await streaming._enqueue_public_room_termination(
         db_session, room, reason="initial_authority_denial"

@@ -36,3 +36,16 @@ export async function expectAuthenticatedAs(page: Page, email: string) {
     }
   }, { apiBase }), { timeout: 15_000 }).toBe(email);
 }
+
+/** Complete the explicitly enabled local creator-verification fixture. */
+export async function completeCreatorVerification(page: Page) {
+  const verification = page.getByRole("button", {
+    name: /^(Complete development verification|Complete identity check)$/,
+  });
+  await expect(verification).toBeVisible({ timeout: 15_000 });
+  await verification.click();
+  await expect.poll(async () => page.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/creators/me`, { credentials: "include" });
+    return response.ok ? ((await response.json()) as { status?: string }).status : null;
+  }, { apiBase }), { timeout: 15_000 }).toBe("pending_review");
+}

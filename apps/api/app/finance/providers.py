@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -67,3 +68,9 @@ def payment_provider() -> PaymentProvider:
     if get_settings().payment_provider == "development":
         return DevelopmentPaymentProvider()
     raise PaymentProviderError("Configured payment provider is unavailable")
+
+
+def new_provider_reference() -> str:
+    """Create an opaque development-provider checkout reference."""
+
+    return f"devpay_{secrets.token_urlsafe(18)}"

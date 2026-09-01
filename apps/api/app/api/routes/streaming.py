@@ -1,7 +1,7 @@
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
@@ -27,15 +27,30 @@ from app.schemas.streaming import (
     CreatorLiveSettingsInput,
     CreatorLiveSettingsResponse,
     LiveBanInput,
+    LiveCommerceResponse,
+    LiveEventResponse,
+    LiveGiftInput,
+    LiveGoalInput,
+    LiveGoalResponse,
+    LiveReactionInput,
+    LiveReactionSummaryResponse,
     LiveReportInput,
     LiveRoomResponse,
     LiveStartInput,
+    LiveSupporterRankingEntry,
+    LiveTipInput,
+    PaidRequestInput,
+    PaidRequestOptionInput,
+    PaidRequestOptionResponse,
     PrivateRequestInput,
     PrivateRequestResponse,
     PrivateSessionResponse,
     ProviderTokenResponse,
+    TipMenuItemInput,
+    TipMenuItemResponse,
 )
 from app.streaming import service
+from app.trust_safety import service as trust_safety_service
 
 router = APIRouter(prefix="/live", tags=["streaming"])
 logger = logging.getLogger("fanbackstage.streaming")
@@ -115,6 +130,21 @@ def live_settings_response(settings) -> CreatorLiveSettingsResponse:
     )
 
 
+def live_commerce_response(charge) -> LiveCommerceResponse:
+    return LiveCommerceResponse(
+        id=charge.id,
+        status=charge.status.value,
+        kind=charge.kind.value,
+        gross_amount_minor=charge.gross_amount_minor,
+        currency=charge.currency,
+        payment_attempt_id=charge.payment_attempt_id,
+        request_label=charge.request_label,
+        request_message=charge.request_message,
+        expires_at=charge.expires_at,
+        resolved_at=charge.resolved_at,
+    )
+
+
 @router.post("/webhooks/livekit", status_code=204)
 async def livekit_webhook(request: Request, db: Db) -> None:
     """Accept only signed raw LiveKit events; the browser never reports presence."""
@@ -170,6 +200,14 @@ async def start_room(
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.get("/rooms/mine", response_model=LiveRoomResponse | None)
+async def current_creator_room(identity: CurrentIdentity, db: Db) -> LiveRoomResponse | None:
+    """Let a creator recover their existing room after a Studio reload."""
+
+    room = await service.current_creator_public_live_room(db, identity[0])
+    return room_response(room) if room else None
 
 
 @router.post("/rooms/{room_id}/end", response_model=LiveRoomResponse)
@@ -356,6 +394,366 @@ async def chat_history(
         raise HTTPException(403, str(exc)) from exc
 
 
+@router.get("/rooms/{room_id}/activity", response_model=list[LiveEventResponse])
+async def activity_history(
+    room_id: UUID,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    limit: int = Query(default=100, ge=1, le=100),
+) -> list[LiveEventResponse]:
+    try:
+        decision = await request_live_decision(db, request, identity[0])
+        events = await service.live_activity_history(
+            db, identity[0], room_id, compliance_decision=decision, limit=limit
+        )
+        return [
+            LiveEventResponse(
+                id=event.id,
+                event_type=event.event_type,
+                actor_user_id=event.actor_user_id,
+                amount_minor=event.amount_minor,
+                currency=event.currency,
+                source_type=event.source_type,
+                source_id=event.source_id,
+                metadata=event.metadata_json,
+                occurred_at=event.occurred_at,
+                created_at=event.created_at,
+            )
+            for event in events
+        ]
+    except ComplianceAccessError as exc:
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.post("/rooms/{room_id}/tips", response_model=LiveCommerceResponse)
+async def tip_live_room(
+    room_id: UUID,
+    payload: LiveTipInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> LiveCommerceResponse:
+    try:
+        await enforce_streaming_rate_limit(request, str(identity[0].id), "live_tip")
+        charge = await service.initiate_live_tip(
+            db,
+            identity[0],
+            room_id,
+            idempotency_key or "",
+            amount_minor=payload.amount_minor,
+            tip_menu_item_id=payload.tip_menu_item_id,
+            compliance_decision=await request_live_decision(db, request, identity[0]),
+        )
+        await db.commit()
+        return live_commerce_response(charge)
+    except ComplianceAccessError as exc:
+        await db.rollback()
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/rooms/{room_id}/gifts", response_model=LiveCommerceResponse)
+async def gift_live_room(
+    room_id: UUID,
+    payload: LiveGiftInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> LiveCommerceResponse:
+    try:
+        await enforce_streaming_rate_limit(request, str(identity[0].id), "live_gift")
+        charge = await service.initiate_live_gift(
+            db,
+            identity[0],
+            room_id,
+            payload.gift_catalog_item_id,
+            idempotency_key or "",
+            compliance_decision=await request_live_decision(db, request, identity[0]),
+        )
+        await db.commit()
+        return live_commerce_response(charge)
+    except ComplianceAccessError as exc:
+        await db.rollback()
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.get(
+    "/rooms/{room_id}/paid-request-options",
+    response_model=list[PaidRequestOptionResponse],
+)
+async def paid_request_options_for_room(
+    room_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> list[PaidRequestOptionResponse]:
+    try:
+        items = await service.room_paid_request_options(
+            db,
+            identity[0],
+            room_id,
+            compliance_decision=await request_live_decision(db, request, identity[0]),
+        )
+        return [
+            PaidRequestOptionResponse.model_validate(item, from_attributes=True)
+            for item in items
+        ]
+    except ComplianceAccessError as exc:
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.post("/rooms/{room_id}/paid-requests", response_model=LiveCommerceResponse)
+async def submit_paid_request(
+    room_id: UUID,
+    payload: PaidRequestInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> LiveCommerceResponse:
+    try:
+        await enforce_streaming_rate_limit(request, str(identity[0].id), "live_paid_request")
+        charge = await service.initiate_live_paid_request(
+            db,
+            identity[0],
+            room_id,
+            payload.option_id,
+            payload.message,
+            idempotency_key or "",
+            compliance_decision=await request_live_decision(db, request, identity[0]),
+        )
+        await db.commit()
+        return live_commerce_response(charge)
+    except ComplianceAccessError as exc:
+        await db.rollback()
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.get("/paid-request-options", response_model=list[PaidRequestOptionResponse])
+async def my_paid_request_options(
+    identity: CurrentIdentity, db: Db
+) -> list[PaidRequestOptionResponse]:
+    return [
+        PaidRequestOptionResponse.model_validate(item, from_attributes=True)
+        for item in await service.creator_paid_request_options(db, identity[0])
+    ]
+
+
+@router.post("/paid-request-options", response_model=PaidRequestOptionResponse)
+async def create_paid_request_option(
+    payload: PaidRequestOptionInput, identity: CurrentIdentity, db: Db
+) -> PaidRequestOptionResponse:
+    try:
+        item = await service.save_paid_request_option(db, identity[0], **payload.model_dump())
+        await db.commit()
+        return PaidRequestOptionResponse.model_validate(item, from_attributes=True)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.put("/paid-request-options/{option_id}", response_model=PaidRequestOptionResponse)
+async def update_paid_request_option(
+    option_id: UUID,
+    payload: PaidRequestOptionInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> PaidRequestOptionResponse:
+    try:
+        item = await service.save_paid_request_option(
+            db, identity[0], option_id=option_id, **payload.model_dump()
+        )
+        await db.commit()
+        return PaidRequestOptionResponse.model_validate(item, from_attributes=True)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.get("/paid-requests/mine/creator", response_model=list[LiveCommerceResponse])
+async def my_pending_paid_requests(
+    identity: CurrentIdentity, db: Db
+) -> list[LiveCommerceResponse]:
+    return [
+        live_commerce_response(item)
+        for item in await service.creator_pending_paid_requests(db, identity[0])
+    ]
+
+
+@router.post("/paid-requests/{charge_id}/accept", response_model=LiveCommerceResponse)
+async def accept_paid_request(
+    charge_id: UUID, identity: CurrentIdentity, db: Db
+) -> LiveCommerceResponse:
+    try:
+        charge = await service.accept_paid_request(db, identity[0], charge_id)
+        await db.commit()
+        return live_commerce_response(charge)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/paid-requests/{charge_id}/decline", response_model=LiveCommerceResponse)
+async def decline_paid_request(
+    charge_id: UUID, identity: CurrentIdentity, db: Db
+) -> LiveCommerceResponse:
+    try:
+        charge = await service.decline_paid_request(db, identity[0], charge_id)
+        await db.commit()
+        return live_commerce_response(charge)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post(
+    "/rooms/{room_id}/reactions", response_model=LiveReactionSummaryResponse
+)
+async def react_to_live_room(
+    room_id: UUID,
+    payload: LiveReactionInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> LiveReactionSummaryResponse:
+    try:
+        await enforce_streaming_rate_limit(request, str(identity[0].id), "live_reaction")
+        counts = await service.add_live_reaction(
+            db,
+            identity[0],
+            room_id,
+            payload.reaction_type,
+            compliance_decision=await request_live_decision(db, request, identity[0]),
+        )
+        await db.commit()
+        return LiveReactionSummaryResponse(counts=counts)
+    except ComplianceAccessError as exc:
+        await db.rollback()
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.get(
+    "/rooms/{room_id}/reactions", response_model=LiveReactionSummaryResponse
+)
+async def live_room_reactions(
+    room_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> LiveReactionSummaryResponse:
+    try:
+        counts = await service.live_reaction_summary(
+            db,
+            identity[0],
+            room_id,
+            compliance_decision=await request_live_decision(db, request, identity[0]),
+        )
+        return LiveReactionSummaryResponse(counts=counts)
+    except ComplianceAccessError as exc:
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.get(
+    "/rooms/{room_id}/supporters", response_model=list[LiveSupporterRankingEntry]
+)
+async def live_room_supporters(
+    room_id: UUID,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+    limit: int = Query(default=10, ge=1, le=25),
+) -> list[LiveSupporterRankingEntry]:
+    try:
+        return [
+            LiveSupporterRankingEntry(**row)
+            for row in await service.live_supporter_ranking(
+                db,
+                identity[0],
+                room_id,
+                compliance_decision=await request_live_decision(db, request, identity[0]),
+                limit=limit,
+            )
+        ]
+    except ComplianceAccessError as exc:
+        raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.get("/tip-menu", response_model=list[TipMenuItemResponse])
+async def my_tip_menu(identity: CurrentIdentity, db: Db) -> list[TipMenuItemResponse]:
+    items = await service.creator_tip_menu(db, identity[0])
+    return [TipMenuItemResponse.model_validate(item, from_attributes=True) for item in items]
+
+
+@router.post("/tip-menu", response_model=TipMenuItemResponse)
+async def create_tip_menu_item(
+    payload: TipMenuItemInput, identity: CurrentIdentity, db: Db
+) -> TipMenuItemResponse:
+    try:
+        item = await service.save_tip_menu_item(db, identity[0], **payload.model_dump())
+        await db.commit()
+        return TipMenuItemResponse.model_validate(item, from_attributes=True)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.put("/tip-menu/{item_id}", response_model=TipMenuItemResponse)
+async def update_tip_menu_item(
+    item_id: UUID, payload: TipMenuItemInput, identity: CurrentIdentity, db: Db
+) -> TipMenuItemResponse:
+    try:
+        item = await service.save_tip_menu_item(
+            db, identity[0], item_id=item_id, **payload.model_dump()
+        )
+        await db.commit()
+        return TipMenuItemResponse.model_validate(item, from_attributes=True)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/goals", response_model=LiveGoalResponse)
+async def create_goal(
+    payload: LiveGoalInput, identity: CurrentIdentity, db: Db
+) -> LiveGoalResponse:
+    try:
+        goal = await service.create_live_goal(db, identity[0], **payload.model_dump())
+        await db.commit()
+        return LiveGoalResponse.model_validate(goal, from_attributes=True)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.get("/rooms/{room_id}/goals", response_model=list[LiveGoalResponse])
+async def room_goals(room_id: UUID, identity: CurrentIdentity, db: Db) -> list[LiveGoalResponse]:
+    try:
+        return [
+            LiveGoalResponse.model_validate(goal, from_attributes=True).model_copy(
+                update={"progress_amount_minor": progress}
+            )
+            for goal, progress in await service.live_goal_progress(db, identity[0], room_id)
+        ]
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
 @router.post("/rooms/{room_id}/ban/{viewer_id}")
 async def ban_viewer(
     room_id: UUID,
@@ -381,12 +779,26 @@ async def report_room(
     room_id: UUID, payload: LiveReportInput, identity: CurrentIdentity, db: Db
 ) -> dict:
     try:
-        report = await service.report_live(
-            db, identity[0], room_id, payload.reason, payload.details, payload.chat_message_id
+        target_type = (
+            trust_safety_service.ReportTargetType.live_chat_message
+            if payload.chat_message_id
+            else trust_safety_service.ReportTargetType.live_room
+        )
+        report, case, duplicate = await trust_safety_service.open_or_attach_report(
+            db,
+            identity[0],
+            target_type=target_type,
+            target_id=payload.chat_message_id or room_id,
+            reason=trust_safety_service.ReportReason(payload.reason),
+            details=payload.details,
         )
         await db.commit()
-        return {"id": str(report.id), "status": report.status.value}
-    except (PermissionError, ValueError) as exc:
+        return {
+            "id": str(report.id),
+            "case_id": case.public_id,
+            "duplicate": duplicate,
+        }
+    except (PermissionError, ValueError, trust_safety_service.TrustSafetyError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
@@ -518,6 +930,28 @@ async def accept_private(
     except ComplianceAccessError as exc:
         await db.rollback()
         raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/private-requests/{request_id}/decline", response_model=PrivateRequestResponse)
+async def decline_private(
+    request_id: UUID, identity: CurrentIdentity, db: Db
+) -> PrivateRequestResponse:
+    try:
+        item = await service.decline_private_request(db, identity[0], request_id)
+        await db.commit()
+        return PrivateRequestResponse(
+            id=item.id,
+            creator_id=item.creator_id,
+            status=item.status.value,
+            mode=item.mode.value,
+            per_minute_price_minor=item.per_minute_price_minor,
+            minimum_charge_minor=item.minimum_charge_minor,
+            currency=item.currency,
+            expires_at=item.expires_at,
+        )
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc

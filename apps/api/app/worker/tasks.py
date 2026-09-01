@@ -408,3 +408,18 @@ def reconcile_private_session_grace() -> dict[str, int]:
             }
 
     return run_async(run())
+
+
+@celery_app.task
+def expire_live_paid_requests() -> dict[str, int]:
+    """Expire unresolved paid requests and durably require refunds for captured value."""
+    from app.db.session import SessionLocal
+    from app.streaming.service import expire_paid_requests
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            expired = await expire_paid_requests(session)
+            await session.commit()
+            return expired
+
+    return {"expired": run_async(run())}

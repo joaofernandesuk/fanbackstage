@@ -193,6 +193,7 @@ async def enforce_case(
         "suspend_creator": service.enforce_creator_suspension,
         "suspend_marketplace": service.enforce_marketplace_suspension,
         "terminate_live": service.enforce_live_termination,
+        "remove_live_participant": service.enforce_live_participant_removal,
         "disable_featuring": service.enforce_feature_disablement,
     }
     handler = handlers.get(payload.action)

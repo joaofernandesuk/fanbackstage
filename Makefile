@@ -9,6 +9,10 @@ dev:
 	./scripts/dev-up.sh
 dev-status:
 	./scripts/dev-status.sh
+livekit-status:
+	./scripts/livekit-local.sh status
+livekit-smoke:
+	node scripts/livekit-local-smoke.mjs
 dev-stop:
 	./scripts/dev-stop.sh
 dev-reset:

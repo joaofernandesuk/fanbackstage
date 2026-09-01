@@ -11,9 +11,11 @@ import {
   complianceAccessFromError,
 } from "../lib/compliance-api";
 import { mediaForUsername } from "../lib/demo-personas";
+import { completePaymentCheckout } from "../lib/payments";
 import {
   creatorUsernameFor,
   discoverySearchPath,
+  formatMoney,
   type DiscoveryPage,
   type DiscoveryResult,
 } from "../lib/public-api";
@@ -33,7 +35,54 @@ type RoomSummary = ComplianceAccess & {
   started_at: string | null;
 };
 type Chat = { id: string; body: string; sender_user_id: string | null };
+type PostedChat = Pick<Chat, "id" | "body">;
 type Token = { room_id: string; provider_url: string; token: string };
+type PrivateRequest = {
+  id: string;
+  status: string;
+  per_minute_price_minor: number;
+  minimum_charge_minor: number;
+  currency: string;
+};
+type LiveActivity = {
+  id: string;
+  event_type: string;
+  amount_minor: number | null;
+  currency: string | null;
+  metadata: Record<string, string>;
+};
+type LiveGoal = {
+  id: string;
+  title: string;
+  target_amount_minor: number;
+  progress_amount_minor: number;
+  currency: string;
+};
+type Supporter = {
+  rank: number;
+  amount_minor: number;
+  currency: string;
+  supporter_label: string;
+  viewer_is_current_user: boolean;
+};
+type PaidRequestOption = {
+  id: string;
+  label: string;
+  amount_minor: number;
+  currency: string;
+};
+type LiveCommerce = {
+  id: string;
+  status: string;
+  payment_attempt_id: string;
+};
+
+const LIVE_REACTIONS = [
+  { type: "love", symbol: "♥", label: "Love" },
+  { type: "fire", symbol: "🔥", label: "Fire" },
+  { type: "applause", symbol: "👏", label: "Applause" },
+  { type: "wow", symbol: "✨", label: "Wow" },
+] as const;
 
 function identityFor(room: RoomSummary, creators: DiscoveryResult[]) {
   const match = creators.find((item) => item.id === room.creator_id || item.creator_id === room.creator_id);
@@ -52,6 +101,14 @@ export function LiveNow() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [blockedAccess, setBlockedAccess] = useState<ComplianceAccess | null>(null);
+  const [privateRequest, setPrivateRequest] = useState<PrivateRequest | null>(null);
+  const [privateRequesting, setPrivateRequesting] = useState(false);
+  const [activity, setActivity] = useState<LiveActivity[]>([]);
+  const [goals, setGoals] = useState<LiveGoal[]>([]);
+  const [supporters, setSupporters] = useState<Supporter[]>([]);
+  const [reactionCounts, setReactionCounts] = useState<Record<string, number>>({});
+  const [paidRequestOptions, setPaidRequestOptions] = useState<PaidRequestOption[]>([]);
+  const [commerceMessage, setCommerceMessage] = useState("");
   const roomRef = useRef<Room | null>(null);
   const videoRef = useRef<HTMLDivElement | null>(null);
   const attachedTracksRef = useRef<WeakSet<Track>>(new WeakSet());
@@ -78,6 +135,30 @@ export function LiveNow() {
     attachedTracksRef.current = new WeakSet();
     videoRef.current?.replaceChildren();
     setActive(null);
+    setPrivateRequest(null);
+    setActivity([]);
+    setGoals([]);
+    setSupporters([]);
+    setReactionCounts({});
+    setPaidRequestOptions([]);
+    setCommerceMessage("");
+  }
+
+  async function recoverLiveState(roomId: string) {
+    const [messages, events, currentGoals, ranking, reactions, requestOptions] = await Promise.all([
+      api<Chat[]>(`/live/rooms/${roomId}/chat`),
+      api<LiveActivity[]>(`/live/rooms/${roomId}/activity`),
+      api<LiveGoal[]>(`/live/rooms/${roomId}/goals`),
+      api<Supporter[]>(`/live/rooms/${roomId}/supporters`),
+      api<{ counts: Record<string, number> }>(`/live/rooms/${roomId}/reactions`),
+      api<PaidRequestOption[]>(`/live/rooms/${roomId}/paid-request-options`),
+    ]);
+    setChat(messages);
+    setActivity(events);
+    setGoals(currentGoals);
+    setSupporters(ranking);
+    setReactionCounts(reactions.counts);
+    setPaidRequestOptions(requestOptions);
   }
 
   async function join(room: RoomSummary) {
@@ -110,7 +191,7 @@ export function LiveNow() {
           if (publication.track) attachVideo(publication.track);
         }
       }
-      setChat(await api<Chat[]>(`/live/rooms/${room.id}/chat`));
+      await recoverLiveState(room.id);
     } catch (caught) {
       disconnect();
       if (caught instanceof ApiError && caught.code) {
@@ -123,16 +204,73 @@ export function LiveNow() {
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!active) return;
-    const form = new FormData(event.currentTarget);
+    const chatForm = event.currentTarget;
+    const form = new FormData(chatForm);
     try {
-      await api(`/live/rooms/${active.id}/chat`, {
+      const posted = await api<PostedChat>(`/live/rooms/${active.id}/chat`, {
         method: "POST",
         body: JSON.stringify({ body: form.get("body") }),
       });
-      event.currentTarget.reset();
-      setChat(await api<Chat[]>(`/live/rooms/${active.id}/chat`));
+      chatForm.reset();
+      setChat((current) => current.some((item) => item.id === posted.id)
+        ? current
+        : [...current, { ...posted, sender_user_id: null }]);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "Unable to send chat");
+    }
+  }
+
+  async function requestPrivateSession() {
+    if (!active || !requireLogin() || privateRequesting) return;
+    setPrivateRequesting(true);
+    setError("");
+    try {
+      const request = await api<PrivateRequest>(`/live/creators/${active.creator_id}/private-requests`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "one_to_one" }),
+      });
+      setPrivateRequest(request);
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : "Unable to request a private session");
+    } finally {
+      setPrivateRequesting(false);
+    }
+  }
+
+  async function react(reactionType: string) {
+    if (!active) return;
+    try {
+      const result = await api<{ counts: Record<string, number> }>(`/live/rooms/${active.id}/reactions`, {
+        method: "POST",
+        body: JSON.stringify({ reaction_type: reactionType }),
+      });
+      setReactionCounts(result.counts);
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : "Unable to react right now");
+    }
+  }
+
+  async function submitPaidRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!active) return;
+    const form = event.currentTarget;
+    const values = new FormData(form);
+    setCommerceMessage("");
+    try {
+      const charge = await api<LiveCommerce>(`/live/rooms/${active.id}/paid-requests`, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          option_id: values.get("paid-request-option"),
+          message: values.get("paid-request-message"),
+        }),
+      });
+      await completePaymentCheckout(charge.payment_attempt_id);
+      form.reset();
+      setCommerceMessage("Payment confirmed. Your request is waiting for the creator.");
+      await recoverLiveState(active.id);
+    } catch (caught) {
+      setCommerceMessage(caught instanceof ApiError ? caught.message : "Unable to send paid request");
     }
   }
 
@@ -157,6 +295,24 @@ export function LiveNow() {
         }
       }
     }
+  }, [active]);
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    const recover = async () => {
+      try {
+        if (!cancelled) await recoverLiveState(active.id);
+      } catch {
+        // Durable Live projections are retried together. A transient API
+        // failure must not disconnect otherwise healthy LiveKit media.
+      }
+    };
+    const interval = window.setInterval(() => void recover(), 3_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [active]);
 
   const roomCreator = useMemo(() => active ? identityFor(active, creators) : null, [active, creators]);
@@ -195,6 +351,94 @@ export function LiveNow() {
           </div>
           <aside className={styles.liveChat}>
             <h2>Live chat · {active.viewer_count} watching</h2>
+            <section aria-label="Live interactions" className={styles.liveInteractions}>
+              <div>
+                <span>INTERACT</span>
+                <strong>Make this live personal</strong>
+                <p>Chat with {roomCreator.displayName} now, or queue a private 1:1 session for after this public room ends.</p>
+              </div>
+              {privateRequest ? (
+                <p className={styles.liveInteractionSuccess} role="status">
+                  Private 1:1 request queued. {roomCreator.displayName} will need to accept it before payment authorisation.
+                </p>
+              ) : (
+                <button className={styles.privateRequestButton} disabled={privateRequesting} onClick={() => void requestPrivateSession()} type="button">
+                  {privateRequesting ? "Requesting…" : "Request private 1:1"}
+                </button>
+              )}
+              <p className={styles.liveInteractionPrice}>
+                {privateRequest
+                  ? `Minimum ${formatMoney(privateRequest.minimum_charge_minor, privateRequest.currency)} · ${formatMoney(privateRequest.per_minute_price_minor, privateRequest.currency)}/minute`
+                  : "The creator confirms availability before any payment is authorised."}
+              </p>
+              <div aria-label="Live reactions">
+                {LIVE_REACTIONS.map((reaction) => (
+                  <button
+                    aria-label={`React ${reaction.label}`}
+                    key={reaction.type}
+                    onClick={() => void react(reaction.type)}
+                    type="button"
+                  >
+                    {reaction.symbol} {reactionCounts[reaction.type] ?? 0}
+                  </button>
+                ))}
+              </div>
+              {paidRequestOptions.length > 0 && (
+                <form aria-label="Send a paid request" onSubmit={submitPaidRequest}>
+                  <label>
+                    Paid request
+                    <select name="paid-request-option" required>
+                      {paidRequestOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label} · {formatMoney(option.amount_minor, option.currency)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Request details
+                    <input maxLength={500} name="paid-request-message" required />
+                  </label>
+                  <button type="submit">Pay and send request</button>
+                </form>
+              )}
+              {commerceMessage && <p role="status">{commerceMessage}</p>}
+              {goals.map((goal) => (
+                <section aria-label={`Goal: ${goal.title}`} key={goal.id}>
+                  <strong>{goal.title}</strong>
+                  <p>
+                    {formatMoney(goal.progress_amount_minor, goal.currency)} of {formatMoney(goal.target_amount_minor, goal.currency)}
+                  </p>
+                  <progress max={goal.target_amount_minor} value={Math.min(goal.progress_amount_minor, goal.target_amount_minor)} />
+                </section>
+              ))}
+              {supporters.length > 0 && (
+                <section aria-label="Top supporters">
+                  <strong>Top supporters this Live</strong>
+                  <ol>
+                    {supporters.map((supporter) => (
+                      <li key={`${supporter.rank}-${supporter.supporter_label}`}>
+                        {supporter.supporter_label} · {formatMoney(supporter.amount_minor, supporter.currency)}
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              )}
+              {activity.length > 0 && (
+                <section aria-label="Live activity">
+                  <strong>Live activity</strong>
+                  <ul>
+                    {activity.slice(-8).map((item) => (
+                      <li key={item.id}>
+                        {item.event_type.replaceAll("_", " ")}
+                        {item.amount_minor && item.currency ? ` · ${formatMoney(item.amount_minor, item.currency)}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              {roomCreator.username && <Link className={styles.liveProfileLink} href={`/creator/${roomCreator.username}`}>View creator profile</Link>}
+            </section>
             <div className={styles.liveChatMessages}>
               {chat.length ? chat.map((message) => <p key={message.id}>{message.body}</p>) : <p>Be the first to say hello.</p>}
             </div>

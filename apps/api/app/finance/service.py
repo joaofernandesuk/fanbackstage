@@ -1477,7 +1477,24 @@ async def process_development_webhook(
         if await _reverse_provider_messaging(db, attempt, reversal_type, event["id"]):
             webhook_event.processed_at = datetime.now(UTC)
             return None
-        from app.streaming.service import reverse_private_session_payment
+        from app.streaming.service import (
+            reverse_live_commerce_charge,
+            reverse_private_session_payment,
+        )
+
+        if await reverse_live_commerce_charge(
+            db,
+            attempt,
+            resolution_type=reversal_type,
+            provider_event_id=event["id"],
+        ):
+            attempt.status = (
+                PaymentStatus.refunded
+                if reversal_type is LedgerTransactionType.refund
+                else PaymentStatus.chargeback
+            )
+            webhook_event.processed_at = datetime.now(UTC)
+            return None
 
         if await reverse_private_session_payment(
             db,
@@ -1531,6 +1548,9 @@ async def process_development_webhook(
         from app.featuring.service import fail_payment_attempt as fail_feature_payment_attempt
 
         await fail_feature_payment_attempt(db, attempt)
+        from app.streaming.service import fail_live_commerce_charge
+
+        await fail_live_commerce_charge(db, attempt)
         webhook_event.processed_at = datetime.now(UTC)
         return None
     attempt.status, attempt.completed_at = PaymentStatus.succeeded, datetime.now(UTC)
@@ -1567,7 +1587,10 @@ async def process_development_webhook(
                     await settle_paid_send(db, pending_send)
                 else:
                     from app.models.streaming import PrivateSession
-                    from app.streaming.service import authorize_private_session
+                    from app.streaming.service import (
+                        authorize_private_session,
+                        settle_live_commerce_charge,
+                    )
 
                     session = await db.scalar(
                         select(PrivateSession)
@@ -1577,14 +1600,15 @@ async def process_development_webhook(
                     if session:
                         await authorize_private_session(db, session)
                     else:
-                        from app.marketplace.service import (
-                            settle_or_contain_payment_attempt as settle_marketplace_attempt,
-                        )
+                        if await settle_live_commerce_charge(db, attempt) is None:
+                            from app.marketplace.service import (
+                                settle_or_contain_payment_attempt as settle_marketplace_attempt,
+                            )
 
-                        if await settle_marketplace_attempt(db, attempt) is None:
-                            from app.subscriptions.service import settle_payment_attempt
+                            if await settle_marketplace_attempt(db, attempt) is None:
+                                from app.subscriptions.service import settle_payment_attempt
 
-                            await settle_payment_attempt(db, attempt)
+                                await settle_payment_attempt(db, attempt)
     webhook_event.processed_at = datetime.now(UTC)
     return purchase
 

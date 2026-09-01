@@ -38,6 +38,99 @@ class ChatInput(BaseModel):
     body: str = Field(min_length=1, max_length=1000)
 
 
+class LiveTipInput(BaseModel):
+    amount_minor: int | None = Field(default=None, ge=1)
+    tip_menu_item_id: UUID | None = None
+
+
+class LiveGiftInput(BaseModel):
+    gift_catalog_item_id: UUID
+
+
+class LiveCommerceResponse(BaseModel):
+    id: UUID
+    status: str
+    kind: str
+    gross_amount_minor: int
+    currency: str
+    payment_attempt_id: UUID
+    request_label: str | None = None
+    request_message: str | None = None
+    expires_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class PaidRequestInput(BaseModel):
+    option_id: UUID
+    message: str = Field(min_length=1, max_length=500)
+
+
+class PaidRequestOptionInput(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+    amount_minor: int = Field(ge=1)
+    enabled: bool = True
+    sort_order: int = Field(default=0, ge=0, le=100)
+    requires_creator_acceptance: bool = True
+
+
+class PaidRequestOptionResponse(PaidRequestOptionInput):
+    id: UUID
+    currency: str
+
+
+class LiveReactionInput(BaseModel):
+    reaction_type: str
+
+
+class LiveReactionSummaryResponse(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class LiveSupporterRankingEntry(BaseModel):
+    rank: int
+    amount_minor: int
+    currency: str
+    supporter_label: str
+    viewer_is_current_user: bool
+
+
+class TipMenuItemInput(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+    amount_minor: int = Field(ge=1)
+    enabled: bool = True
+    sort_order: int = Field(default=0, ge=0, le=100)
+
+
+class TipMenuItemResponse(TipMenuItemInput):
+    id: UUID
+    currency: str
+
+
+class LiveGoalInput(BaseModel):
+    title: str = Field(min_length=1, max_length=140)
+    target_amount_minor: int = Field(ge=1)
+
+
+class LiveGoalResponse(LiveGoalInput):
+    id: UUID
+    currency: str
+    active: bool
+    progress_amount_minor: int = 0
+
+
+class LiveEventResponse(BaseModel):
+    id: UUID
+    event_type: str
+    actor_user_id: UUID | None
+    amount_minor: int | None
+    currency: str | None
+    source_type: str | None
+    source_id: str | None
+    metadata: dict = Field(default_factory=dict)
+    occurred_at: datetime
+    created_at: datetime
+
+
 class LiveBanInput(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 

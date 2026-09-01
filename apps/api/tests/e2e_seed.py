@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from sqlalchemy import select
 
@@ -27,6 +28,7 @@ from app.models.legal import (
     LegalDocument,
     LegalDocumentType,
 )
+from app.models.streaming import LiveGiftCatalogItem
 
 EMAIL = "phase2-e2e-admin@example.com"
 PASSWORD = "phase2-e2e-admin-password"
@@ -39,6 +41,7 @@ REVIEWER_PASSWORD = "phase13-e2e-reviewer-password"
 CREATOR_EMAIL = "consumer-e2e-creator@example.com"
 CREATOR_PASSWORD = "consumer-e2e-creator-password"
 CREATOR_USERNAME = "e2e-backstage-host"
+LIVE_GIFT_ID = UUID("00000000-0000-4000-8000-000000000047")
 
 
 async def seed_test_compliance_policy(db, actor: User) -> None:
@@ -325,6 +328,27 @@ async def seed() -> None:
                 jurisdiction_code="PT",
                 correlation_id=None,
             )
+        gift = await db.get(LiveGiftCatalogItem, LIVE_GIFT_ID)
+        if gift is None:
+            gift = LiveGiftCatalogItem(
+                id=LIVE_GIFT_ID,
+                name="E2E Rose",
+                icon="/live/gifts/e2e-rose.svg",
+                amount_minor=300,
+                currency="EUR",
+                active=True,
+                sort_order=0,
+                category="e2e",
+            )
+            db.add(gift)
+        else:
+            gift.name = "E2E Rose"
+            gift.icon = "/live/gifts/e2e-rose.svg"
+            gift.amount_minor = 300
+            gift.currency = "EUR"
+            gift.active = True
+            gift.sort_order = 0
+            gift.category = "e2e"
         await db.commit()
 
 

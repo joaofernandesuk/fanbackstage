@@ -1,0 +1,16 @@
+# Native macOS development server. Docker Desktop cannot bridge the host
+# browser's WebRTC media traffic back into a container reliably, so local
+# camera/microphone publishing runs directly on the host.
+port: 17880
+bind_addresses: ["127.0.0.1"]
+rtc:
+  use_external_ip: false
+  node_ip: 127.0.0.1
+  enable_loopback_candidate: true
+  tcp_port: 17881
+  udp_port: 17882
+keys:
+  devkey: fanbackstage-livekit-development-secret-2026
+webhook:
+  api_key: devkey
+  urls: ["http://localhost:18000/api/v1/live/webhooks/livekit"]

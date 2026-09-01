@@ -69,6 +69,7 @@ services:
   livekit:
     image: livekit/livekit-server:latest
     command: --config /etc/livekit.yaml
+    profiles: ["container-livekit"]
     ports: ["17880:7880", "17881:7881", "17882:7882/udp"]
     volumes: [./infra/livekit/livekit.dev.yaml:/etc/livekit.yaml:ro]
     restart: unless-stopped
@@ -90,7 +91,7 @@ services:
     restart: unless-stopped
   worker:
     build: {context: ./apps/api, dockerfile: Dockerfile.dev}
-    command: celery -A app.worker.celery_app worker --loglevel=INFO
+    command: celery -A app.worker.celery_app worker --loglevel=INFO -Q default,media,notifications,notifications_marketing,moderation,analytics,financial,scheduled
     environment: *api-environment
     depends_on:
       api: {condition: service_healthy}
