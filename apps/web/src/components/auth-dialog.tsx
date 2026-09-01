@@ -53,24 +53,36 @@ export function AuthDialog({
       ref={dialogRef}
     >
       <div className={styles.panel}>
-        <div className={styles.dialogHeader}>
-          <span aria-hidden="true" className={styles.mark}>
-            <Image alt="" height={31} src="/brand/fanbackstage_symbol_transparent.png" width={46} />
+        <aside aria-hidden="true" className={styles.brandPanel}>
+          <span className={styles.brandMark}>
+            <Image alt="" height={156} src="/brand/fanbackstage_wordmark_transparent.png" width={707} />
           </span>
-          <div aria-label="Choose authentication mode" className={styles.modeSwitch} role="group">
-            <button aria-pressed={mode === "login"} onClick={() => onModeChange("login")} type="button">Log in</button>
-            <button aria-pressed={mode === "register"} onClick={() => onModeChange("register")} type="button">Join</button>
+          <div>
+            <p>GET CLOSER. GO BACKSTAGE.</p>
+            <h2>{mode === "login" ? "Your creator world is waiting." : "One account. Every backstage moment."}</h2>
+            <span>Discover creator worlds, choose what to unlock, and stay in control of your experience.</span>
           </div>
-          <button aria-label="Close authentication dialog" className={styles.close} onClick={dismiss} type="button">×</button>
+        </aside>
+        <div className={styles.formColumn}>
+          <div className={styles.dialogHeader}>
+            <span aria-hidden="true" className={styles.mark}>
+              <Image alt="" height={31} src="/brand/fanbackstage_symbol_transparent.png" width={46} />
+            </span>
+            <div aria-label="Choose authentication mode" className={styles.modeSwitch} role="group">
+              <button aria-pressed={mode === "login"} onClick={() => onModeChange("login")} type="button">Log in</button>
+              <button aria-pressed={mode === "register"} onClick={() => onModeChange("register")} type="button">Join</button>
+            </div>
+            <button aria-label="Close authentication dialog" className={styles.close} onClick={dismiss} type="button">×</button>
+          </div>
+          <AuthForm
+            key={mode}
+            mode={mode}
+            nextPath={nextPath}
+            onModeChange={onModeChange}
+            onSuccess={success}
+            presentation="dialog"
+          />
         </div>
-        <AuthForm
-          key={mode}
-          mode={mode}
-          nextPath={nextPath}
-          onModeChange={onModeChange}
-          onSuccess={success}
-          presentation="dialog"
-        />
       </div>
     </dialog>
   );

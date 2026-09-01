@@ -239,7 +239,9 @@ export function AuthForm({
         setUnverifiedEmail(submittedEmail);
       }
       setError(caught instanceof ApiError
-        ? authErrorMessage(mode, caught.status, caught.message)
+        ? !isLogin && caught.code === "JURISDICTION_UNRESOLVED"
+          ? "Choose your country, complete its registration check, and try again."
+          : authErrorMessage(mode, caught.status, caught.message)
         : "FanBackstage could not complete this request. Try again shortly.");
     } finally {
       setPending(false);
@@ -472,7 +474,7 @@ export function AuthForm({
     <section aria-labelledby={titleId} className={styles.pageShell}>
       <aside aria-hidden="true" className={styles.brandPanel}>
         <div className={styles.brandMark}>
-          <Image alt="" height={48} src="/brand/fanbackstage_symbol_transparent.png" width={70} />
+          <Image alt="" height={156} src="/brand/fanbackstage_wordmark_transparent.png" width={707} />
         </div>
         <p>GET CLOSER. GO BACKSTAGE.</p>
         <h2>{isLogin ? "Your creator world is waiting." : "One account. Every backstage moment."}</h2>

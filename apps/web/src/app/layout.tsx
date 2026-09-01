@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { AppHeader } from "../components/app-header";
 import { AuthExperienceProvider } from "../components/auth-experience";
 import { LegalAcceptanceGate } from "../components/legal-acceptance";
+import { RequireAuthentication } from "../components/require-authentication";
 import { SiteBanner } from "../components/site-banner";
 import { SiteFooter } from "../components/site-footer";
 
@@ -41,10 +42,12 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <Suspense fallback={null}><SiteBanner /></Suspense>
         <AuthExperienceProvider>
           <AppHeader />
-          <LegalAcceptanceGate>
-            <main id="main-content">{children}</main>
-            <Suspense fallback={null}><SiteFooter /></Suspense>
-          </LegalAcceptanceGate>
+          <RequireAuthentication>
+            <LegalAcceptanceGate>
+              <main id="main-content">{children}</main>
+              <Suspense fallback={null}><SiteFooter /></Suspense>
+            </LegalAcceptanceGate>
+          </RequireAuthentication>
         </AuthExperienceProvider>
       </body>
     </html>

@@ -29,10 +29,62 @@
   border: 1px solid rgb(255 255 255 / 0.14);
   border-radius: 26px;
   box-shadow: 0 36px 130px rgb(0 0 0 / 0.74);
+  display: grid;
+  grid-template-columns: minmax(260px, 0.82fr) minmax(0, 1.18fr);
   max-height: calc(100dvh - 40px);
   overflow: auto;
-  padding: 22px clamp(24px, 5vw, 48px) 38px;
-  width: min(520px, calc(100vw - 40px));
+  width: min(980px, calc(100vw - 40px));
+}
+
+.brandPanel {
+  background:
+    radial-gradient(circle at 24% 12%, rgb(14 165 255 / 0.3), transparent 16rem),
+    radial-gradient(circle at 88% 88%, rgb(236 72 153 / 0.26), transparent 18rem),
+    linear-gradient(145deg, #101c42, #101128 56%, #25102b);
+  display: flex;
+  flex-direction: column;
+  gap: 42px;
+  justify-content: space-between;
+  min-height: 590px;
+  padding: 40px;
+}
+
+.brandMark {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+}
+
+.brandMark img {
+  height: auto;
+  filter: brightness(0) invert(1);
+  width: min(100%, 220px);
+}
+
+.brandPanel p {
+  color: var(--brand-orange);
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.15em;
+  margin: 0 0 14px;
+}
+
+.brandPanel h2 {
+  font-size: clamp(2rem, 3.8vw, 3.25rem);
+  line-height: 0.98;
+  margin: 0 0 20px;
+}
+
+.brandPanel div > span {
+  color: rgb(255 255 255 / 0.76);
+  display: block;
+  font-size: 0.76rem;
+  line-height: 1.65;
+}
+
+.formColumn {
+  min-width: 0;
+  padding: 22px clamp(24px, 4vw, 48px) 38px;
 }
 
 .dialogHeader {
@@ -45,14 +97,12 @@
 
 .mark {
   align-items: center;
-  background: var(--brand-gradient);
-  border-radius: 11px;
-  color: var(--brand-midnight);
   display: flex;
-  font-size: 0.72rem;
-  font-weight: 950;
-  height: 38px;
   justify-content: center;
+}
+
+.mark img {
+  height: auto;
   width: 38px;
 }
 
@@ -97,6 +147,17 @@
   width: 38px;
 }
 
+@media (max-width: 760px) {
+  .panel {
+    display: block;
+    width: min(520px, calc(100vw - 40px));
+  }
+
+  .brandPanel {
+    display: none;
+  }
+}
+
 @media (max-width: 560px) {
   .dialog {
     padding: 0;
@@ -107,8 +168,11 @@
     border-radius: 0;
     height: 100dvh;
     max-height: none;
-    padding: calc(18px + env(safe-area-inset-top)) 20px calc(30px + env(safe-area-inset-bottom));
     width: 100vw;
+  }
+
+  .formColumn {
+    padding: calc(18px + env(safe-area-inset-top)) 20px calc(30px + env(safe-area-inset-bottom));
   }
 
   .dialogHeader {

@@ -36,17 +36,15 @@
 
 .brandMark {
   align-items: center;
-  background: var(--brand-gradient);
-  border-radius: 22px;
-  box-shadow: 0 18px 55px rgb(139 92 246 / 0.38);
-  color: var(--brand-midnight);
   display: flex;
-  font-size: 1.55rem;
-  font-weight: 950;
-  height: 70px;
   justify-content: center;
   margin-bottom: auto;
-  width: 70px;
+}
+
+.brandMark img {
+  height: auto;
+  filter: brightness(0) invert(1);
+  width: min(100%, 250px);
 }
 
 .brandPanel > p {
@@ -82,7 +80,7 @@
 }
 
 .formPanel {
-  align-self: center;
+  align-self: start;
   padding: clamp(38px, 6vw, 74px);
 }
 
@@ -342,7 +340,7 @@
   text-decoration: none;
 }
 
-@media (max-width: 820px) {
+@media (max-width: 640px) {
   .pageShell {
     grid-template-columns: 1fr;
     max-width: 610px;

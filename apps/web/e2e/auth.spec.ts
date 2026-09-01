@@ -44,7 +44,8 @@ test("complete real authentication lifecycle", async ({ page }) => {
   await expectAuthenticatedAs(page, email);
   await page.getByRole("button", { name: "Log out" }).click();
   await page.goto("/account");
-  await expect(page.getByText("Authentication required")).toBeVisible();
+  await expect(page).toHaveURL(/\/login\?next=%2Faccount$/);
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
   await page.goto("/forgot-password");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("button", { name: "Send reset link" }).click();

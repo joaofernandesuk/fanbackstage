@@ -10,8 +10,20 @@ import {
   safeAuthNextPath,
   safeAuthReturnPath,
 } from "./auth-ui";
+import { isProtectedRoute } from "../components/require-authentication";
 
 describe("authentication UI navigation", () => {
+  it("identifies protected workspaces without blocking public discovery", () => {
+    expect(isProtectedRoute("/creator-studio")).toBe(true);
+    expect(isProtectedRoute("/creator-studio/stories")).toBe(true);
+    expect(isProtectedRoute("/admin/compliance")).toBe(true);
+    expect(isProtectedRoute("/marketplace/orders")).toBe(true);
+    expect(isProtectedRoute("/creators")).toBe(false);
+    expect(isProtectedRoute("/creator/luna-sparks")).toBe(false);
+    expect(isProtectedRoute("/marketplace")).toBe(false);
+    expect(isProtectedRoute("/legal/privacy")).toBe(false);
+  });
+
   it("preserves an internal deep link after login", () => {
     expect(safeAuthNextPath("/messages?conversation=one#latest")).toBe(
       "/messages?conversation=one#latest",
@@ -34,6 +46,9 @@ describe("authentication UI navigation", () => {
   it("builds deep-link fallbacks without creating an authentication loop", () => {
     expect(authEntryPath("login", "/creator/luna-sparks#subscriptions")).toBe(
       "/login?next=%2Fcreator%2Fluna-sparks%23subscriptions",
+    );
+    expect(authEntryPath("login", "/creator-studio#live")).toBe(
+      "/login?next=%2Fcreator-studio%23live",
     );
     expect(authEntryPath("register", undefined)).toBe("/register?next=%2Fwelcome");
     expect(safeAuthReturnPath("/login?next=%2Fmessages", "/account")).toBe("/account");
