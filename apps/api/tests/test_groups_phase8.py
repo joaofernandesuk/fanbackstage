@@ -36,6 +36,7 @@ from app.models.groups import (
     GroupPermission,
     GroupPermissionGrant,
 )
+from app.models.notification import NotificationIntent
 from app.schemas.creator import CreatorProfileUpdate
 from app.schemas.streaming import CreatorLiveSettingsInput
 
@@ -52,6 +53,53 @@ async def approved_creator(db, email):
     profile.is_public = True
     await db.flush()
     return user, profile
+
+
+@pytest.mark.asyncio
+async def test_group_invitation_notifications_follow_the_actual_lifecycle(db_session):
+    manager, _ = await accounts.register(
+        db_session, "invitation-manager@example.com", "strong-password-123", None
+    )
+    creator_user, creator = await approved_creator(db_session, "invitation-creator@example.com")
+    group = await groups.create_group(
+        db_session, manager, "Invitation Group", "invitation-group", 7_000, None
+    )
+
+    membership = await groups.invite_creator(
+        db_session,
+        group.id,
+        manager,
+        creator.id,
+        None,
+        [GroupPermission.manage_content],
+    )
+    created = (
+        await db_session.scalars(
+            select(NotificationIntent).where(
+                NotificationIntent.source_domain == "groups",
+                NotificationIntent.source_id == str(membership.id),
+            )
+        )
+    ).all()
+    assert [(row.recipient_user_id, row.notification_type) for row in created] == [
+        (creator_user.id, "GROUP_INVITATION")
+    ]
+
+    await groups.reject_invitation(db_session, membership.id, creator_user)
+    rejected = (
+        await db_session.scalars(
+            select(NotificationIntent)
+            .where(
+                NotificationIntent.source_domain == "groups",
+                NotificationIntent.source_id == str(membership.id),
+            )
+            .order_by(NotificationIntent.created_at, NotificationIntent.id)
+        )
+    ).all()
+    assert {(row.recipient_user_id, row.notification_type) for row in rejected} == {
+        (creator_user.id, "GROUP_INVITATION"),
+        (manager.id, "GROUP_INVITATION_REJECTED"),
+    }
 
 
 @pytest.mark.asyncio

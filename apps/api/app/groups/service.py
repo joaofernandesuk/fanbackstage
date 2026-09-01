@@ -156,18 +156,6 @@ async def invite_creator(
         body="Review the invitation and proposed contract in FanBackstage.",
         target_path="/groups",
     )
-    group = await db.get(Group, membership.group_id)
-    assert group is not None
-    await emit_transactional(
-        db,
-        recipient_user_id=group.owner_user_id,
-        notification_type="GROUP_INVITATION_REJECTED",
-        source_domain="groups",
-        source_id=str(membership.id),
-        title="Group invitation declined",
-        body="A creator declined a group invitation.",
-        target_path="/groups",
-    )
     return membership
 
 
@@ -250,6 +238,18 @@ async def reject_invitation(
         actor_user_id=actor.id,
         target_type="group_membership",
         target_id=str(membership.id),
+    )
+    group = await db.get(Group, membership.group_id)
+    assert group is not None
+    await emit_transactional(
+        db,
+        recipient_user_id=group.owner_user_id,
+        notification_type="GROUP_INVITATION_REJECTED",
+        source_domain="groups",
+        source_id=str(membership.id),
+        title="Group invitation declined",
+        body="A creator declined a group invitation.",
+        target_path="/groups",
     )
     return membership
 
