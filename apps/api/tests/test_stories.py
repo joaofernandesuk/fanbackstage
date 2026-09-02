@@ -838,8 +838,32 @@ async def test_story_api_projects_only_safe_paths_and_soft_deleted_detail_disapp
         story_id = payload["id"]
         assert payload["created_at"]
         assert payload["media"]["delivery_path"] == f"/stories/{story_id}/media"
+        assert payload["reaction_count"] == 0
+        assert payload["reaction_counts"] == {}
+        assert payload["viewer_reaction"] is None
         assert asset.storage_key not in created.text
         assert derivative and derivative.storage_key not in created.text
+
+        reacted = await creator_client.put(
+            f"/api/v1/stories/{story_id}/reaction",
+            json={"reaction_type": "love"},
+        )
+        assert reacted.status_code == 200
+        assert reacted.json() == {"reaction_type": "love"}
+        reacted_detail = await creator_client.get(f"/api/v1/stories/{story_id}")
+        assert reacted_detail.status_code == 200
+        assert reacted_detail.json()["reaction_count"] == 1
+        assert reacted_detail.json()["reaction_counts"] == {"love": 1}
+        assert reacted_detail.json()["viewer_reaction"] == "love"
+
+        unreacted = await creator_client.delete(f"/api/v1/stories/{story_id}/reaction")
+        assert unreacted.status_code == 200
+        assert unreacted.json() == {"removed": True}
+        unreacted_detail = await creator_client.get(f"/api/v1/stories/{story_id}")
+        assert unreacted_detail.status_code == 200
+        assert unreacted_detail.json()["reaction_count"] == 0
+        assert unreacted_detail.json()["reaction_counts"] == {}
+        assert unreacted_detail.json()["viewer_reaction"] is None
 
         replayed = await creator_client.post(
             "/api/v1/stories",

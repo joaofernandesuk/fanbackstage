@@ -115,7 +115,7 @@ from app.models.social import (
     PostReaction,
     SocialReport,
 )
-from app.models.story import Story
+from app.models.story import Story, StoryReaction
 from app.models.streaming import (
     CreatorLiveSettings,
     LiveBan,
@@ -279,6 +279,7 @@ __all__ = [
     "StagingCreatorKycSandboxEvent",
     "SocialReport",
     "Story",
+    "StoryReaction",
     "Subscription",
     "SubscriptionPeriod",
     "SubscriptionPlan",

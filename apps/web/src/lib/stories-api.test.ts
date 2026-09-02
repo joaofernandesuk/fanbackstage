@@ -43,6 +43,9 @@ function story(overrides: Partial<PublicStory> = {}): PublicStory {
     compliance_code: "ALLOWED",
     compliance_action: null,
     compliance_reason: "Policy allows access",
+    reaction_count: 0,
+    reaction_counts: {},
+    viewer_reaction: null,
     ...overrides,
   };
 }

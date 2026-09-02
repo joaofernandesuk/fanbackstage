@@ -16,6 +16,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, Timestamped, UUIDPrimaryKey
 from app.models.content import AccessPolicy
+from app.models.social import ReactionType
 
 
 class StoryStatus(str, enum.Enum):
@@ -73,3 +74,18 @@ class Story(UUIDPrimaryKey, Timestamped, Base):
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StoryReaction(UUIDPrimaryKey, Timestamped, Base):
+    """One current reaction per viewer for an active Story."""
+
+    __tablename__ = "story_reactions"
+    __table_args__ = (
+        UniqueConstraint("story_id", "user_id", name="uq_story_reactions_story_user"),
+    )
+
+    story_id: Mapped[UUID] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    reaction_type: Mapped[ReactionType] = mapped_column(
+        Enum(ReactionType, name="reaction_type", create_type=False), default=ReactionType.like
+    )

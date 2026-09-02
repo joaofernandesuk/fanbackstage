@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.compliance.http import resolve_request_compliance_decision
@@ -20,7 +20,9 @@ from app.media.storage import storage_provider
 from app.models.compliance import ComplianceFeature
 from app.models.content import MediaAsset, MediaStatus
 from app.models.creator import CreatorProfile, CreatorVerification, VerificationStatus
-from app.models.story import Story, StoryStatus
+from app.models.social import ReactionType
+from app.models.story import Story, StoryReaction, StoryStatus
+from app.schemas.social import ReactionInput
 from app.schemas.story import (
     StoryCreate,
     StoryCreatorResponse,
@@ -56,6 +58,7 @@ async def story_response(
     story: Story,
     compliance_decision: ComplianceDecision | None = None,
     platform_decision: ComplianceDecision | None = None,
+    user=None,
 ) -> StoryResponse:
     creator = await db.get(CreatorProfile, story.creator_id)
     asset = await db.get(MediaAsset, story.media_asset_id)
@@ -82,6 +85,23 @@ async def story_response(
         .order_by(CreatorVerification.created_at.desc())
         .limit(1)
     )
+    reaction_rows = (
+        await db.execute(
+            select(StoryReaction.reaction_type, func.count())
+            .where(StoryReaction.story_id == story.id)
+            .group_by(StoryReaction.reaction_type)
+        )
+    ).all()
+    reaction_counts = {reaction_type.value: int(count) for reaction_type, count in reaction_rows}
+    viewer_reaction = None
+    if user is not None:
+        reaction = await db.scalar(
+            select(StoryReaction).where(
+                StoryReaction.story_id == story.id,
+                StoryReaction.user_id == user.id,
+            )
+        )
+        viewer_reaction = reaction.reaction_type.value if reaction else None
     return StoryResponse(
         id=story.id,
         status=story.status.value,
@@ -112,6 +132,9 @@ async def story_response(
             if derivative
             else None
         ),
+        reaction_count=sum(reaction_counts.values()),
+        reaction_counts=reaction_counts,
+        viewer_reaction=viewer_reaction,
         adult_access_required=requires_adult,
         adult_access_granted=not requires_adult
         or bool(decision is None or decision.age_access_allowed),
@@ -157,7 +180,7 @@ async def create_story(
             idempotency_key or "",
         )
         await db.commit()
-        return await story_response(db, story, decision, platform_decision)
+        return await story_response(db, story, decision, platform_decision, identity[0])
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(
@@ -182,7 +205,10 @@ async def own_stories(
         platform_decision = await request_adult_access(
             db, request, identity, adult_restricted=False
         )
-        return [await story_response(db, story, decision, platform_decision) for story in rows]
+        return [
+            await story_response(db, story, decision, platform_decision, identity[0])
+            for story in rows
+        ]
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -219,7 +245,12 @@ async def public_rail(
         else:
             rows, next_cursor = [], None
         return StoryRailResponse(
-            items=[await story_response(db, story, decision, platform_decision) for story in rows],
+            items=[
+                await story_response(
+                    db, story, decision, platform_decision, identity[0] if identity else None
+                )
+                for story in rows
+            ],
             next_cursor=next_cursor,
             compliance_allowed=platform_decision.allowed,
             compliance_code=platform_decision.code,
@@ -314,7 +345,9 @@ async def public_detail(
     )
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
-    return await story_response(db, story, decision, platform_decision)
+    return await story_response(
+        db, story, decision, platform_decision, identity[0] if identity else None
+    )
 
 
 @router.delete("/{story_id}", response_model=StoryResponse)
@@ -329,7 +362,71 @@ async def delete_story(
         platform_decision = await request_adult_access(
             db, request, identity, adult_restricted=False
         )
-        return await story_response(db, story, decision, platform_decision)
+        return await story_response(db, story, decision, platform_decision, identity[0])
     except PermissionError as exc:
         await db.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+async def _reactable_story(
+    db: Db, request: Request, identity: CurrentIdentity, story_id: UUID
+) -> Story:
+    decision = await request_adult_access(db, request, identity)
+    story = await service.public_story(
+        db,
+        story_id,
+        identity[0],
+        access_decision=decision,
+    )
+    if story is None:
+        raise HTTPException(status_code=404, detail="Story not found")
+    return story
+
+
+@router.put("/{story_id}/reaction")
+async def react_to_story(
+    story_id: UUID,
+    payload: ReactionInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    await enforce_social_rate_limit(request, str(identity[0].id), "story_reaction")
+    await _reactable_story(db, request, identity, story_id)
+    try:
+        kind = ReactionType(payload.reaction_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid reaction") from exc
+    reaction = await db.scalar(
+        select(StoryReaction).where(
+            StoryReaction.story_id == story_id,
+            StoryReaction.user_id == identity[0].id,
+        )
+    )
+    if reaction is None:
+        db.add(StoryReaction(story_id=story_id, user_id=identity[0].id, reaction_type=kind))
+    else:
+        reaction.reaction_type = kind
+    await db.commit()
+    return {"reaction_type": kind.value}
+
+
+@router.delete("/{story_id}/reaction")
+async def unreact_to_story(
+    story_id: UUID,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    await enforce_social_rate_limit(request, str(identity[0].id), "story_reaction")
+    await _reactable_story(db, request, identity, story_id)
+    reaction = await db.scalar(
+        select(StoryReaction).where(
+            StoryReaction.story_id == story_id,
+            StoryReaction.user_id == identity[0].id,
+        )
+    )
+    if reaction is not None:
+        await db.delete(reaction)
+    await db.commit()
+    return {"removed": reaction is not None}

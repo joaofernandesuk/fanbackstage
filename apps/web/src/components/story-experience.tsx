@@ -25,7 +25,17 @@ import {
 } from "../lib/stories-api";
 import { AdultAccessGate } from "./adult-access-gate";
 import { AccessBadge, CreatorAvatar, EmptyState, VerifiedBadge, useLoginGate } from "./consumer-ui";
+import { ReportDialog, type ReportTarget } from "./report-dialog";
 import styles from "./story-experience.module.css";
+
+type StoryReactionKind = "like" | "love" | "fire" | "wow";
+
+const STORY_REACTIONS: Array<{ kind: StoryReactionKind; label: string; symbol: string }> = [
+  { kind: "like", label: "Like", symbol: "❤️" },
+  { kind: "love", label: "Love", symbol: "😍" },
+  { kind: "fire", label: "Fire", symbol: "🔥" },
+  { kind: "wow", label: "Wow", symbol: "😮" },
+];
 
 export function StoryRailSource({
   limit = 12,
@@ -315,6 +325,7 @@ function StoryViewer({
             </span>
           </Link>
           <AccessBadge policy={story.access_policy} />
+          <StoryMenu storyId={story.id} />
           <button
             aria-label="Close story"
             className={styles.close}
@@ -328,8 +339,7 @@ function StoryViewer({
           <div className={styles.storyActions}>
             <Link href={storyProfilePath(group.creator.username)}>View profile</Link>
             <div className={styles.storyActionMeta}>
-              <span>Replies and reactions aren’t available yet.</span>
-              <StoryReport key={story.id} storyId={story.id} />
+              <StoryReaction key={story.id} story={story} />
             </div>
           </div>
         </div>
@@ -351,54 +361,140 @@ function StoryViewer({
   );
 }
 
-function StoryReport({ storyId }: { storyId: string }) {
-  const [state, setState] = useState<"idle" | "confirm" | "pending" | "sent">("idle");
+function StoryMenu({ storyId }: { storyId: string }) {
+  const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
   const [error, setError] = useState("");
   const { authenticated, loading, requireLogin } = useLoginGate();
 
-  async function submit() {
-    setState("pending");
+  function openReport() {
+    if (!authenticated) {
+      requireLogin();
+      return;
+    }
     setError("");
+    setReportTarget({ targetType: "story", targetId: storyId, label: "story" });
+  }
+
+  return (
+    <>
+      <details className={styles.storyMenu}>
+        <summary aria-label="Story options">•••</summary>
+        <div>
+          <button disabled={loading} onClick={openReport} type="button">Report story</button>
+        </div>
+      </details>
+      <ReportDialog
+        onClose={() => setReportTarget(null)}
+        onSubmitted={() => setError("Report received. Our safety team will review it.")}
+        submitPath={storyReportPath(storyId)}
+        target={reportTarget}
+      />
+      {error && <span className={styles.storyMenuNotice} role="status">{error}</span>}
+    </>
+  );
+}
+
+function StoryReaction({ story }: { story: PublicStory }) {
+  const { authenticated, loading, requireLogin } = useLoginGate();
+  const [reaction, setReaction] = useState<StoryReactionKind | null>(
+    story.viewer_reaction as StoryReactionKind | null,
+  );
+  const [counts, setCounts] = useState<Record<string, number>>(story.reaction_counts ?? {});
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [burst, setBurst] = useState<StoryReactionKind | null>(null);
+  const [working, setWorking] = useState(false);
+  const closeTimer = useRef<number | null>(null);
+  const active = STORY_REACTIONS.find((item) => item.kind === reaction) ?? null;
+
+  useEffect(() => {
+    setReaction(story.viewer_reaction as StoryReactionKind | null);
+    setCounts(story.reaction_counts ?? {});
+  }, [story]);
+
+  useEffect(() => () => {
+    if (closeTimer.current) window.clearTimeout(closeTimer.current);
+  }, []);
+
+  function keepPickerOpen() {
+    if (closeTimer.current) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+    setPickerOpen(true);
+  }
+
+  function closePickerAfterGrace() {
+    if (closeTimer.current) window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      setPickerOpen(false);
+      closeTimer.current = null;
+    }, 220);
+  }
+
+  async function react(kind: StoryReactionKind) {
+    if (!authenticated) {
+      requireLogin();
+      return;
+    }
+    setWorking(true);
     try {
-      await api<{ reported: boolean }>(storyReportPath(storyId), {
-        method: "POST",
-        body: JSON.stringify({ reason: "story_safety_concern" }),
+      const removing = reaction === kind;
+      await api(`/stories/${story.id}/reaction`, {
+        method: removing ? "DELETE" : "PUT",
+        body: removing ? undefined : JSON.stringify({ reaction_type: kind }),
       });
-      setState("sent");
-    } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) {
-        const next = `${window.location.pathname}${window.location.search}`;
-        window.location.assign(`/login?next=${encodeURIComponent(next)}`);
-        return;
+      setCounts((current) => {
+        const next = { ...current };
+        if (reaction) next[reaction] = Math.max(0, (next[reaction] ?? 0) - 1);
+        if (!removing) next[kind] = (next[kind] ?? 0) + 1;
+        return next;
+      });
+      setReaction(removing ? null : kind);
+      if (!removing) {
+        setBurst(kind);
+        window.setTimeout(() => setBurst(null), 520);
       }
-      setError(caught instanceof ApiError ? caught.message : "Unable to send report");
-      setState("confirm");
+      setPickerOpen(false);
+    } finally {
+      setWorking(false);
     }
   }
 
-  if (state === "sent") return <span role="status">Report received.</span>;
-  if (state === "confirm") {
-    return (
-      <span className={styles.reportConfirm}>
-        <span>Send this Story to the safety team?</span>
-        <button onClick={() => setState("idle")} type="button">Cancel</button>
-        <button onClick={() => void submit()} type="button">Send report</button>
-        {error && <span role="alert">{error}</span>}
-      </span>
-    );
-  }
-  if (state === "pending") return <span role="status">Sending report…</span>;
-  if (!authenticated) {
-    return (
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  return (
+    <div
+      className={styles.storyReactionControl}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setPickerOpen(false);
+      }}
+      onFocus={keepPickerOpen}
+      onMouseEnter={keepPickerOpen}
+      onMouseLeave={closePickerAfterGrace}
+    >
       <button
-        className={styles.reportButton}
-        disabled={loading}
-        onClick={() => requireLogin()}
+        aria-label={active ? `Remove ${active.label} reaction` : "React to story"}
+        className={active ? styles.storyReactionActive : ""}
+        disabled={loading || working}
+        onClick={() => void react("like")}
         type="button"
-      >{loading ? "Checking access…" : "Log in to report story"}</button>
-    );
-  }
-  return <button className={styles.reportButton} onClick={() => setState("confirm")} type="button">Report story</button>;
+      >
+        <span aria-hidden="true">{active?.symbol ?? "♡"}</span>
+        {total > 0 && <small>{total}</small>}
+      </button>
+      <div aria-label="Choose a reaction" className={`${styles.storyReactionPicker} ${pickerOpen ? styles.storyReactionPickerOpen : ""}`} role="group">
+        {STORY_REACTIONS.map((item) => (
+          <button
+            aria-label={`React ${item.label} to story`}
+            className={burst === item.kind ? styles.storyReactionBurst : ""}
+            disabled={loading || working}
+            key={item.kind}
+            onClick={() => void react(item.kind)}
+            type="button"
+          >{item.symbol}</button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function StoryMedia({ story }: { story: PublicStory }) {
@@ -436,7 +532,10 @@ function StoryMedia({ story }: { story: PublicStory }) {
           aria-label={resolvedStory.alt_text ?? `${resolvedStory.creator.display_name} story video`}
           className={loaded ? "" : styles.mediaHidden}
           controls
+          controlsList="nodownload noremoteplayback"
+          disableRemotePlayback
           onError={() => setError(true)}
+          onContextMenu={(event) => event.preventDefault()}
           onLoadedData={() => setLoaded(true)}
           playsInline
           preload="metadata"

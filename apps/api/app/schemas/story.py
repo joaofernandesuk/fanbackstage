@@ -39,6 +39,9 @@ class StoryResponse(BaseModel):
     published_at: datetime
     expires_at: datetime
     media: StoryMediaResponse | None = None
+    reaction_count: int = 0
+    reaction_counts: dict[str, int] = Field(default_factory=dict)
+    viewer_reaction: str | None = None
     adult_access_required: bool = False
     adult_access_granted: bool = True
     compliance_allowed: bool = True

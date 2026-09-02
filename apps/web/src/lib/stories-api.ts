@@ -28,6 +28,9 @@ export type PublicStory = ComplianceAccess & {
   published_at: string;
   expires_at: string;
   media: StoryMedia | null;
+  reaction_count: number;
+  reaction_counts: Record<string, number>;
+  viewer_reaction: string | null;
 };
 
 export type StoryRailPage = ComplianceAccess & {
