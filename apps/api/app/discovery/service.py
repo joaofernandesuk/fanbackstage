@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event as record_audit_event
@@ -73,9 +74,18 @@ async def current_config(db: AsyncSession) -> DiscoveryConfig:
     )
     if config:
         return config
-    config = DiscoveryConfig(version=1)
-    db.add(config)
-    await db.flush()
+    await db.execute(
+        insert(DiscoveryConfig)
+        .values(version=1)
+        .on_conflict_do_nothing(index_elements=[DiscoveryConfig.version])
+    )
+    config = await db.scalar(
+        select(DiscoveryConfig)
+        .where(DiscoveryConfig.is_current.is_(True))
+        .order_by(DiscoveryConfig.version.desc())
+    )
+    if config is None:
+        raise RuntimeError("Discovery configuration initialization failed")
     return config
 
 
