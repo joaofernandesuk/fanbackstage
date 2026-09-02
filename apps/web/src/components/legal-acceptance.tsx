@@ -10,6 +10,7 @@ import {
   initialLegalAcceptanceSelection,
   legalDocumentPath,
   legalGateBypasses,
+  reconcileLegalAcceptanceSelection,
 } from "../lib/legal";
 import styles from "./legal.module.css";
 
@@ -25,7 +26,10 @@ export function LegalAcceptanceGate({ children }: { children: React.ReactNode })
     try {
       const result = await api<{ documents: LegalDocument[] }>("/legal/me/requirements");
       setDocuments(result.documents);
-      setSelected(initialLegalAcceptanceSelection(result.documents.map((item) => item.version_id)));
+      const versionIds = result.documents.map((item) => item.version_id);
+      setSelected((current) => current.size
+        ? reconcileLegalAcceptanceSelection(current, versionIds)
+        : initialLegalAcceptanceSelection(versionIds));
       setError("");
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {

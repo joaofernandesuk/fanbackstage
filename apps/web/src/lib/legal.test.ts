@@ -6,6 +6,7 @@ import {
   legalDocumentPath,
   legalGateBypasses,
   legalMarkdownToBlocks,
+  reconcileLegalAcceptanceSelection,
 } from "./legal";
 
 describe("legal content helpers", () => {
@@ -40,6 +41,12 @@ describe("legal content helpers", () => {
 describe("legal acceptance gate policy", () => {
   it("never preselects required versions", () => {
     expect([...initialLegalAcceptanceSelection(["v1", "v2"])]).toEqual([]);
+  });
+
+  it("preserves only still-required selections across duplicate requirement loads", () => {
+    expect([...reconcileLegalAcceptanceSelection(new Set(["v1", "retired"]), ["v1", "v2"])])
+      .toEqual(["v1"]);
+    expect([...reconcileLegalAcceptanceSelection(new Set(["v1"]), [])]).toEqual([]);
   });
 
   it("keeps legal recovery and marketing opt-out reachable behind the global gate", () => {

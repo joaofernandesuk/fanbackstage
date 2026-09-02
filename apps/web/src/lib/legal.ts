@@ -216,6 +216,14 @@ export function initialLegalAcceptanceSelection(_requiredVersionIds: readonly st
   return new Set<string>();
 }
 
+export function reconcileLegalAcceptanceSelection(
+  current: ReadonlySet<string>,
+  requiredVersionIds: readonly string[],
+) {
+  const required = new Set(requiredVersionIds);
+  return new Set([...current].filter((versionId) => required.has(versionId)));
+}
+
 export function legalGateBypasses(pathname: string) {
   return pathname === "/legal"
     || pathname.startsWith("/legal/")
