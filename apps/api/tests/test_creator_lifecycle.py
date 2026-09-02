@@ -285,8 +285,10 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
 ):
     db_session.add_all(
         [
-            CreatorCategory(slug="studio", label="Studio", enabled=True, position=20),
-            CreatorCategory(slug="cosplay", label="Cosplay", enabled=True, position=10),
+            CreatorCategory(slug="live-shows", label="Live shows", enabled=True, position=20),
+            CreatorCategory(
+                slug="cosplay-fantasy", label="Cosplay & fantasy", enabled=True, position=10
+            ),
             CreatorCategory(slug="disabled-category", label="Disabled", enabled=False),
             CreatorLanguage(code="en", label="English", enabled=True),
             CreatorLanguage(code="pt", label="Portuguese", enabled=True),
@@ -319,8 +321,8 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
         started = await client.post("/api/v1/creators/me/application")
         assert started.status_code == 200
         assert [item["code"] for item in started.json()["available_categories"]] == [
-            "cosplay",
-            "studio",
+            "cosplay-fantasy",
+            "live-shows",
         ]
         assert [item["code"] for item in started.json()["available_languages"]] == [
             "en",
@@ -338,7 +340,7 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
                 "city": "Lisbon",
                 "show_location": True,
                 "timezone": "Europe/Lisbon",
-                "category_slugs": ["STUDIO", "cosplay"],
+                "category_slugs": ["LIVE-SHOWS", "cosplay-fantasy"],
                 "language_codes": ["PT", "en"],
                 "social_links": [
                     {"label": "Portfolio", "url": "https://creator.example/portfolio"},
@@ -349,8 +351,8 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
         assert saved.status_code == 200
         assert saved.json()["country_code"] == "PT"
         assert [item["code"] for item in saved.json()["categories"]] == [
-            "cosplay",
-            "studio",
+            "cosplay-fantasy",
+            "live-shows",
         ]
         assert [item["code"] for item in saved.json()["languages"]] == ["en", "pt"]
         assert saved.json()["social_links"] == [
@@ -361,7 +363,7 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
         replaced = await client.patch(
             "/api/v1/creators/me",
             json={
-                "category_slugs": ["studio"],
+                "category_slugs": ["live-shows"],
                 "language_codes": ["pt"],
                 "social_links": [
                     {"label": "Latest updates", "url": "https://social.example/updates"}
@@ -369,7 +371,7 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
             },
         )
         assert replaced.status_code == 200
-        assert [item["code"] for item in replaced.json()["categories"]] == ["studio"]
+        assert [item["code"] for item in replaced.json()["categories"]] == ["live-shows"]
         assert [item["code"] for item in replaced.json()["languages"]] == ["pt"]
         assert replaced.json()["social_links"] == [
             {"label": "Latest updates", "url": "https://social.example/updates"}
@@ -391,7 +393,7 @@ async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_v
 
         persisted = await client.get("/api/v1/creators/me")
         assert persisted.status_code == 200
-        assert [item["code"] for item in persisted.json()["categories"]] == ["studio"]
+        assert [item["code"] for item in persisted.json()["categories"]] == ["live-shows"]
         assert [item["code"] for item in persisted.json()["languages"]] == ["pt"]
         assert persisted.json()["social_links"] == [
             {"label": "Latest updates", "url": "https://social.example/updates"}

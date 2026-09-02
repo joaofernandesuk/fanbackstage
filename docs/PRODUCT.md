@@ -210,6 +210,8 @@ Every post can independently be Free, Followers, Subscribers, PPV or other suppo
 
 Provide Following and Discover/For You experiences. Initial ranking can rely on deterministic signals before machine-learning complexity: recency, engagement, followed categories, creator interactions, prior purchases, live status, language, popularity and featured placements. Sponsored/featured ranking must remain distinguishable from organic ranking internally and, where required, visibly.
 
+Creator categories are optional discovery interests, not account roles or content-permission labels. The initial catalogue is tailored to adult-creator work: solo performances, couples and collaborations, glamour and lingerie, fetish and kink, cosplay and fantasy, live shows, photo sets, video and behind-the-scenes, audio and ASMR, fitness and body confidence, roleplay and characters, and custom content. Creators select searchable interests as removable chips; the platform may use them for discovery only. They never replace consent, verification, jurisdiction, age-assurance, or access-policy decisions.
+
 # 14. Stories and Creator Studio
 
 Stories are a first-class social and monetisation format, not merely a temporary feed post. The platform should provide a mobile-first Creator Studio for recording, composing, editing, previewing and publishing Stories.
