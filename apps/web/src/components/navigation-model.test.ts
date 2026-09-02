@@ -87,6 +87,7 @@ describe("consumer navigation model", () => {
     expect(labels(accountNavigation(admin))).toEqual(
       expect.arrayContaining([
         "Moderation",
+        "Operations overview",
         "Platform Analytics",
         "Discovery Controls",
         "Featuring Admin",

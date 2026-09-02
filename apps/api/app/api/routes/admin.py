@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
@@ -11,7 +11,13 @@ from app.marketplace import service as marketplace_service
 from app.media import service as media_service
 from app.models.audit import AuditEvent
 from app.models.content import ContentItem, ContentStatus, ModerationStatus
-from app.models.creator import CreatorProfile, CreatorStatus
+from app.models.creator import (
+    CreatorProfile,
+    CreatorStatus,
+    CreatorVerification,
+    VerificationStatus,
+)
+from app.models.finance import PaymentRefundRequirement, RefundRequirementStatus
 from app.models.groups import Group, GroupCreatorMembership
 from app.models.identity import User
 from app.models.marketplace import (
@@ -24,6 +30,14 @@ from app.models.marketplace import (
 from app.models.notification import EmailSuppression, NotificationDeliveryAttempt
 from app.models.social import FeedPost, FeedPostStatus, PostComment, ReportStatus, SocialReport
 from app.models.story import Story
+from app.models.trust_safety import (
+    AppealStatus,
+    ConsentRelease,
+    ConsentReleaseStatus,
+    ModerationAppeal,
+    ModerationCase,
+    ModerationCaseStatus,
+)
 from app.permissions.policies import Permission, authorize
 from app.referrals import service as referral_service
 from app.schemas.admin import CreatorApplicationDecisionInput, MediaAudienceUpdate
@@ -775,6 +789,108 @@ async def suspend_creator(
         identity,
         db,
     )
+
+
+@router.get("/operations/overview")
+async def operations_overview(identity: CurrentIdentity, db: Db) -> dict:
+    """Small, server-authorised operational snapshot; each card links to its owned workflow."""
+
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    actionable_case_statuses = (
+        ModerationCaseStatus.open,
+        ModerationCaseStatus.triage,
+        ModerationCaseStatus.investigating,
+        ModerationCaseStatus.action_required,
+        ModerationCaseStatus.reopened,
+    )
+    creator_review = await db.scalar(
+        select(func.count())
+        .select_from(CreatorProfile)
+        .where(CreatorProfile.status == CreatorStatus.pending_review)
+    )
+    creator_verification = await db.scalar(
+        select(func.count())
+        .select_from(CreatorProfile)
+        .where(CreatorProfile.status == CreatorStatus.pending_verification)
+    )
+    kyc_review_count = await db.scalar(
+        select(func.count())
+        .select_from(CreatorVerification)
+        .where(CreatorVerification.status == VerificationStatus.needs_review)
+    )
+    case_count = await db.scalar(
+        select(func.count())
+        .select_from(ModerationCase)
+        .where(ModerationCase.status.in_(actionable_case_statuses))
+    )
+    appeal_count = await db.scalar(
+        select(func.count())
+        .select_from(ModerationAppeal)
+        .where(ModerationAppeal.status.in_((AppealStatus.submitted, AppealStatus.under_review)))
+    )
+    consent_count = await db.scalar(
+        select(func.count())
+        .select_from(ConsentRelease)
+        .where(ConsentRelease.status == ConsentReleaseStatus.pending)
+    )
+    payment_exception_count = await db.scalar(
+        select(func.count())
+        .select_from(PaymentRefundRequirement)
+        .where(PaymentRefundRequirement.status == RefundRequirementStatus.required)
+    )
+    return {
+        "queues": [
+            {
+                "key": "creator_review",
+                "label": "Creator applications",
+                "count": int(creator_review or 0),
+                "href": "/admin/creators?status=pending_review",
+                "description": "Identity-verified applications ready for an audited decision.",
+            },
+            {
+                "key": "creator_verification",
+                "label": "Creator identity checks",
+                "count": int(creator_verification or 0),
+                "href": "/admin/creators?status=pending_verification",
+                "description": "Applicants completing provider-backed identity verification; no approval action is available yet.",
+            },
+            {
+                "key": "kyc_review",
+                "label": "KYC manual reviews",
+                "count": int(kyc_review_count or 0),
+                "href": "/admin/compliance",
+                "description": "Verification outcomes requiring a separately authorised compliance review.",
+            },
+            {
+                "key": "moderation",
+                "label": "Moderation cases",
+                "count": int(case_count or 0),
+                "href": "/moderation",
+                "description": "Open, triage, investigation, action-required, or reopened cases.",
+            },
+            {
+                "key": "appeals",
+                "label": "Appeals",
+                "count": int(appeal_count or 0),
+                "href": "/moderation/appeals",
+                "description": "Submitted or under-review appeal decisions.",
+            },
+            {
+                "key": "consent",
+                "label": "Consent releases",
+                "count": int(consent_count or 0),
+                "href": "/moderation/consent",
+                "description": "Consent releases awaiting authorised verification.",
+            },
+            {
+                "key": "payment_exceptions",
+                "label": "Payment exceptions",
+                "count": int(payment_exception_count or 0),
+                "href": "/admin/analytics",
+                "description": "Duplicate-capture refund requirements awaiting ledger-backed resolution.",
+            },
+        ]
+    }
 
 
 async def content_review_action(

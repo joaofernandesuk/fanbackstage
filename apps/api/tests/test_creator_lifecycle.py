@@ -786,6 +786,9 @@ async def test_admin_creator_queue_notifies_reviewers_and_records_decision_reaso
         assert notification is not None
         assert notification.target_path == "/admin/creators?status=pending_review"
         assert applicant_email not in notification.body
+        assert (
+            await applicant_client.get("/api/v1/admin/operations/overview")
+        ).status_code == 403
 
         assert (
             await admin_client.post(
@@ -793,6 +796,12 @@ async def test_admin_creator_queue_notifies_reviewers_and_records_decision_reaso
                 json={"email": admin.email, "password": "strong-password-123"},
             )
         ).status_code == 200
+        overview = await admin_client.get("/api/v1/admin/operations/overview")
+        assert overview.status_code == 200
+        assert any(
+            queue["key"] == "creator_review" and queue["count"] == 1
+            for queue in overview.json()["queues"]
+        )
         queue = await admin_client.get("/api/v1/admin/creator-applications?status=pending_review")
         assert queue.status_code == 200
         application = queue.json()[0]

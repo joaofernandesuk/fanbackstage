@@ -1,0 +1,33 @@
+.page {
+  display: grid;
+  gap: 28px;
+  margin: 0 auto;
+  max-width: 1320px;
+  padding: 52px 28px 80px;
+}
+
+.hero {
+  background:
+    radial-gradient(circle at 90% 8%, rgb(236 72 153 / 0.16), transparent 25rem),
+    linear-gradient(125deg, rgb(20 43 85 / 0.92), rgb(25 18 56 / 0.92));
+  border: 1px solid var(--border-subtle);
+  border-radius: 28px;
+  padding: clamp(28px, 5vw, 56px);
+}
+
+.hero h1 { font-size: clamp(2.5rem, 5vw, 5rem); line-height: .95; margin: 12px 0 18px; }
+.hero p:last-child { color: var(--text-secondary); font-size: 1.05rem; margin: 0; max-width: 680px; }
+.loading, .error { color: var(--text-secondary); margin: 0; }
+.error { color: var(--danger); }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.queue { background: linear-gradient(145deg, rgb(22 28 54 / .94), rgb(10 13 30 / .96)); border: 1px solid var(--border-subtle); border-radius: 22px; color: inherit; display: grid; gap: 22px; grid-template-columns: auto 1fr; min-height: 190px; padding: 24px; text-decoration: none; transition: border-color .18s ease, transform .18s ease; }
+.queue:hover { border-color: rgb(56 189 248 / .7); transform: translateY(-2px); }
+.count { align-items: center; background: linear-gradient(135deg, #159cf3, #a855f7 55%, #ec4899); border-radius: 16px; color: #050713; display: flex; font-size: 2rem; font-weight: 900; height: 62px; justify-content: center; min-width: 62px; }
+.queue h2 { font-size: 1.1rem; margin: 0; }
+.queue p { color: var(--text-secondary); font-size: .84rem; line-height: 1.5; margin: 9px 0 20px; }
+.open { color: #7dd3fc; font-size: .8rem; font-weight: 800; }
+.guidance { border-top: 1px solid var(--border-subtle); display: grid; gap: 24px; grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: 24px; }
+.guidance strong { font-size: 1rem; }
+.guidance p { color: var(--text-secondary); line-height: 1.55; margin: 7px 0 0; }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .page { padding: 24px 16px 56px; } .guidance { grid-template-columns: 1fr; } }
