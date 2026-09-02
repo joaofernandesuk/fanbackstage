@@ -29,6 +29,32 @@ from app.trust_safety import service
 router = APIRouter(prefix="/trust-safety", tags=["trust-safety"])
 
 
+@router.get("/report-options")
+async def report_options() -> dict:
+    """Expose the canonical, server-owned reasons used by every report flow."""
+
+    labels = {
+        "harassment": "Harassment or bullying",
+        "spam": "Spam",
+        "impersonation": "Impersonation",
+        "non_consensual_content": "Non-consensual content",
+        "underage_concern": "Underage concern",
+        "illegal_content": "Illegal content",
+        "copyright": "Copyright concern",
+        "scam_fraud": "Scam or fraud",
+        "prohibited_marketplace_item": "Prohibited item",
+        "threat_abuse": "Threat or abuse",
+        "privacy": "Privacy concern",
+        "other": "Other",
+    }
+    return {
+        "reasons": [
+            {"value": reason.value, "label": labels[reason.value]}
+            for reason in service.ReportReason
+        ]
+    }
+
+
 @router.post("/reports")
 async def create_report(
     payload: TrustSafetyReportInput,

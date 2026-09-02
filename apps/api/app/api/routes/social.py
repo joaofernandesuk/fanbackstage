@@ -8,16 +8,29 @@ from sqlalchemy.dialects.postgresql import insert
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.compliance.http import resolve_request_compliance_decision
 from app.compliance.types import ComplianceDecision
-from app.content.access import can_access_content, content_requires_adult_access
+from app.content.access import (
+    can_access_asset,
+    can_access_content,
+    can_access_preview,
+    content_requires_adult_access,
+)
 from app.core.rate_limit import enforce_social_rate_limit
 from app.models.compliance import ComplianceFeature
-from app.models.content import ContentItem, DerivativeType, MediaAsset, MediaDerivative, MediaStatus
-from app.models.creator import CreatorProfile
+from app.models.content import (
+    ContentItem,
+    DerivativeType,
+    MediaAsset,
+    MediaDerivative,
+    MediaStatus,
+    VideoContent,
+)
+from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.social import (
     FeedPost,
     FeedPostMedia,
     FeedPostStatus,
     PostComment,
+    PostCommentReaction,
     PostReaction,
     ReactionType,
     SocialReport,
@@ -56,12 +69,15 @@ async def post_response(
         and await service.can_access_post(db, post, user, compliance_decision)
     )
     creator = await db.get(CreatorProfile, post.creator_id)
-    reactions = (
-        await db.scalar(
-            select(func.count()).select_from(PostReaction).where(PostReaction.post_id == post.id)
+    reaction_rows = (
+        await db.execute(
+            select(PostReaction.reaction_type, func.count())
+            .where(PostReaction.post_id == post.id)
+            .group_by(PostReaction.reaction_type)
         )
-        or 0
-    )
+    ).all()
+    reaction_counts = {reaction_type.value: int(count) for reaction_type, count in reaction_rows}
+    reactions = sum(reaction_counts.values())
     comments = (
         await db.scalar(
             select(func.count())
@@ -146,6 +162,46 @@ async def post_response(
                 if content.access_policy.value == "ppv"
                 else None,
             }
+            video = await db.scalar(
+                select(VideoContent).where(VideoContent.content_id == content.id)
+            )
+            if video and content_compliance_allowed:
+                asset = await db.get(MediaAsset, video.source_media_asset_id)
+                if asset and asset.owner_creator_id == content.owner_creator_id:
+                    derivatives = {
+                        derivative.derivative_type: derivative
+                        for derivative in await db.scalars(
+                            select(MediaDerivative).where(
+                                MediaDerivative.media_asset_id == asset.id,
+                                MediaDerivative.derivative_type.in_(
+                                    [
+                                        DerivativeType.poster,
+                                        DerivativeType.preview_clip,
+                                        DerivativeType.playback,
+                                    ]
+                                ),
+                                MediaDerivative.status == MediaStatus.ready,
+                            )
+                        )
+                    }
+                    poster = derivatives.get(DerivativeType.poster)
+                    if poster and await can_access_preview(db, poster, user, compliance_decision):
+                        reference["poster_delivery_path"] = f"/media/previews/{poster.id}"
+                    playback = derivatives.get(DerivativeType.playback)
+                    if (
+                        content_allowed
+                        and playback
+                        and await can_access_asset(db, asset.id, user, compliance_decision)
+                    ):
+                        reference["media_delivery_path"] = f"/media/derivatives/{playback.id}"
+                        reference["media_kind"] = "playback"
+                    else:
+                        preview = derivatives.get(DerivativeType.preview_clip)
+                        if preview and await can_access_preview(
+                            db, preview, user, compliance_decision
+                        ):
+                            reference["media_delivery_path"] = f"/media/previews/{preview.id}"
+                            reference["media_kind"] = "trailer"
     return FeedPostResponse(
         id=post.id,
         creator_id=post.creator_id,
@@ -161,6 +217,7 @@ async def post_response(
         comments_enabled=post.comments_enabled and allowed,
         reactions_enabled=post.reactions_enabled and allowed,
         reaction_count=reactions,
+        reaction_counts=reaction_counts,
         comment_count=comments,
         viewer_reaction=viewer_reaction,
         media=media,
@@ -481,6 +538,61 @@ async def detail(post_id: UUID, request: Request, identity: OptionalIdentity, db
     )
 
 
+@router.get("/posts/{post_id}/reactions")
+async def reaction_details(post_id: UUID, request: Request, identity: OptionalIdentity, db: Db):
+    """Return reaction actors without disclosing non-public fan identities."""
+
+    post = await db.get(FeedPost, post_id)
+    user = identity[0] if identity else None
+    adult_decision = await request_feed_decision(db, request, user)
+    platform_decision = await request_platform_decision(db, request, user)
+    decision = (
+        adult_decision
+        if post and await service.post_requires_adult_access(db, post)
+        else platform_decision
+    )
+    if (
+        not post
+        or post.status is not FeedPostStatus.published
+        or not decision.allowed
+        or not await service.can_access_post(db, post, user, adult_decision)
+    ):
+        raise HTTPException(404, "Post not found")
+
+    rows = (
+        await db.execute(
+            select(
+                PostReaction.reaction_type,
+                CreatorProfile.display_name,
+                CreatorProfile.username,
+            )
+            .outerjoin(
+                CreatorProfile,
+                (CreatorProfile.user_id == PostReaction.user_id)
+                & CreatorProfile.is_public.is_(True)
+                & (CreatorProfile.status == CreatorStatus.approved),
+            )
+            .where(PostReaction.post_id == post_id)
+            .order_by(PostReaction.created_at.desc())
+        )
+    ).all()
+    counts: dict[str, int] = {}
+    items = []
+    for reaction_type, display_name, username in rows:
+        counts[reaction_type.value] = counts.get(reaction_type.value, 0) + 1
+        items.append(
+            {
+                "reaction_type": reaction_type.value,
+                "creator": (
+                    {"display_name": display_name or username, "username": username}
+                    if username
+                    else None
+                ),
+            }
+        )
+    return {"items": items, "total": len(items), "reaction_counts": counts}
+
+
 @router.put("/posts/{post_id}/reaction")
 async def react(
     post_id: UUID, payload: ReactionInput, request: Request, identity: CurrentIdentity, db: Db
@@ -596,6 +708,35 @@ async def comments(post_id: UUID, request: Request, identity: OptionalIdentity, 
             .order_by(PostComment.created_at)
         )
     ).all()
+    comment_ids = [row.id for row in rows]
+    reaction_counts: dict[UUID, dict[str, int]] = {comment_id: {} for comment_id in comment_ids}
+    if comment_ids:
+        reaction_rows = (
+            await db.execute(
+                select(
+                    PostCommentReaction.comment_id,
+                    PostCommentReaction.reaction_type,
+                    func.count(),
+                )
+                .where(PostCommentReaction.comment_id.in_(comment_ids))
+                .group_by(PostCommentReaction.comment_id, PostCommentReaction.reaction_type)
+            )
+        ).all()
+        for comment_id, reaction_type, count in reaction_rows:
+            reaction_counts[comment_id][reaction_type.value] = int(count)
+    viewer_reactions: dict[UUID, str] = {}
+    if user and comment_ids:
+        viewer_rows = (
+            await db.execute(
+                select(PostCommentReaction.comment_id, PostCommentReaction.reaction_type).where(
+                    PostCommentReaction.comment_id.in_(comment_ids),
+                    PostCommentReaction.user_id == user.id,
+                )
+            )
+        ).all()
+        viewer_reactions = {
+            comment_id: reaction_type.value for comment_id, reaction_type in viewer_rows
+        }
     return [
         {
             "id": str(row.id),
@@ -603,9 +744,78 @@ async def comments(post_id: UUID, request: Request, identity: OptionalIdentity, 
             "parent_id": str(row.parent_id) if row.parent_id else None,
             "body": row.body,
             "created_at": row.created_at,
+            "reaction_count": sum(reaction_counts[row.id].values()),
+            "reaction_counts": reaction_counts[row.id],
+            "viewer_reaction": viewer_reactions.get(row.id),
         }
         for row in rows
     ]
+
+
+async def _reactable_comment(
+    db: Db, request: Request, identity: CurrentIdentity, comment_id: UUID
+) -> PostComment:
+    value = await db.get(PostComment, comment_id)
+    post = await db.get(FeedPost, value.post_id) if value else None
+    adult_decision = await request_feed_decision(db, request, identity[0])
+    platform_decision = await request_platform_decision(db, request, identity[0])
+    decision = (
+        adult_decision
+        if post and await service.post_requires_adult_access(db, post)
+        else platform_decision
+    )
+    if (
+        value is None
+        or post is None
+        or value.hidden_at is not None
+        or value.deleted_at is not None
+        or not decision.allowed
+        or not await service.can_access_post(db, post, identity[0], adult_decision)
+    ):
+        raise HTTPException(404, "Comment not found")
+    return value
+
+
+@router.put("/comments/{comment_id}/reaction")
+async def react_to_comment(
+    comment_id: UUID, payload: ReactionInput, request: Request, identity: CurrentIdentity, db: Db
+):
+    await enforce_social_rate_limit(request, str(identity[0].id), "comment_reaction")
+    await _reactable_comment(db, request, identity, comment_id)
+    try:
+        kind = ReactionType(payload.reaction_type)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid reaction") from exc
+    reaction = await db.scalar(
+        select(PostCommentReaction).where(
+            PostCommentReaction.comment_id == comment_id,
+            PostCommentReaction.user_id == identity[0].id,
+        )
+    )
+    if reaction:
+        reaction.reaction_type = kind
+    else:
+        db.add(
+            PostCommentReaction(comment_id=comment_id, user_id=identity[0].id, reaction_type=kind)
+        )
+    await db.commit()
+    return {"reaction_type": kind.value}
+
+
+@router.delete("/comments/{comment_id}/reaction")
+async def unreact_to_comment(comment_id: UUID, request: Request, identity: CurrentIdentity, db: Db):
+    await enforce_social_rate_limit(request, str(identity[0].id), "comment_reaction")
+    await _reactable_comment(db, request, identity, comment_id)
+    reaction = await db.scalar(
+        select(PostCommentReaction).where(
+            PostCommentReaction.comment_id == comment_id,
+            PostCommentReaction.user_id == identity[0].id,
+        )
+    )
+    if reaction:
+        await db.delete(reaction)
+    await db.commit()
+    return {"removed": bool(reaction)}
 
 
 @router.delete("/comments/{comment_id}")

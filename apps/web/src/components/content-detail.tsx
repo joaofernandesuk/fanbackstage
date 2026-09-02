@@ -248,7 +248,7 @@ function VideoViewer({ content }: { content: PublicContent }) {
   if (content.has_access && playback) {
     return (
       <div className={styles.videoFrame}>
-        <video controls playsInline poster={poster ? contentDeliveryUrl(poster.delivery_path) : undefined} preload="metadata" src={contentDeliveryUrl(playback.delivery_path)} />
+        <video controls controlsList="nodownload noremoteplayback" disableRemotePlayback onContextMenu={(event) => event.preventDefault()} playsInline poster={poster ? contentDeliveryUrl(poster.delivery_path) : undefined} preload="metadata" src={contentDeliveryUrl(playback.delivery_path)} />
         <span className={styles.videoLabel}>FULL VIDEO</span>
       </div>
     );
@@ -256,7 +256,7 @@ function VideoViewer({ content }: { content: PublicContent }) {
   if (trailer) {
     return (
       <div className={styles.videoFrame}>
-        <video aria-label={`${content.title} preview trailer`} controls playsInline poster={poster ? contentDeliveryUrl(poster.delivery_path) : undefined} preload="metadata" src={contentDeliveryUrl(trailer.delivery_path)} />
+        <video aria-label={`${content.title} preview trailer`} controls controlsList="nodownload noremoteplayback" disableRemotePlayback onContextMenu={(event) => event.preventDefault()} playsInline poster={poster ? contentDeliveryUrl(poster.delivery_path) : undefined} preload="metadata" src={contentDeliveryUrl(trailer.delivery_path)} />
         <span className={styles.videoLabel}>PREVIEW TRAILER · {durationLabel(trailer.duration_seconds)}</span>
       </div>
     );

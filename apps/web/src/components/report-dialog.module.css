@@ -1,0 +1,54 @@
+.dialog {
+  background: transparent;
+  border: 0;
+  max-width: min(32rem, calc(100vw - 2rem));
+  padding: 0;
+}
+
+.dialog::backdrop {
+  background: rgb(2 5 18 / 0.78);
+  backdrop-filter: blur(5px);
+}
+
+.panel {
+  background: linear-gradient(145deg, #1a1f42, #0c1026);
+  border: 1px solid rgb(150 167 231 / 0.34);
+  border-radius: 1.25rem;
+  box-shadow: 0 28px 80px rgb(0 0 0 / 0.5);
+  color: #f5f7ff;
+  display: grid;
+  gap: 1rem;
+  padding: 1.35rem;
+}
+
+.header { align-items: flex-start; display: flex; justify-content: space-between; }
+.header span { color: #25b7ff; font-size: .7rem; font-weight: 850; letter-spacing: .15em; }
+.header h2 { font-size: 1.45rem; margin: .25rem 0 0; }
+.header > button {
+  background: transparent;
+  border: 1px solid rgb(255 255 255 / .2);
+  border-radius: 50%;
+  color: #e4e9ff;
+  font-size: 1.5rem;
+  height: 2.15rem;
+  line-height: 1;
+  width: 2.15rem;
+}
+.panel > p { color: #bdc7e2; line-height: 1.45; margin: 0; }
+.panel label { color: #eef1ff; display: grid; font-size: .88rem; font-weight: 750; gap: .45rem; }
+.panel select,
+.panel textarea {
+  background: #090d1e;
+  border: 1px solid #3b4669;
+  border-radius: .75rem;
+  color: #f7f9ff;
+  font: inherit;
+  padding: .75rem;
+}
+.panel textarea { min-height: 6.5rem; resize: vertical; }
+.error { color: #ff9fc8 !important; }
+.actions { display: flex; gap: .7rem; justify-content: flex-end; }
+.actions button { border-radius: 999px; font-weight: 850; padding: .65rem 1rem; }
+.actions button:first-child { background: transparent; border: 1px solid #465171; color: #e4e9ff; }
+.actions button:last-child { background: linear-gradient(90deg, #1e9dff, #df3a9a); border: 0; color: #07101f; }
+.actions button:disabled { cursor: not-allowed; opacity: .55; }

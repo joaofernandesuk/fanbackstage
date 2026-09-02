@@ -196,7 +196,7 @@ function SafePreviewMedia({ safePreview, fallback, title }: { safePreview?: stri
   return (
     <span className={styles.previewAnchor} ref={anchor}>
       {resolved?.kind === "video" ? (
-        <video aria-label={`${title} preview`} muted playsInline preload="metadata" src={resolved.url} />
+        <video aria-label={`${title} preview`} controlsList="nodownload noremoteplayback" disableRemotePlayback muted onContextMenu={(event) => event.preventDefault()} playsInline preload="metadata" src={resolved.url} />
       ) : resolved?.kind === "image" ? (
         <img alt={`${title} preview`} src={resolved.url} />
       ) : fallback ? (

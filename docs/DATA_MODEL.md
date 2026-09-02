@@ -27,7 +27,7 @@ communication controls, never alternative identity stores.
 | Referral | ReferralProgramme, ReferralCode, Attribution, ReferralEarning |
 | Moderation | Report, ModerationCase, ModerationAction, Appeal |
 | Audit | AuditEvent |
-| Social | Follow, CreatorFeedSettings, FeedPost, FeedPostMedia, PostReaction, PostComment, PostMention, Hashtag, SocialReport |
+| Social | Follow, CreatorFeedSettings, FeedPost, FeedPostMedia, PostReaction, PostComment, PostCommentReaction, PostMention, Hashtag, SocialReport |
 | Compliance | CountryRegistry, CompliancePolicyTemplate/Revision, JurisdictionPolicyRevision, FeatureFlagRevision, AnonymousComplianceSession, AgeVerificationRecord, AgeProviderCallbackEvent, AgeProviderProbe |
 | Performer | PerformerIdentity, PerformerIdentityVerification, PerformerAgeVerification, VerifiedContentPerformer, ConsentRelease |
 | Legal | LegalDocument, LegalDocumentVersion, LegalAcceptance, SiteSettingsVersion |

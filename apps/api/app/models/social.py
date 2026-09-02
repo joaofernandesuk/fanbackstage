@@ -158,6 +158,20 @@ class PostComment(UUIDPrimaryKey, Timestamped, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class PostCommentReaction(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "post_comment_reactions"
+    __table_args__ = (
+        UniqueConstraint("comment_id", "user_id", name="uq_post_comment_reactions_comment_user"),
+    )
+    comment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("post_comments.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    reaction_type: Mapped[ReactionType] = mapped_column(
+        Enum(ReactionType, name="reaction_type", create_type=False), default=ReactionType.like
+    )
+
+
 class PostMention(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "post_mentions"
     __table_args__ = (UniqueConstraint("post_id", "mentioned_creator_id", name="uq_post_mentions"),)

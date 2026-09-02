@@ -60,12 +60,14 @@ class FeedPostResponse(BaseModel):
     comments_enabled: bool
     reactions_enabled: bool
     reaction_count: int
+    reaction_counts: dict[str, int] = Field(default_factory=dict)
     comment_count: int
     viewer_reaction: str | None = None
     media: list[dict] = Field(default_factory=list)
     content_reference: dict | None = None
     adult_access_required: bool = False
     adult_access_granted: bool = True
+    compliance_allowed: bool = True
     compliance_code: str = "ALLOWED"
     compliance_action: str | None = None
     compliance_reason: str | None = None
