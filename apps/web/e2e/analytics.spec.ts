@@ -51,13 +51,13 @@ async function approvedCreator(page: Page, stamp: number, label: string) {
   const username = `analytics${label}${stamp}`;
   await register(page, email, password);
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(username);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username);
   await page.getByLabel("Display name").fill(`Analytics ${label}`);
   await page.getByRole("button", { name: "Save profile" }).click();
   await expect.poll(async () => (await api(page, "/creators/me")).body.username, { timeout: 15_000 }).toBe(username);
   await page.getByRole("button", { name: "Submit application" }).click();
   await expect.poll(async () => (await api(page, "/creators/me")).body.status, { timeout: 15_000 }).toBe("pending_verification");
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ }).click();
   await login(page, admin.email, admin.password);
   const applications = await api(page, "/admin/creator-applications");
   const application = applications.body.find((item: { username: string }) => item.username === username);
@@ -120,7 +120,7 @@ test("Phase 14 creator analytics is ledger-derived, currency-separated, and owne
   const subscriptionSection = buyer.locator('section[aria-label="Subscriptions"]');
   await subscriptionSection.getByRole("button", { name: "Choose 1 month" }).click();
   await buyer.getByRole("button", { name: "Confirm €10.00" }).click();
-  await expect(buyer.getByText("1 month subscription is active.")).toBeVisible();
+  await expect.poll(async () => (await api(buyer, "/subscriptions/mine")).body[0]?.status, { timeout: 15_000 }).toBe("active");
   await login(page, admin.email, admin.password);
   expect((await api(page, `/marketplace/admin/orders/${refunded.id}/refund`, "POST", { reason: "Phase 14 refund" })).status).toBe(200);
 
@@ -236,7 +236,11 @@ test("Phase 14 admin BI and attribution dimensions coexist without mutation", as
   expect(growth.body.attribution_dimensions.organic_discovery_interactions).toBeGreaterThanOrEqual(1);
   expect(growth.body.attribution_dimensions.sponsored_featuring_interactions).toBeGreaterThanOrEqual(2);
   expect(growth.body.attribution_dimensions.financial_allocations).toBeGreaterThanOrEqual(1);
-  await expect.poll(async () => (await api(page, "/featuring/admin/reconcile", "POST")).body.deactivated, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+  await expect.poll(async () => {
+    await api(page, "/featuring/admin/reconcile", "POST");
+    const bookings = await api(page, "/featuring/admin/bookings");
+    return bookings.body.find((row: { id: string }) => row.id === booking.body.id)?.status;
+  }, { timeout: 15_000 }).toBe("completed");
   await page.goto("/admin/analytics"); await expect(page.getByRole("heading", { name: "Platform BI" })).toBeVisible();
   await buyerContext.close();
 });

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
+import { completeCreatorVerification, completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -13,7 +13,7 @@ async function register(page: import("@playwright/test").Page, email: string, pa
 test("Phase 9 marketplace settles, fulfils, holds, and releases one immutable order", async ({ page }) => {
   const stamp = Date.now(), password = "phase9-marketplace-password", creatorEmail = `phase9-seller-${stamp}@example.com`, buyerEmail = `phase9-buyer-${stamp}@example.com`, username = `seller${stamp}`;
   await register(page, creatorEmail, password);
-  await page.getByRole("link", { name: "Become a creator" }).click(); await page.getByLabel("Username").fill(username); await page.getByLabel("Display name").fill("Marketplace seller"); await page.getByRole("button", { name: "Save profile" }).click(); await page.getByRole("button", { name: "Submit application" }).click(); await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("link", { name: "Become a creator" }).click(); await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username); await page.getByLabel("Display name").fill("Marketplace seller"); await page.getByRole("button", { name: "Save profile" }).click(); await page.getByRole("button", { name: "Submit application" }).click(); await completeCreatorVerification(page);
   await login(page, admin.email, admin.password); const applications = await api(page, "/admin/creator-applications"); const application = applications.body.find((row: { username: string }) => row.username === username); expect(application).toBeTruthy(); expect((await api(page, `/admin/creator-applications/${application.id}/approve`, "POST")).status).toBe(200);
   await api(page, "/admin/marketplace/shipping-allowances", "PUT", { country_code: "PT", currency: "EUR", allowed_shipping_minor: 100 }); await api(page, "/admin/marketplace/hold-policies/new_seller", "PUT", { hold_duration_seconds: 0, active: true, is_default: true });
   await login(page, creatorEmail, password); await page.goto("/creator-onboarding"); await page.getByRole("checkbox", { name: "Make my approved creator profile public" }).check(); await page.getByRole("button", { name: "Save profile" }).click();

@@ -314,8 +314,14 @@ test.describe.serial("real-stack compliance lifecycle", () => {
     const gate = page.getByRole("dialog");
     await expect(gate.getByRole("heading", { name: "Review before continuing" })).toBeVisible();
     await expect(gate.getByText(`${title} (version ${terms!.version + 1})`)).toBeVisible();
-    await gate.getByRole("checkbox", { name: `I accept ${title} (version ${terms!.version + 1}).` }).check();
-    await gate.getByRole("button", { name: "Accept and continue" }).click();
+    const acceptance = gate.getByRole("checkbox", { name: `I accept ${title} (version ${terms!.version + 1}).` });
+    await expect.poll(async () => {
+      if (!await acceptance.isChecked()) await acceptance.click();
+      return acceptance.isChecked();
+    }, { timeout: 15_000 }).toBe(true);
+    const acceptButton = gate.getByRole("button", { name: "Accept and continue" });
+    await expect(acceptButton).toBeEnabled();
+    await acceptButton.click();
     await expect(page.getByRole("heading", { name: "Your FanBackstage" })).toBeVisible();
 
     await page.goto("/account/legal");

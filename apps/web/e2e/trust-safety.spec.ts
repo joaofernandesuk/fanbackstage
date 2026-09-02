@@ -65,11 +65,11 @@ async function createApprovedCreator(page: Page, stamp: string): Promise<Creator
   const username = `ts${stamp.replace(/\D/g, "").slice(-12)}`;
   await register(page, email, password);
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(username);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username);
   await page.getByLabel("Display name").fill(`Trust Safety ${stamp}`);
   await page.getByRole("button", { name: "Save profile" }).click();
   await page.getByRole("button", { name: "Submit application" }).click();
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ }).click();
   await logout(page);
   await login(page, admin.email, admin.password);
   const applications = await apiOk<{ id: string; username: string }[]>(page, "/admin/creator-applications");

@@ -51,11 +51,11 @@ async function createApprovedSeller(page: import("@playwright/test").Page, stamp
   const email = `phase10-creator-${stamp}@example.com`, username = `phase10creator${stamp}`;
   await register(page, email, password);
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(username);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username);
   await page.getByLabel("Display name").fill("Phase 10 creator");
   await page.getByRole("button", { name: "Save profile" }).click();
   await page.getByRole("button", { name: "Submit application" }).click();
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ }).click();
   await login(page, admin.email, admin.password);
   const applications = await api(page, "/admin/creator-applications");
   const application = applications.body.find((row: { username: string }) => row.username === username);

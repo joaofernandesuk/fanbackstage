@@ -122,7 +122,7 @@ test("active Stories render from safe derivatives and expired Stories stay absen
 
   await register(page, email, password);
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(username);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username);
   await page.getByLabel("Display name").fill(displayName);
   await page.getByRole("button", { name: "Save profile" }).click();
   await expect.poll(async () => (await api<{ username: string }>(page, "/creators/me")).body.username, {
@@ -132,7 +132,7 @@ test("active Stories render from safe derivatives and expired Stories stay absen
   await expect.poll(async () => (await api<{ status: string }>(page, "/creators/me")).body.status, {
     timeout: 15_000,
   }).toBe("pending_verification");
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ }).click();
   await expect.poll(async () => (await api<{ status: string }>(page, "/creators/me")).body.status, {
     timeout: 15_000,
   }).toBe("pending_review");

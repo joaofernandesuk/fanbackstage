@@ -43,11 +43,11 @@ test("Phase 5 social access, engagement, and report moderation use the real stac
   const creatorUsername = `social${stamp}`;
   await register(page, creatorEmail, password);
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(creatorUsername);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(creatorUsername);
   await page.getByLabel("Display name").fill("Phase 5 Creator");
   await page.getByRole("button", { name: "Save profile" }).click();
   await page.getByRole("button", { name: "Submit application" }).click();
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ }).click();
   await page.goto("/account");
   await page.getByRole("button", { name: "Log out" }).click();
 

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
+import { completeCreatorVerification, completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
@@ -45,11 +45,11 @@ test("Phase 12 booking settles, inserts one labelled sponsored card, and expires
   const username = `feature${stamp}`;
   await register(page, email, password);
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(username);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username);
   await page.getByLabel("Display name").fill("Featured Creator");
   await page.getByRole("button", { name: "Save profile" }).click();
   await page.getByRole("button", { name: "Submit application" }).click();
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await completeCreatorVerification(page);
   await login(page, admin.email, admin.password);
   const applications = await api(page, "/admin/creator-applications");
   const application = applications.body.find((row: { username: string }) => row.username === username);

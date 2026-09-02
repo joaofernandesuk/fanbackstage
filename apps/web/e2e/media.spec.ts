@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
+import { completeCreatorVerification, completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { mailpitMessage, securityLink } from "./mailpit";
 
 const apiBase =
@@ -19,7 +19,12 @@ const phase15Python = join(process.cwd(), "../api/.venv/bin/python");
 
 function phase15Receipt(email: string, purchaseId: string) {
   return JSON.parse(execFileSync(phase15Python, [phase15Harness, "receipt", email, purchaseId], {
-    env: { ...process.env, FANBACKSTAGE_E2E_RELEASE_VALIDATION: "1" }, encoding: "utf8",
+    env: {
+      ...process.env,
+      FANBACKSTAGE_ENVIRONMENT: "test",
+      FANBACKSTAGE_E2E_RELEASE_VALIDATION: "1",
+    },
+    encoding: "utf8",
   })) as { intent_count: number; payload: { body: string } | null; attempt_count: number; statuses: string[]; payment_attempt_id: string };
 }
 
@@ -81,11 +86,11 @@ test("creator media travels through the real private processing stack", async ({
   await page.getByRole("button", { name: "Verify email" }).click();
   await login(page, email, password);
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(username);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username);
   await page.getByLabel("Display name").fill("Media E2E Creator");
   await page.getByRole("button", { name: "Save profile" }).click();
   await page.getByRole("button", { name: "Submit application" }).click();
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await completeCreatorVerification(page);
   await page.goto("/account");
   await page.getByRole("button", { name: "Log out" }).click();
 
@@ -265,13 +270,27 @@ test("creator media travels through the real private processing stack", async ({
   // Replaying the authoritative payment completion must return the settled
   // purchase rather than create another financial event or receipt intent.
   const receiptBeforeReplay = phase15Receipt(buyerEmail, purchases.body[0].id);
-  const duplicatePayment = await buyerPage.evaluate(async ({ apiBase, paymentAttemptId }) => {
-    const response = await fetch(`${apiBase}/api/v1/payments/development/${paymentAttemptId}/complete`, {
-      method: "POST", credentials: "include",
-    });
+  const duplicatePayment = await buyerPage.evaluate(async ({ apiBase, paymentAttemptId, stagingSandbox }) => {
+    const response = await fetch(
+      stagingSandbox
+        ? `${apiBase}/api/v1/payments/staging-sandbox/${paymentAttemptId}/checkout`
+        : `${apiBase}/api/v1/payments/development/${paymentAttemptId}/complete`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: stagingSandbox ? { "Content-Type": "application/json" } : undefined,
+        body: stagingSandbox ? JSON.stringify({ outcome: "SUCCESS" }) : undefined,
+      },
+    );
     return { status: response.status, body: await response.json() };
-  }, { apiBase, paymentAttemptId: receiptBeforeReplay.payment_attempt_id });
-  expect(duplicatePayment.status).toBe(200);
+  }, {
+    apiBase,
+    paymentAttemptId: receiptBeforeReplay.payment_attempt_id,
+    stagingSandbox: process.env.FANBACKSTAGE_PAYMENT_PROVIDER === "staging_sandbox",
+  });
+  expect(duplicatePayment.status).toBe(
+    process.env.FANBACKSTAGE_PAYMENT_PROVIDER === "staging_sandbox" ? 202 : 200,
+  );
   await expect.poll(() => phase15Receipt(buyerEmail, purchases.body[0].id).statuses[0], { timeout: 10_000 }).toBe("sent");
   const receipt = phase15Receipt(buyerEmail, purchases.body[0].id);
   expect(receipt).toMatchObject({ intent_count: 1, attempt_count: 1, statuses: ["sent"] });
@@ -296,7 +315,10 @@ test("creator media travels through the real private processing stack", async ({
   await expect(subscriberPage.getByText("€8.00", { exact: true })).toBeVisible();
   await subscriberPage.locator('section[aria-label="Subscriptions"] article').filter({ hasText: "€8.00" }).getByRole("button", { name: "Choose 1 month" }).click();
   await subscriberPage.getByRole("button", { name: "Confirm €8.00" }).click();
-  await expect(subscriberPage.getByText("1 month subscription is active.")).toBeVisible();
+  await expect.poll(async () => subscriberPage.evaluate(async ({ apiBase }) => {
+    const response = await fetch(`${apiBase}/api/v1/subscriptions/mine`, { credentials: "include" });
+    return (await response.json() as { status: string }[])[0]?.status;
+  }, { apiBase }), { timeout: 15_000 }).toBe("active");
   await subscriberPage.reload();
   await subscriberPage.getByRole("tab", { name: "Premium" }).click();
   await expect(subscriberPage.getByText(subscriptionTitle)).toBeVisible();
@@ -342,6 +364,31 @@ test("creator media travels through the real private processing stack", async ({
   // Keep the PPV-specific totals separate: subscription revenue shares the immutable
   // creator-pending ledger account but must not be reported as PPV revenue.
   expect(earnings.body).toMatchObject({ pending_amount_minor: 1440, ppv_gross_amount_minor: 999, platform_fee_amount_minor: 199, creator_net_amount_minor: 800, currency: "EUR" });
+  // The staging adapter only queues a durable callback; the normal signed
+  // payment/ledger path is still solely responsible for revoking PPV access.
+  if (process.env.FANBACKSTAGE_PAYMENT_PROVIDER === "staging_sandbox") {
+    const refundContext = await browser.newContext();
+    const refundPage = await refundContext.newPage();
+    await login(refundPage, buyerEmail, password);
+    expect((await refundPage.evaluate(async ({ apiBase, paymentAttemptId }) => {
+      const response = await fetch(`${apiBase}/api/v1/payments/staging-sandbox/${paymentAttemptId}/checkout`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome: "REFUND" }),
+      });
+      return response.status;
+    }, { apiBase, paymentAttemptId: receipt.payment_attempt_id }))).toBe(202);
+    await expect.poll(async () => refundPage.evaluate(async ({ apiBase }) => {
+      const response = await fetch(`${apiBase}/api/v1/purchases/mine`, { credentials: "include" });
+      return (await response.json() as { status: string }[])[0]?.status;
+    }, { apiBase }), { timeout: 15_000 }).toBe("refunded");
+    await expect.poll(async () => refundPage.evaluate(async ({ apiBase, contentId }) => {
+      const response = await fetch(`${apiBase}/api/v1/content/public/${contentId}`, { credentials: "include" });
+      return (await response.json()).has_access;
+    }, { apiBase, contentId: published[0].id }), { timeout: 15_000 }).toBe(false);
+    await refundContext.close();
+  }
   const anonymous = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const anonymousPage = await anonymous.newPage();
   await anonymousPage.goto(

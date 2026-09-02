@@ -25,7 +25,7 @@ async function register(page: import("@playwright/test").Page, email: string, pa
 test("Phase 8 manager proposal requires creator rejection or acceptance", async ({ page }) => {
   const stamp = Date.now(); const password = "phase8-contract-password"; const creatorEmail = `phase8-contract-${stamp}@example.com`; const username = `contract${stamp}`;
   await register(page, creatorEmail, password);
-  await page.getByRole("link", { name: "Become a creator" }).click(); await page.getByLabel("Username").fill(username); await page.getByLabel("Display name").fill("Contract creator"); await page.getByRole("button", { name: "Save profile" }).click(); await page.getByRole("button", { name: "Submit application" }).click(); await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("link", { name: "Become a creator" }).click(); await page.getByRole("textbox", { name: /^Your @handle/ }).fill(username); await page.getByLabel("Display name").fill("Contract creator"); await page.getByRole("button", { name: "Save profile" }).click(); await page.getByRole("button", { name: "Submit application" }).click(); await page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ }).click();
   await login(page, admin.email, admin.password);
   const applications = await api(page, "/admin/creator-applications"); const application = applications.body.find((row: { username: string }) => row.username === username); expect(application).toBeTruthy(); expect((await api(page, `/admin/creator-applications/${application.id}/approve`, "POST")).status).toBe(200);
   await login(page, manager.email, manager.password);
