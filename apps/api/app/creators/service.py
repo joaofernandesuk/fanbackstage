@@ -94,6 +94,25 @@ def normalize_username(value: str) -> str:
     return normalized
 
 
+async def username_availability(
+    db: AsyncSession, value: str, *, creator_profile_id: UUID | None = None
+) -> tuple[str, bool]:
+    """Return public-handle availability without weakening final write validation.
+
+    Creator handles are public identifiers, but a creator may keep their own current
+    handle. Historic handles remain reserved so a public profile URL cannot be
+    reassigned to a different creator later.
+    """
+    try:
+        username = normalize_username(value)
+    except ValueError:
+        return value.strip().lower(), False
+    owner = await db.scalar(
+        select(CreatorUsernameHistory).where(CreatorUsernameHistory.username == username)
+    )
+    return username, owner is None or owner.creator_profile_id == creator_profile_id
+
+
 async def profile_for_user(db: AsyncSession, user_id: UUID) -> CreatorProfile | None:
     return await db.scalar(select(CreatorProfile).where(CreatorProfile.user_id == user_id))
 

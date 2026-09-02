@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { completeRegistrationCompliance } from "./auth-helpers";
+import { completeRegistrationCompliance, expectAuthenticatedAs } from "./auth-helpers";
 import { securityLink } from "./mailpit";
 
 test("creator can register, verify, and submit an identity application", async ({ page }) => {
@@ -22,16 +22,19 @@ test("creator can register, verify, and submit an identity application", async (
   await loginForm.getByRole("textbox", { name: /^Password\b/ }).fill(password);
   await loginForm.getByRole("button", { name: "Log in" }).click();
   await page.getByRole("link", { name: "Become a creator" }).click();
-  await page.getByLabel("Username").fill(`creator${Date.now()}`);
+  await page.getByRole("textbox", { name: /^Your @handle/ }).fill(`creator${Date.now()}`);
   await page.getByLabel("Display name").fill("Creator Example");
   await page.getByLabel("Bio").fill("A public creator profile.");
-  await page.getByLabel("Country code").fill("pt");
+  await page.getByLabel("Country or territory").fill("Portugal");
+  await page.getByRole("option", { name: "Portugal PT" }).click();
   await page.getByLabel("Region", { exact: true }).fill("Lisbon");
   await page.getByLabel("City", { exact: true }).fill("Lisbon");
-  await page.getByLabel("Timezone", { exact: true }).fill("Europe/Lisbon");
+  await expect(page.getByLabel("Timezone", { exact: true })).toHaveValue("Europe/Lisbon");
   await page.getByLabel(/Show my configured city/).check();
-  await page.getByLabel("Studio", { exact: true }).check();
-  await page.getByLabel("English", { exact: true }).check();
+  const interest = page.getByLabel("Available creator interests").getByRole("button", { name: /Video & behind the scenes/ });
+  const language = page.getByLabel("Available creator languages").getByRole("button", { name: /English EN/ });
+  await interest.click();
+  await language.click();
   await page.getByLabel("Label", { exact: true }).fill("Portfolio");
   await page.getByLabel("URL", { exact: true }).fill("https://creator.example/portfolio");
   await Promise.all([
@@ -39,18 +42,26 @@ test("creator can register, verify, and submit an identity application", async (
     page.getByRole("button", { name: "Save profile" }).click(),
   ]);
   await page.reload();
-  await expect(page.getByLabel("Country code")).toHaveValue("PT");
-  await expect(page.getByLabel("Studio", { exact: true })).toBeChecked();
-  await expect(page.getByLabel("English", { exact: true })).toBeChecked();
+  await expect(page.getByLabel("Country or territory")).toHaveValue("Portugal");
+  await expect(page.getByLabel("Available creator interests").getByRole("button", { name: /Video & behind the scenes/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("Available creator languages").getByRole("button", { name: /English EN/ })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByLabel("Label", { exact: true })).toHaveValue("Portfolio");
   await expect(page.getByLabel("URL", { exact: true })).toHaveValue("https://creator.example/portfolio");
   await page.getByRole("button", { name: "Submit application" }).click();
   await expect(page.getByText("pending verification", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Complete development verification" }).click();
+  await page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ }).click();
   await expect(page.getByText("pending review", { exact: true })).toBeVisible();
 });
 
 test("creator onboarding hides the development shortcut when the API capability is disabled", async ({ page }) => {
+  const email = "phase2-e2e-admin@example.com";
+  await page.goto("/login");
+  const loginForm = page.getByRole("main").locator("form");
+  await loginForm.getByLabel("Email").fill(email);
+  await loginForm.getByRole("textbox", { name: /^Password\b/ }).fill("phase2-e2e-admin-password");
+  await loginForm.getByRole("button", { name: "Log in" }).click();
+  await expectAuthenticatedAs(page, email);
+
   await page.route("**/api/v1/creators/me", async (route) => {
     if (route.request().method() !== "GET") {
       await route.continue();
@@ -105,5 +116,5 @@ test("creator onboarding hides the development shortcut when the API capability 
   await page.goto("/creator-onboarding");
   await expect(page.getByRole("heading", { name: "Identity verification is pending" })).toBeVisible();
   await expect(page.getByText(/Development verification is disabled here/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Complete development verification" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^(Complete development verification|Complete identity check)$/ })).toHaveCount(0);
 });

@@ -280,6 +280,37 @@ async def test_reserved_username_and_invalid_transition_are_rejected(db_session)
 
 
 @pytest.mark.asyncio
+async def test_creator_handle_availability_reserves_public_and_historic_handles(db_session):
+    first_user, _ = await accounts.register(
+        db_session, "handle-owner@example.com", "strong-password-123", None
+    )
+    first_profile = await service.get_or_create_profile(db_session, first_user)
+    await service.update_profile(
+        db_session,
+        first_profile,
+        {"username": "mercy-afterdark", "display_name": "Mercy After Dark"},
+        first_user.id,
+    )
+    await db_session.commit()
+
+    assert await service.username_availability(
+        db_session, "mercy-afterdark", creator_profile_id=first_profile.id
+    ) == ("mercy-afterdark", True)
+    assert await service.username_availability(db_session, "mercy-afterdark") == (
+        "mercy-afterdark",
+        False,
+    )
+    assert await service.username_availability(db_session, "mercy afterdark") == (
+        "mercy afterdark",
+        False,
+    )
+    assert await service.username_availability(db_session, "a-new-handle") == (
+        "a-new-handle",
+        True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_creator_profile_taxonomy_and_social_fields_persist_with_enabled_validation(
     db_session,
 ):

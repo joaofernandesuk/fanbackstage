@@ -8,6 +8,8 @@ import pytest
 from sqlalchemy import func, select
 
 from app.accounts import adult_access
+from app.creators import service as creators
+from app.media.contexts import media_asset_contexts
 from app.models.audit import AuditEvent
 from app.models.compliance import (
     AgeVerificationRecord,
@@ -32,7 +34,14 @@ from app.models.marketplace import MarketplaceListing, MarketplaceListingStatus,
 from app.models.messaging import Conversation, Message
 from app.models.notification import NotificationClass, NotificationIntent, NotificationPreference
 from app.models.referral import ReferralCommissionAllocation, SignupAttribution
-from app.models.social import FeedPost, FeedPostStatus, Follow, PostComment, PostReaction
+from app.models.social import (
+    FeedPost,
+    FeedPostMedia,
+    FeedPostStatus,
+    Follow,
+    PostComment,
+    PostReaction,
+)
 from app.models.story import Story, StoryStatus
 from app.models.streaming import LiveRoom, LiveRoomStatus
 from app.models.subscription import Subscription
@@ -311,6 +320,25 @@ async def test_demo_seed_is_count_stable_when_run_twice(db_session):
     assert second["demo_performer_links"] == 1
     assert second["demo_consent_releases"] == 1
     assert second["demo_pending_creator_kyc"] == 1
+    post_media = (await db_session.scalars(select(FeedPostMedia))).all()
+    assert post_media
+    for attachment in post_media:
+        assert await media_asset_contexts(db_session, attachment.media_asset_id) == {
+            ("feed", attachment.post_id)
+        }
+    public_profiles = (
+        await db_session.scalars(
+            select(CreatorProfile).where(
+                CreatorProfile.status == CreatorStatus.approved,
+                CreatorProfile.is_public.is_(True),
+            )
+        )
+    ).all()
+    for profile in public_profiles:
+        eligibility = await creators.resolve_creator_compliance_eligibility(
+            db_session, profile=profile
+        )
+        assert eligibility.public_allowed, eligibility.code
     marketing_users = (
         await db_session.scalars(
             select(User).where(

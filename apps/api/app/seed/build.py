@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,7 @@ from app.finance import service as finance
 from app.groups import service as groups
 from app.legal import service as legal_service
 from app.marketplace import service as marketplace
+from app.media.contexts import require_media_context_available
 from app.messaging import service as messaging
 from app.models.compliance import (
     AgeAssuranceLevel,
@@ -108,6 +110,7 @@ from app.models.referral import (
 )
 from app.models.social import (
     FeedPost,
+    FeedPostMedia,
     FeedPostStatus,
     PostComment,
     PostReaction,
@@ -152,6 +155,19 @@ from app.stories import service as stories
 from app.streaming import service as streaming
 from app.subscriptions import service as subscriptions
 from app.trust_safety import service as trust_safety
+
+LEGACY_CREATOR_CATEGORY_SLUGS = {
+    "collaboration",
+    "design",
+    "editorial",
+    "fashion",
+    "lifestyle",
+    "live",
+    "marketplace",
+    "performance",
+    "photography",
+    "studio",
+}
 
 
 @dataclass(frozen=True)
@@ -529,6 +545,14 @@ async def _ensure_creator_catalogue(
         )
         db.add(category)
         await db.flush()
+    # This runs only for immutable fictional demo profiles. Retire their old
+    # generic categories so repeated local seeding converges on the current
+    # discovery-interest catalogue without touching real creator selections.
+    profile.categories[:] = [
+        existing
+        for existing in profile.categories
+        if existing.slug not in LEGACY_CREATOR_CATEGORY_SLUGS
+    ]
     if category not in profile.categories:
         profile.categories.append(category)
     language = await db.scalar(
@@ -595,6 +619,7 @@ async def _ensure_creator(
             )
         profile.is_public = False
     elif profile.status is CreatorStatus.approved:
+        await _ensure_current_demo_creator_verification(db, admin, profile, seed)
         await creators.update_profile(db, profile, {"is_public": True}, user.id)
     else:
         raise RuntimeError(
@@ -602,6 +627,80 @@ async def _ensure_creator(
             "the seed will not override an existing moderation decision"
         )
     return profile
+
+
+async def _ensure_current_demo_creator_verification(
+    db: AsyncSession,
+    admin: User,
+    profile: CreatorProfile,
+    seed: CreatorSeed,
+) -> None:
+    """Converge the explicit development KYC fixture for public demo creators.
+
+    The demo policy deliberately requires current creator identity and adult
+    verification.  A long-lived local database can otherwise retain an old
+    development verification after its 30-day re-verification window, which
+    correctly blocks media writes but makes a repeatable demo seed unusable.
+    This stable, development-only fixture is refreshed in place so reseeding
+    repairs local demo data without changing the production verification flow.
+    """
+
+    eligibility = await creators.resolve_creator_compliance_eligibility(db, profile=profile)
+    if eligibility.public_allowed:
+        return
+
+    now = datetime.now(UTC)
+    provider_reference = f"demo-current-creator-kyc-{seed.slug}-v1"
+    verification = await db.scalar(
+        select(CreatorVerification).where(
+            CreatorVerification.provider_reference == provider_reference
+        )
+    )
+    if verification is None:
+        verification = CreatorVerification(
+            creator_profile_id=profile.id,
+            provider="development",
+            provider_reference=provider_reference,
+            status=VerificationStatus.verified,
+            adult_verified=True,
+            identity_verified=True,
+            country_code="PT",
+            verified_at=now,
+            expires_at=now + timedelta(days=30),
+            metadata_json={"demo_fixture": True, "purpose": "current_creator_compliance"},
+        )
+        db.add(verification)
+        await db.flush()
+        await record_event(
+            db,
+            "creator.demo_current_kyc_seeded",
+            actor_user_id=admin.id,
+            target_type="creator_verification",
+            target_id=str(verification.id),
+            metadata={"creator_profile_id": str(profile.id), "status": "verified"},
+        )
+    else:
+        verification.creator_profile_id = profile.id
+        verification.status = VerificationStatus.verified
+        verification.adult_verified = True
+        verification.identity_verified = True
+        verification.country_code = "PT"
+        verification.verified_at = now
+        verification.expires_at = now + timedelta(days=30)
+        verification.revoked_at = None
+        verification.failure_reason_code = None
+        verification.metadata_json = {
+            "demo_fixture": True,
+            "purpose": "current_creator_compliance",
+        }
+        await db.flush()
+
+    refreshed = await creators.resolve_creator_compliance_eligibility(db, profile=profile)
+    if not refreshed.public_allowed:
+        raise RuntimeError(
+            f"Demo creator {seed.slug} remains ineligible after its current development "
+            f"KYC fixture was seeded: {refreshed.code}"
+        )
 
 
 async def _ensure_pending_creator_kyc(
@@ -1141,10 +1240,48 @@ async def _ensure_posts(
                 creator_user,
                 {**item, "access_policy": AccessPolicy.free},
             )
+        media_asset_ids = item.get("media_asset_ids", [])
+        if media_asset_ids:
+            await _reconcile_seed_post_media(db, post, media_asset_ids)
         if post.status in {FeedPostStatus.draft, FeedPostStatus.scheduled}:
             await social.publish(db, creator_user, post.id)
         rows.append(post)
     return rows
+
+
+async def _reconcile_seed_post_media(
+    db: AsyncSession, post: FeedPost, media_asset_ids: list[UUID]
+) -> None:
+    """Repair legacy demo posts to their dedicated feed-only media assets.
+
+    Early demo datasets reused gallery media in feed posts.  That is now
+    deliberately rejected by the final media-delivery boundary, so repeatable
+    development seeding must migrate those old attachments rather than leave
+    visually broken cards behind.
+    """
+
+    attachments = list(
+        await db.scalars(
+            select(FeedPostMedia)
+            .where(FeedPostMedia.post_id == post.id)
+            .order_by(FeedPostMedia.position)
+        )
+    )
+    if [attachment.media_asset_id for attachment in attachments] == media_asset_ids:
+        return
+    for attachment in attachments:
+        await db.delete(attachment)
+    await db.flush()
+    for position, asset_id in enumerate(media_asset_ids):
+        await require_media_context_available(db, asset_id, context_type="feed", context_id=post.id)
+        db.add(
+            FeedPostMedia(
+                post_id=post.id,
+                media_asset_id=asset_id,
+                position=position,
+            )
+        )
+    await db.flush()
 
 
 async def _ensure_stories(

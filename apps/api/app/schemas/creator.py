@@ -30,6 +30,11 @@ class CreatorProfileUpdate(BaseModel):
     is_public: bool | None = None
 
 
+class CreatorUsernameAvailabilityResponse(BaseModel):
+    username: str
+    available: bool
+
+
 class CreatorComplianceEligibilityResponse(BaseModel):
     jurisdiction: str | None
     policy_version: int | None

@@ -20,7 +20,7 @@ function creatorId(item: DiscoveryResult) {
 }
 
 export function FanWelcome() {
-  const { authenticated, loading: authLoading, requireLogin } = useLoginGate();
+  const { authenticated, loading: authLoading, requireLogin, user } = useLoginGate();
   const [creators, setCreators] = useState<DiscoveryResult[]>([]);
   const [following, setFollowing] = useState<FollowState>({});
   const [working, setWorking] = useState<string | null>(null);
@@ -70,6 +70,7 @@ export function FanWelcome() {
     () => creators.filter((creator) => following[creatorId(creator)]).length,
     [creators, following],
   );
+  const isCreator = user?.roles.includes("creator") ?? false;
 
   async function toggleFollow(item: DiscoveryResult) {
     const id = creatorId(item);
@@ -127,6 +128,40 @@ export function FanWelcome() {
           <small>suggested follows</small>
         </div>
       </header>
+
+      <section aria-labelledby="creator-path-heading" className={styles.creatorPath}>
+        <div className={styles.creatorMark} aria-hidden="true">
+          <span>CREATE</span>
+          <strong>+</strong>
+        </div>
+        <div className={styles.creatorCopy}>
+          <p className={styles.eyebrow}>YOUR CREATOR PATH</p>
+          <h2 id="creator-path-heading">
+            {isCreator ? "Your audience is waiting." : "Want to create too?"}
+          </h2>
+          <p>
+            {isCreator
+              ? "Return to your Studio to shape your profile, publish your work, and plan your next live moment."
+              : "Everyone starts as a fan. When you are ready, apply to become a creator or model and build a public world of your own."}
+          </p>
+          {!isCreator && (
+            <ol className={styles.creatorSteps}>
+              <li><span>1</span> Build your profile</li>
+              <li><span>2</span> Complete verification</li>
+              <li><span>3</span> Publish when approved</li>
+            </ol>
+          )}
+          <div className={styles.creatorActions}>
+            <Link href={isCreator ? "/creator-studio" : "/creator-onboarding"}>
+              {isCreator ? "Open Creator Studio" : "Start creator application"}
+            </Link>
+            {!isCreator && <Link href="/creators">Explore creator worlds</Link>}
+          </div>
+          {!isCreator && (
+            <small>Creator access, including live broadcasting, becomes available after approval and current verification.</small>
+          )}
+        </div>
+      </section>
 
       {error && <p className={styles.error} role="alert">{error}</p>}
 

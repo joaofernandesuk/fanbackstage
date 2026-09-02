@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from app.api.deps import CurrentIdentity, Db, OptionalIdentity
 from app.compliance.http import resolve_request_compliance_decision
 from app.core.config import get_settings
+from app.core.rate_limit import enforce_discovery_rate_limit
 from app.creators import service
 from app.media.projection import safe_public_profile_media_reference
 from app.models.compliance import ComplianceFeature
@@ -21,6 +22,7 @@ from app.schemas.creator import (
     CreatorComplianceEligibilityResponse,
     CreatorProfileUpdate,
     CreatorSelfResponse,
+    CreatorUsernameAvailabilityResponse,
     PublicCreatorResponse,
     SocialLinkInput,
     StagingKycOutcomeInput,
@@ -193,6 +195,19 @@ async def own_profile(identity: CurrentIdentity, db: Db) -> CreatorSelfResponse:
     if not profile:
         raise HTTPException(status_code=404, detail="Creator application not found")
     return await self_response(db, profile)
+
+
+@router.get("/me/username-availability", response_model=CreatorUsernameAvailabilityResponse)
+async def own_username_availability(
+    username: str, request: Request, identity: CurrentIdentity, db: Db
+) -> CreatorUsernameAvailabilityResponse:
+    """Check a public creator handle while retaining server-side uniqueness on save."""
+    await enforce_discovery_rate_limit(request, str(identity[0].id))
+    profile = await service.profile_for_user(db, identity[0].id)
+    normalized, available = await service.username_availability(
+        db, username, creator_profile_id=profile.id if profile else None
+    )
+    return CreatorUsernameAvailabilityResponse(username=normalized, available=available)
 
 
 @router.patch("/me", response_model=CreatorSelfResponse)
