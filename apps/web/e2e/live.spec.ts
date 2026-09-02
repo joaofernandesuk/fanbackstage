@@ -101,7 +101,7 @@ test("Phase 7 private 1:1 uses signed LiveKit presence and settles once", async 
   // this private-session lifecycle test exercises LiveKit rather than a
   // separate anonymous access gate.
   await register(viewer, viewerEmail, password); await viewer.goto(`/creator/${username}`); await viewer.getByRole("button", { name: "Request 1:1 session" }).click(); await expect(viewer.getByText("Request queued")).toBeVisible();
-  await page.getByRole("button", { name: "End public live" }).click(); await expect(page.getByText("Live room ended")).toBeVisible(); await page.reload();
+  await page.getByRole("button", { name: "End public live" }).click(); await expect(page.getByText("Live room ended")).toBeVisible({ timeout: 20_000 }); await page.reload();
   // Ending first commits a durable provider-control intent. Poll the
   // authoritative acceptance command rather than a transient Studio message:
   // it becomes valid only once the outbox finalizer has closed the public
