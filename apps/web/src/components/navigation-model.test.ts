@@ -41,6 +41,7 @@ describe("consumer navigation model", () => {
       "Live",
       "Videos",
       "Galleries",
+      "Stories",
       "Marketplace",
     ]);
     expect(labels(accountNavigation(fan))).toEqual([

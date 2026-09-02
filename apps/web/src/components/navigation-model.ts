@@ -41,6 +41,7 @@ export const authenticatedNavigation: readonly NavigationItem[] = [
   { label: "Live", href: "/live", icon: "live" },
   { label: "Videos", href: "/videos", icon: "videos" },
   { label: "Galleries", href: "/galleries", icon: "discover" },
+  { label: "Stories", href: "/stories", icon: "discover" },
   { label: "Marketplace", href: "/marketplace", icon: "marketplace" },
 ];
 

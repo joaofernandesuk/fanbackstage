@@ -13,6 +13,7 @@ import {
   discoverySearchPath,
 } from "../lib/public-api";
 import { ContentCard, CreatorCard, MarketplaceCard } from "./consumer-cards";
+import { AdultAccessGate } from "./adult-access-gate";
 import { EmptyState, SectionHeader, Skeleton } from "./consumer-ui";
 import { StoryRailSource } from "./story-experience";
 import styles from "./home-experience.module.css";
@@ -32,6 +33,7 @@ export function HomeExperience() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [failed, setFailed] = useState(noFailures);
+  const [complianceGate, setComplianceGate] = useState<DiscoveryPage | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -42,6 +44,18 @@ export function HomeExperience() {
       api<MarketplaceListing[]>("/marketplace/listings"),
     ]).then(([discovery, creators, videos, listings]) => {
       if (!active) return;
+      const accessDenied = [discovery, creators, videos].find(
+        (result): result is PromiseFulfilledResult<DiscoveryPage> =>
+          result.status === "fulfilled" && result.value.compliance_allowed === false,
+      );
+      if (accessDenied) {
+        setComplianceGate(accessDenied.value);
+        setFailed(noFailures);
+        setError("");
+        setLoading(false);
+        return;
+      }
+      setComplianceGate(null);
       const next = {
         discovery: discovery.status === "fulfilled" ? discovery.value.items : [],
         creators: creators.status === "fulfilled" ? creators.value.items.filter((item) => item.entity_type === "creator") : [],
@@ -97,6 +111,17 @@ export function HomeExperience() {
 
       {error && <p className={styles.error} role="status">{error}</p>}
 
+      {complianceGate ? (
+        <AdultAccessGate
+          access={complianceGate}
+          adultRestricted={false}
+          feature="platform_access"
+          onGranted={() => window.location.reload()}
+          title="FanBackstage"
+        />
+      ) : (
+        <>
+
       <HomeSection body="Creator worlds selected from public discovery." eyebrow="Discover" href="/creators" id="featured-heading" loading={loading} title="Featured creators">
         {featured.map((item) => <CreatorCard item={item} key={item.id} />)}
         {!loading && !featured.length && <EmptyState body={failed.creators ? "Creator discovery could not be refreshed." : "Eligible public creators will appear here."} title={failed.creators ? "Featured creators are unavailable" : "No featured creators yet"} />}
@@ -131,6 +156,8 @@ export function HomeExperience() {
         {data.listings.slice(0, 4).map((listing) => <MarketplaceCard key={listing.id} listing={listing} />)}
         {!loading && !data.listings.length && <EmptyState body={failed.listings ? "Marketplace listings could not be refreshed." : "Published listings will appear here after marketplace review."} title={failed.listings ? "Marketplace is unavailable" : "No marketplace finds yet"} />}
       </HomeSection>
+        </>
+      )}
     </div>
   );
 }

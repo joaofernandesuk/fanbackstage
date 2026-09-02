@@ -321,6 +321,30 @@ legend {
   color: var(--text-muted);
 }
 
+.not-found-page {
+  margin: clamp(44px, 11vh, 132px) auto;
+  max-width: 620px;
+  text-align: center;
+}
+
+.not-found-page h1 {
+  color: var(--text-primary);
+}
+
+.not-found-page p:not(.eyebrow) {
+  color: var(--text-secondary);
+  margin-inline: auto;
+  max-width: 46ch;
+}
+
+.not-found-actions {
+  align-items: center;
+  display: flex;
+  gap: 18px;
+  justify-content: center;
+  margin-top: 26px;
+}
+
 small {
   color: var(--text-muted);
 }
