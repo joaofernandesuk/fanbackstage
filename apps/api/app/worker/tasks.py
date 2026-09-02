@@ -87,6 +87,22 @@ def reconcile_notification_delivery() -> dict[str, int]:
 
 
 @celery_app.task
+def deliver_staging_payment_sandbox_events() -> dict[str, int]:
+    """Emit due fictional provider events through the verified payment boundary."""
+    from app.db.session import SessionLocal
+    from app.finance.service import deliver_due_staging_payment_events
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            delivered = await deliver_due_staging_payment_events(session)
+            await session.commit()
+            return delivered
+
+    return {"delivered": run_async(run())}
+
+
+
+@celery_app.task
 def ffmpeg_version() -> dict[str, str]:
     """Worker-runtime capability check; no media input, output, or product state."""
     completed = subprocess.run(["ffmpeg", "-version"], check=True, capture_output=True, text=True)

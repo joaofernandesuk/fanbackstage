@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { completePaymentCheckout } from "../lib/payments";
 import { formatMoney } from "../lib/public-api";
 import { useLoginGate } from "./consumer-ui";
 import styles from "./social-surface.module.css";
@@ -79,7 +80,7 @@ export function SubscriptionOptions({
     setDialogError("");
     attempt.current = subscriptionAttemptKey(attempt.current, option.duration);
     try {
-      const started = await api<{ id: string; status: string }>(`/subscriptions/creator/${creatorId}`, {
+      const started = await api<{ id: string; status: string; payment_attempt_id: string | null }>(`/subscriptions/creator/${creatorId}`, {
         method: "POST",
         headers: { "Idempotency-Key": attempt.current.key },
         body: JSON.stringify({ duration: option.duration }),
@@ -89,8 +90,7 @@ export function SubscriptionOptions({
         setDialogError("The previous payment attempt failed. Confirm again to start a new, safely tracked attempt.");
         return;
       }
-      if (process.env.NODE_ENV !== "production") {
-        await api(`/subscriptions/${started.id}/complete-development`, { method: "POST" });
+      if (started.payment_attempt_id && await completePaymentCheckout(started.payment_attempt_id)) {
         setStatus(`${durationLabel(option.duration)} subscription is active.`);
         onActivated?.();
         window.dispatchEvent(new Event("fanbackstage:entitlements-changed"));

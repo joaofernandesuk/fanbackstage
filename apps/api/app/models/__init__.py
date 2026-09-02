@@ -42,6 +42,7 @@ from app.models.finance import (
     PaymentWebhookEvent,
     Purchase,
     PurchasePaymentAttempt,
+    StagingPaymentSandboxEvent,
 )
 from app.models.groups import (
     Group,
@@ -266,6 +267,7 @@ __all__ = [
     "SessionParticipant",
     "SignupAttribution",
     "SiteSettingsVersion",
+    "StagingPaymentSandboxEvent",
     "SocialReport",
     "Story",
     "Subscription",

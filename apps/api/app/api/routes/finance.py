@@ -23,9 +23,11 @@ from app.schemas.finance import (
     CommissionUpdate,
     CreatorEarningsResponse,
     DevelopmentPaymentCompletionResponse,
+    PaymentCheckoutResponse,
     PurchaseHistoryResponse,
     PurchaseResponse,
     RefundRequest,
+    StagingPaymentCheckoutInput,
 )
 
 router = APIRouter(tags=["finance"])
@@ -219,6 +221,71 @@ async def development_webhook(request: Request, db: Db) -> None:
     try:
         purchase = await service.process_development_webhook(
             db, payload, request.headers.get("X-Payment-Signature")
+        )
+        await db.commit()
+        await dispatch_purchase_receipt(db, purchase)
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/payments/{payment_attempt_id}/checkout", response_model=PaymentCheckoutResponse)
+async def payment_checkout(
+    payment_attempt_id: UUID, identity: CurrentIdentity, db: Db
+) -> PaymentCheckoutResponse:
+    attempt = await db.get(PaymentAttempt, payment_attempt_id)
+    if not attempt or attempt.buyer_user_id != identity[0].id:
+        raise HTTPException(status_code=404, detail="Payment attempt not found")
+    try:
+        checkout = service.payment_provider().create_checkout(attempt)
+    except service.PaymentProviderError as exc:
+        raise HTTPException(status_code=409, detail="Payment checkout is unavailable") from exc
+    return PaymentCheckoutResponse(
+        payment_attempt_id=attempt.id,
+        provider=attempt.provider,
+        provider_reference=checkout.provider_reference,
+        action=checkout.action,
+        status=attempt.status.value,
+    )
+
+
+@router.post("/payments/staging-sandbox/{payment_attempt_id}/checkout", status_code=202)
+async def staging_payment_checkout(
+    payment_attempt_id: UUID,
+    payload: StagingPaymentCheckoutInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict[str, str]:
+    """Staging-only checkout UI boundary; this only queues a signed callback."""
+    attempt = await db.get(PaymentAttempt, payment_attempt_id, with_for_update=True)
+    if not attempt or attempt.buyer_user_id != identity[0].id:
+        raise HTTPException(status_code=404, detail="Payment attempt not found")
+    if attempt.provider != "staging_sandbox":
+        raise HTTPException(status_code=404, detail="Staging payment sandbox is unavailable")
+    try:
+        event = await service.staging_checkout(
+            db,
+            attempt,
+            outcome="SUCCESS" if payload.outcome == "DELAYED_SUCCESS" else payload.outcome,
+            delayed=payload.outcome == "DELAYED_SUCCESS",
+        )
+        await db.commit()
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "queued", "event_id": event.external_event_id}
+
+
+@router.post("/payments/webhooks/staging-sandbox", status_code=204)
+async def staging_payment_webhook(request: Request, db: Db) -> None:
+    if request.headers.get("content-length") and int(request.headers["content-length"]) > 65536:
+        raise HTTPException(status_code=413, detail="Webhook payload is too large")
+    payload = await request.body()
+    if len(payload) > 65536:
+        raise HTTPException(status_code=413, detail="Webhook payload is too large")
+    try:
+        purchase = await service.process_payment_webhook(
+            db, "staging_sandbox", payload, request.headers.get("X-Payment-Signature")
         )
         await db.commit()
         await dispatch_purchase_receipt(db, purchase)

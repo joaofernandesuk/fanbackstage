@@ -18,6 +18,7 @@ from app.compliance.types import (
 )
 from app.core.config import get_settings
 from app.creators.service import resolve_creator_compliance_eligibility
+from app.finance.providers import new_provider_reference
 from app.finance.service import _account, currency_code, post_entries, reverse_original_ledger
 from app.groups.service import has_delegated_permission
 from app.models.compliance import ComplianceFeature
@@ -1012,7 +1013,7 @@ async def initiate_payment(
     attempt = PaymentAttempt(
         buyer_user_id=payer.id,
         provider=get_settings().payment_provider,
-        provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
+        provider_reference=new_provider_reference(),
         amount_minor=booking.price_minor,
         currency=booking.currency,
         idempotency_key=idempotency_key,

@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { ApiError, api } from "../lib/api";
+import { completePaymentCheckout } from "../lib/payments";
 import styles from "./featuring.module.css";
 
 type Price = {
@@ -157,8 +158,7 @@ export function FeaturingDashboard({ manager = false }: { manager?: boolean }) {
         await refresh();
         return;
       }
-      if (process.env.NODE_ENV !== "production") {
-        await api(`/payments/development/${result.payment_attempt_id}/complete`, { method: "POST" });
+      if (await completePaymentCheckout(result.payment_attempt_id)) {
         setMessage("Test payment confirmed. One server settlement now owns this booking.");
       } else {
         setMessage("Payment authorization started. The booking remains pending until the configured provider confirms the charge.");

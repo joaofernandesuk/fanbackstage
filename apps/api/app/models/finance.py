@@ -63,6 +63,13 @@ class PaymentStatus(str, enum.Enum):
     chargeback = "chargeback"
 
 
+class SandboxEventStatus(str, enum.Enum):
+    """Delivery state for the staging-only external-provider simulator."""
+
+    pending = "pending"
+    delivered = "delivered"
+
+
 class PurchaseStatus(str, enum.Enum):
     awaiting_payment = "awaiting_payment"
     paid = "paid"
@@ -319,3 +326,29 @@ class PaymentWebhookEvent(UUIDPrimaryKey, Timestamped, Base):
         ForeignKey("payment_attempts.id", ondelete="SET NULL")
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StagingPaymentSandboxEvent(UUIDPrimaryKey, Timestamped, Base):
+    """A durable staging-processor event, emitted only after sandbox checkout.
+
+    This is deliberately not a financial source of truth: the signed webhook
+    remains the sole path that mutates a payment attempt or settles value.
+    """
+
+    __tablename__ = "staging_payment_sandbox_events"
+    __table_args__ = (
+        UniqueConstraint("external_event_id", name="uq_staging_payment_sandbox_event_id"),
+        UniqueConstraint("payment_attempt_id", "event_type", name="uq_staging_payment_event_type"),
+    )
+    payment_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="RESTRICT"), index=True
+    )
+    external_event_id: Mapped[str] = mapped_column(String(255))
+    event_type: Mapped[str] = mapped_column(String(64))
+    deliver_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[SandboxEventStatus] = mapped_column(
+        Enum(SandboxEventStatus, name="sandbox_event_status"),
+        default=SandboxEventStatus.pending,
+        index=True,
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { ApiError, api } from "../lib/api";
+import { completePaymentCheckout } from "../lib/payments";
 import { marketplaceListingMediaUrl } from "../lib/content-api";
 import {
   formatMoney,
@@ -132,11 +133,7 @@ export function MarketplaceDetail({ publicId }: { publicId: string }) {
           body: JSON.stringify(marketplaceCheckoutPayload(draft)),
         },
       );
-      if (process.env.NODE_ENV !== "production") {
-        await api(`/payments/development/${reserved.payment_attempt_id}/complete`, {
-          method: "POST",
-        });
-      }
+      await completePaymentCheckout(reserved.payment_attempt_id);
       const refreshed = await api<MarketplaceOrder>(`/marketplace/orders/${reserved.id}`)
         .catch(() => reserved);
       setOrder(refreshed);

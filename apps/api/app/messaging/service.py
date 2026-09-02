@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import secrets
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -16,6 +15,7 @@ from app.compliance.types import (
 )
 from app.core.config import get_settings
 from app.creators.service import require_public_creator_access
+from app.finance.providers import new_provider_reference
 from app.finance.service import (
     _account,
     commission_amount,
@@ -566,7 +566,7 @@ async def create_unlock_purchase(
     attempt = PaymentAttempt(
         buyer_user_id=buyer.id,
         provider=get_settings().payment_provider,
-        provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
+        provider_reference=new_provider_reference(),
         amount_minor=attachment.unlock_price_minor,
         currency=currency,
         idempotency_key=idempotency_key,
@@ -698,7 +698,7 @@ async def initiate_paid_send(
     attempt = PaymentAttempt(
         buyer_user_id=buyer.id,
         provider=get_settings().payment_provider,
-        provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
+        provider_reference=new_provider_reference(),
         amount_minor=amount,
         currency=currency_code(currency),
         idempotency_key=idempotency_key,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, case, exists, func, or_, select
@@ -19,7 +19,7 @@ from app.compliance.types import (
 )
 from app.content.access import content_requires_adult_access, public_content_surface_eligible
 from app.core.config import get_settings
-from app.finance.providers import PaymentProviderError, payment_provider
+from app.finance.providers import PaymentProviderError, new_provider_reference, payment_provider
 from app.models.compliance import ComplianceFeature
 from app.models.content import (
     AccessPolicy,
@@ -46,6 +46,8 @@ from app.models.finance import (
     PurchasePaymentAttempt,
     PurchaseStatus,
     RefundRequirementStatus,
+    SandboxEventStatus,
+    StagingPaymentSandboxEvent,
 )
 from app.models.identity import User
 from app.models.subscription import (
@@ -919,7 +921,7 @@ async def initiate_purchase(
     attempt = PaymentAttempt(
         buyer_user_id=buyer.id,
         provider=get_settings().payment_provider,
-        provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
+        provider_reference=new_provider_reference(),
         amount_minor=gross_amount_minor,
         currency=currency,
         idempotency_key=idempotency_key,
@@ -998,6 +1000,92 @@ def verify_development_webhook(payload: bytes, signature: str | None) -> dict[st
         "type": event.event_type,
         "payment_reference": event.payment_reference,
     }
+
+
+_STAGING_PAYMENT_OUTCOMES = {
+    "SUCCESS": "payment.succeeded",
+    "DECLINE": "payment.failed",
+    "REFUND": "payment.refunded",
+    "DISPUTE": "payment.disputed",
+    "CHARGEBACK": "payment.chargeback",
+}
+
+
+async def staging_checkout(
+    db: AsyncSession,
+    attempt: PaymentAttempt,
+    *,
+    outcome: str,
+    delayed: bool = False,
+) -> StagingPaymentSandboxEvent:
+    """Accept a fictional checkout choice and durably queue its provider event.
+
+    This function intentionally does not mutate the attempt. The eventual
+    signed provider callback is the only settlement authority.
+    """
+    if attempt.provider != "staging_sandbox":
+        raise FinancialError("Staging payment checkout is unavailable")
+    event_type = _STAGING_PAYMENT_OUTCOMES.get(outcome.upper())
+    if not event_type:
+        raise FinancialError("Invalid staging payment outcome")
+    existing = await db.scalar(
+        select(StagingPaymentSandboxEvent)
+        .where(
+            StagingPaymentSandboxEvent.payment_attempt_id == attempt.id,
+            StagingPaymentSandboxEvent.event_type == event_type,
+        )
+        .with_for_update()
+    )
+    if existing:
+        return existing
+    now = datetime.now(UTC)
+    event = StagingPaymentSandboxEvent(
+        payment_attempt_id=attempt.id,
+        external_event_id=f"stg_evt_{secrets.token_urlsafe(18)}",
+        event_type=event_type,
+        deliver_after=now + timedelta(seconds=3 if delayed else 0),
+    )
+    db.add(event)
+    await record_event(
+        db,
+        "payment.staging_checkout_submitted",
+        actor_user_id=attempt.buyer_user_id,
+        target_type="payment_attempt",
+        target_id=str(attempt.id),
+        metadata={"outcome": outcome.upper(), "delayed": delayed},
+    )
+    return event
+
+
+async def deliver_due_staging_payment_events(db: AsyncSession, limit: int = 50) -> int:
+    """Emit queued sandbox events through the normal signed webhook parser."""
+    rows = (
+        await db.scalars(
+            select(StagingPaymentSandboxEvent)
+            .where(
+                StagingPaymentSandboxEvent.status == SandboxEventStatus.pending,
+                StagingPaymentSandboxEvent.deliver_after <= datetime.now(UTC),
+            )
+            .order_by(StagingPaymentSandboxEvent.deliver_after, StagingPaymentSandboxEvent.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    delivered = 0
+    for event in rows:
+        attempt = await db.get(PaymentAttempt, event.payment_attempt_id, with_for_update=True)
+        if not attempt:
+            event.status = SandboxEventStatus.delivered
+            event.delivered_at = datetime.now(UTC)
+            continue
+        payload, signature = payment_provider().signed_event(
+            attempt, event.event_type, event.external_event_id
+        )
+        await process_payment_webhook(db, "staging_sandbox", payload, signature)
+        event.status = SandboxEventStatus.delivered
+        event.delivered_at = datetime.now(UTC)
+        delivered += 1
+    return delivered
 
 
 async def _record_ignored_payment_transition(
@@ -1304,20 +1392,36 @@ async def _open_provider_dispute(
 async def process_development_webhook(
     db: AsyncSession, payload: bytes, signature: str | None
 ) -> Purchase | None:
-    event = verify_development_webhook(payload, signature)
-    existing = await lock_payment_webhook_event(db, "development", event["id"])
+    return await process_payment_webhook(db, "development", payload, signature)
+
+
+async def process_payment_webhook(
+    db: AsyncSession, provider_name: str, payload: bytes, signature: str | None
+) -> Purchase | None:
+    if payment_provider().name != provider_name:
+        raise FinancialError("Payment webhook provider is unavailable")
+    try:
+        parsed = payment_provider().verify_webhook(payload, signature)
+    except PaymentProviderError as exc:
+        raise FinancialError(str(exc)) from exc
+    event = {
+        "id": parsed.external_event_id,
+        "type": parsed.event_type,
+        "payment_reference": parsed.payment_reference,
+    }
+    existing = await lock_payment_webhook_event(db, provider_name, event["id"])
     if existing:
         return None
     attempt = await db.scalar(
         select(PaymentAttempt)
         .where(
-            PaymentAttempt.provider == "development",
+            PaymentAttempt.provider == provider_name,
             PaymentAttempt.provider_reference == event["payment_reference"],
         )
         .with_for_update()
     )
     webhook_event = PaymentWebhookEvent(
-        provider="development", external_event_id=event["id"], event_type=event["type"]
+        provider=provider_name, external_event_id=event["id"], event_type=event["type"]
     )
     db.add(webhook_event)
     if not attempt:

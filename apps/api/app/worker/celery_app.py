@@ -74,6 +74,7 @@ celery_app.conf.task_routes = {
         # task on the normal scheduled worker.
         "queue": "live_control" if get_settings().environment == "development" else "scheduled"
     },
+    "app.worker.tasks.deliver_staging_payment_sandbox_events": {"queue": "financial"},
     "app.worker.tasks.reconcile_legal_acceptance_notifications": {"queue": "scheduled"},
     "app.worker.tasks.deliver_notification": {"queue": "notifications"},
     "app.worker.tasks.reconcile_notification_delivery": {"queue": "notifications"},
@@ -96,6 +97,10 @@ celery_app.conf.beat_schedule = {
     "financial-settlement-reconciliation": {
         "task": "app.worker.tasks.reconcile_financial_settlement",
         "schedule": 300.0,
+    },
+    "staging-payment-sandbox-events": {
+        "task": "app.worker.tasks.deliver_staging_payment_sandbox_events",
+        "schedule": 2.0,
     },
     "scheduled-feed-posts": {
         "task": "app.worker.tasks.publish_scheduled_posts",

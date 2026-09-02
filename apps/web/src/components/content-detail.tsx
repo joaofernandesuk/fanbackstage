@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { completePaymentCheckout } from "../lib/payments";
 import {
   ContentMedia,
   contentDeliveryUrl,
@@ -329,8 +330,7 @@ export function ContentDetail({ contentId }: { contentId: string }) {
         setPurchaseError("The previous payment attempt failed. Confirm again to start a new, safely tracked attempt.");
         return;
       }
-      if (process.env.NODE_ENV !== "production") {
-        await api(`/payments/development/${started.payment_attempt_id}/complete`, { method: "POST" });
+      if (await completePaymentCheckout(started.payment_attempt_id)) {
         await load();
         setPurchaseStatus("Purchase confirmed. Full access is now active.");
         window.dispatchEvent(new Event("fanbackstage:entitlements-changed"));

@@ -1,6 +1,5 @@
 """Authoritative subscription pricing and settlement using the Phase 3 ledger."""
 
-import secrets
 from calendar import monthrange
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -17,6 +16,7 @@ from app.compliance.types import (
 )
 from app.core.config import get_settings
 from app.creators.service import require_public_creator_access
+from app.finance.providers import new_provider_reference
 from app.finance.service import (
     _account,
     commission_amount,
@@ -299,7 +299,7 @@ async def create_subscription(
         attempt = PaymentAttempt(
             buyer_user_id=buyer.id,
             provider=get_settings().payment_provider,
-            provider_reference=f"devsub_{secrets.token_urlsafe(18)}",
+            provider_reference=new_provider_reference(),
             amount_minor=retry_period.charged_amount_minor,
             currency=retry_period.currency,
             idempotency_key=idempotency_key,
@@ -337,6 +337,7 @@ async def create_subscription(
             metadata={"attempt_number": attempt_number},
         )
         await db.flush()
+        active._response_payment_attempt_id = attempt.id
         return active
     price = await db.scalar(
         select(SubscriptionPlanPrice).where(
@@ -364,7 +365,7 @@ async def create_subscription(
     attempt = PaymentAttempt(
         buyer_user_id=buyer.id,
         provider=get_settings().payment_provider,
-        provider_reference=f"devsub_{secrets.token_urlsafe(18)}",
+        provider_reference=new_provider_reference(),
         amount_minor=charged,
         currency=plan.currency,
         idempotency_key=idempotency_key,
@@ -400,6 +401,7 @@ async def create_subscription(
         )
     )
     await db.flush()
+    subscription._response_payment_attempt_id = attempt.id
     return subscription
 
 
@@ -778,7 +780,7 @@ async def renew_due_subscriptions(db: AsyncSession) -> int:
         attempt = PaymentAttempt(
             buyer_user_id=buyer.id,
             provider=get_settings().payment_provider,
-            provider_reference=f"devrenew_{secrets.token_urlsafe(18)}",
+            provider_reference=new_provider_reference(),
             amount_minor=charged,
             currency=subscription.currency,
             idempotency_key=f"renewal:{subscription.id}:{sequence}",
@@ -890,7 +892,7 @@ async def retry_failed_subscription_renewals(db: AsyncSession) -> int:
         attempt = PaymentAttempt(
             buyer_user_id=subscription.subscriber_user_id,
             provider=settings.payment_provider,
-            provider_reference=f"devretry_{secrets.token_urlsafe(18)}",
+            provider_reference=new_provider_reference(),
             amount_minor=period.charged_amount_minor,
             currency=period.currency,
             idempotency_key=f"renewal-retry:{period.id}:{count + 1}",

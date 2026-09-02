@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { completePaymentCheckout } from "../lib/payments";
 import { formatMoney } from "../lib/public-api";
 
 type SendPrice = {
@@ -41,8 +42,11 @@ export function CreatorMessageComposer({ creatorId }: { creatorId: string }) {
           headers: { "Idempotency-Key": crypto.randomUUID() },
           body: JSON.stringify({ body }),
         });
-        await api(`/payments/development/${payment.payment_attempt_id}/complete`, { method: "POST" });
-        setMessage("Your paid message was delivered.");
+        setMessage(
+          await completePaymentCheckout(payment.payment_attempt_id)
+            ? "Your paid message was delivered."
+            : "Payment started. Your message is delivered only after provider confirmation.",
+        );
       } else {
         await api(`/messages/creator/${creatorId}`, { method: "POST", body: JSON.stringify({ body }) });
         setMessage("Your message was delivered.");

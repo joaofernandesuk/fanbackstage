@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
+import { completePaymentCheckout } from "../lib/payments";
 import type { ComplianceAccess } from "../lib/compliance-api";
 import { AdultAccessGate } from "./adult-access-gate";
 
@@ -36,7 +37,7 @@ export function MessageAttachments({ conversationId }: { conversationId: string 
       const purchase = await api<{ payment_attempt_id: string }>(`/messages/attachments/${id}/unlock`, {
         method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
       });
-      await api(`/payments/development/${purchase.payment_attempt_id}/complete`, { method: "POST" });
+      await completePaymentCheckout(purchase.payment_attempt_id);
       await refresh();
     } catch (requestError) {
       setError(requestError instanceof ApiError ? requestError.message : "Unable to unlock media");

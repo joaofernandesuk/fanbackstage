@@ -48,6 +48,7 @@ class SubscriptionResponse(BaseModel):
     auto_renew: bool
     cancel_at_period_end: bool
     current_period_end: datetime | None
+    payment_attempt_id: UUID | None = None
 
 
 class PublicPlanResponse(BaseModel):

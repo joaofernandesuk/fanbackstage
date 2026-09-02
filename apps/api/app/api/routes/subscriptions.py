@@ -92,6 +92,7 @@ def response(subscription: Subscription) -> SubscriptionResponse:
         auto_renew=subscription.auto_renew,
         cancel_at_period_end=subscription.cancel_at_period_end,
         current_period_end=subscription.current_period_end,
+        payment_attempt_id=getattr(subscription, "_response_payment_attempt_id", None),
     )
 
 

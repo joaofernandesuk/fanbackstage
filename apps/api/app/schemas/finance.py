@@ -22,6 +22,24 @@ class DevelopmentPaymentCompletionResponse(BaseModel):
     payment_attempt_id: UUID
 
 
+class PaymentCheckoutResponse(BaseModel):
+    payment_attempt_id: UUID
+    provider: str
+    provider_reference: str
+    action: str
+    status: str
+
+
+class StagingPaymentCheckoutInput(BaseModel):
+    outcome: str = Field(pattern="^(SUCCESS|DECLINE|DELAYED_SUCCESS|REFUND|DISPUTE|CHARGEBACK)$")
+
+
+class PaymentOperationResponse(BaseModel):
+    id: UUID
+    status: str
+    payment_attempt_id: UUID
+
+
 class RefundRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 

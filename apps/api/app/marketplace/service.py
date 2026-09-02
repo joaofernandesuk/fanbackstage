@@ -22,6 +22,7 @@ from app.creators.service import (
     require_public_creator_access,
     resolve_creator_compliance_eligibility,
 )
+from app.finance.providers import new_provider_reference
 from app.finance.service import (
     _account,
     commission_amount,
@@ -785,7 +786,7 @@ async def initiate_order(
     attempt = PaymentAttempt(
         buyer_user_id=buyer.id,
         provider=get_settings().payment_provider,
-        provider_reference=f"devpay_{secrets.token_urlsafe(18)}",
+        provider_reference=new_provider_reference(),
         amount_minor=treatment["total_paid_minor"],
         currency=currency,
         idempotency_key=idempotency_key,
