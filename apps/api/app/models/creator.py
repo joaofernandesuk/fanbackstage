@@ -86,6 +86,41 @@ class CreatorVerification(UUIDPrimaryKey, Timestamped, Base):
     metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
 
+class CreatorKycWebhookEvent(UUIDPrimaryKey, Timestamped, Base):
+    """Replay record for normalized creator-KYC provider callbacks."""
+
+    __tablename__ = "creator_kyc_webhook_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "external_event_id", name="uq_creator_kyc_webhook_event"),
+    )
+    provider: Mapped[str] = mapped_column(String(64))
+    external_event_id: Mapped[str] = mapped_column(String(255))
+    creator_verification_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("creator_verifications.id", ondelete="SET NULL"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StagingCreatorKycSandboxEvent(UUIDPrimaryKey, Timestamped, Base):
+    """Durable, fictional provider event used only by staging/test simulator."""
+
+    __tablename__ = "staging_creator_kyc_sandbox_events"
+    __table_args__ = (
+        UniqueConstraint("external_event_id", name="uq_staging_creator_kyc_event_id"),
+        UniqueConstraint(
+            "creator_verification_id", name="uq_staging_creator_kyc_event_verification"
+        ),
+    )
+    creator_verification_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_verifications.id", ondelete="RESTRICT"), index=True
+    )
+    external_event_id: Mapped[str] = mapped_column(String(255))
+    outcome: Mapped[str] = mapped_column(String(64))
+    deliver_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CreatorStatusHistory(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "creator_status_history"
     creator_profile_id: Mapped[UUID] = mapped_column(

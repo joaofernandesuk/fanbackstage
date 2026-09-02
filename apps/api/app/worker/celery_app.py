@@ -75,6 +75,7 @@ celery_app.conf.task_routes = {
         "queue": "live_control" if get_settings().environment == "development" else "scheduled"
     },
     "app.worker.tasks.deliver_staging_payment_sandbox_events": {"queue": "financial"},
+    "app.worker.tasks.deliver_staging_creator_kyc_sandbox_events": {"queue": "scheduled"},
     "app.worker.tasks.reconcile_legal_acceptance_notifications": {"queue": "scheduled"},
     "app.worker.tasks.deliver_notification": {"queue": "notifications"},
     "app.worker.tasks.reconcile_notification_delivery": {"queue": "notifications"},
@@ -100,6 +101,10 @@ celery_app.conf.beat_schedule = {
     },
     "staging-payment-sandbox-events": {
         "task": "app.worker.tasks.deliver_staging_payment_sandbox_events",
+        "schedule": 2.0,
+    },
+    "staging-creator-kyc-sandbox-events": {
+        "task": "app.worker.tasks.deliver_staging_creator_kyc_sandbox_events",
         "schedule": 2.0,
     },
     "scheduled-feed-posts": {

@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import func, select
 
@@ -12,6 +14,7 @@ from app.models.creator import (
     CreatorLanguage,
     CreatorProfile,
     CreatorStatus,
+    CreatorVerification,
 )
 from app.models.social import Follow
 from app.schemas.creator import (
@@ -20,6 +23,7 @@ from app.schemas.creator import (
     CreatorSelfResponse,
     PublicCreatorResponse,
     SocialLinkInput,
+    StagingKycOutcomeInput,
     TaxonomyItem,
 )
 from app.trust_safety import service as trust_safety
@@ -64,6 +68,13 @@ def development_verification_enabled() -> bool:
     )
 
 
+def staging_kyc_sandbox_enabled() -> bool:
+    settings = get_settings()
+    return (
+        settings.environment in {"staging", "test"} and settings.kyc_provider == "staging_sandbox"
+    )
+
+
 async def self_response(db: Db, profile: CreatorProfile) -> CreatorSelfResponse:
     verification = await service.latest_verification(db, profile.id)
     eligibility = await service.resolve_creator_compliance_eligibility(db, profile=profile)
@@ -72,6 +83,9 @@ async def self_response(db: Db, profile: CreatorProfile) -> CreatorSelfResponse:
     )
     development_verification_available = (
         profile.status is CreatorStatus.pending_verification and development_verification_enabled()
+    )
+    staging_kyc_sandbox_available = (
+        profile.status is CreatorStatus.pending_verification and staging_kyc_sandbox_enabled()
     )
     available_languages = (
         await db.scalars(
@@ -144,6 +158,21 @@ async def self_response(db: Db, profile: CreatorProfile) -> CreatorSelfResponse:
             TaxonomyItem(id=row.id, code=row.slug, label=row.label) for row in available_categories
         ],
         development_verification_available=development_verification_available,
+        staging_kyc_sandbox_available=staging_kyc_sandbox_available,
+        staging_kyc_session_reference=(
+            verification.provider_reference
+            if verification
+            and verification.provider == "staging_sandbox"
+            and verification.status.value == "pending"
+            else None
+        ),
+        staging_kyc_verification_id=(
+            verification.id
+            if verification
+            and verification.provider == "staging_sandbox"
+            and verification.status.value == "pending"
+            else None
+        ),
     )
 
 
@@ -223,6 +252,68 @@ async def development_verification(
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await self_response(db, profile)
+
+
+@router.post("/me/verification/staging-sandbox/start", response_model=CreatorSelfResponse)
+async def start_staging_kyc_verification(
+    request: Request, identity: CurrentIdentity, db: Db
+) -> CreatorSelfResponse:
+    await require_creator_registration(db, request, identity[0])
+    if not staging_kyc_sandbox_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    profile = await service.profile_for_user(db, identity[0].id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Creator application not found")
+    try:
+        await service.start_staging_kyc(db, profile, identity[0].id)
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await self_response(db, profile)
+
+
+@router.post("/me/verification/staging-sandbox/{verification_id}/complete", status_code=202)
+async def complete_staging_kyc_verification(
+    verification_id: UUID,
+    payload: StagingKycOutcomeInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict[str, str]:
+    await require_creator_registration(db, request, identity[0])
+    if not staging_kyc_sandbox_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    verification = await db.get(CreatorVerification, verification_id, with_for_update=True)
+    if not verification:
+        raise HTTPException(status_code=404, detail="Creator KYC session not found")
+    profile = await service.profile_for_user(db, identity[0].id)
+    if not profile or verification.creator_profile_id != profile.id:
+        raise HTTPException(status_code=404, detail="Creator KYC session not found")
+    try:
+        event = await service.queue_staging_kyc_outcome(db, verification, payload.outcome)
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "queued", "event_id": event.external_event_id}
+
+
+@router.post("/webhooks/staging-sandbox", status_code=204)
+async def staging_kyc_webhook(request: Request, db: Db) -> None:
+    if request.headers.get("content-length") and int(request.headers["content-length"]) > 65536:
+        raise HTTPException(status_code=413, detail="Webhook payload is too large")
+    payload = await request.body()
+    if len(payload) > 65536:
+        raise HTTPException(status_code=413, detail="Webhook payload is too large")
+    try:
+        await service.process_staging_kyc_webhook(
+            db, payload, request.headers.get("X-Kyc-Signature")
+        )
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{username}", response_model=PublicCreatorResponse)

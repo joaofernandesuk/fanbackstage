@@ -42,6 +42,7 @@ from app.models.compliance import (
     JurisdictionPolicyRevision,
     ProviderProbeStatus,
 )
+from app.models.creator import CreatorProfile, CreatorVerification
 from app.models.identity import User
 from app.permissions.policies import Permission, authorize
 from app.schemas.compliance import (
@@ -76,6 +77,45 @@ async def _enqueue_live_authority_reconciliation(db: Db) -> None:
 
 def _page(page: int, page_size: int) -> tuple[int, int]:
     return (page - 1) * page_size, page_size
+
+
+@router.get("/creator-kyc", response_model=list[dict])
+async def creator_kyc_operations(
+    identity: OperatorRecoveryIdentity,
+    db: Db,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+) -> list[dict]:
+    """Safe operational projection; provider evidence and secrets stay private."""
+    await authorize(db, identity[0], Permission.COMPLIANCE_VERIFICATION_VIEW)
+    offset, limit = _page(page, page_size)
+    rows = (
+        await db.execute(
+            select(CreatorVerification, CreatorProfile.user_id)
+            .join(CreatorProfile, CreatorProfile.id == CreatorVerification.creator_profile_id)
+            .order_by(CreatorVerification.created_at.desc(), CreatorVerification.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    ).all()
+    return [
+        {
+            "verification_id": str(verification.id),
+            "creator_profile_id": str(verification.creator_profile_id),
+            "creator_user_id": str(user_id),
+            "provider": verification.provider,
+            "provider_reference": verification.provider_reference,
+            "status": verification.status.value,
+            "country_code": verification.country_code,
+            "started_at": verification.created_at.isoformat(),
+            "verified_at": verification.verified_at.isoformat()
+            if verification.verified_at
+            else None,
+            "expires_at": verification.expires_at.isoformat() if verification.expires_at else None,
+            "failure_reason_code": verification.failure_reason_code,
+        }
+        for verification, user_id in rows
+    ]
 
 
 def _raise_bad_request(exc: Exception) -> None:

@@ -48,6 +48,9 @@ const pendingProfile: CreatorOnboardingProfile = {
   available_languages: [],
   available_categories: [],
   development_verification_available: false,
+  staging_kyc_sandbox_available: false,
+  staging_kyc_session_reference: null,
+  staging_kyc_verification_id: null,
 };
 
 describe("creator onboarding", () => {

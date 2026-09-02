@@ -72,6 +72,13 @@ class CreatorSelfResponse(BaseModel):
     available_languages: list[TaxonomyItem]
     available_categories: list[TaxonomyItem]
     development_verification_available: bool
+    staging_kyc_sandbox_available: bool
+    staging_kyc_session_reference: str | None = None
+    staging_kyc_verification_id: UUID | None = None
+
+
+class StagingKycOutcomeInput(BaseModel):
+    outcome: str = Field(pattern="^(VERIFIED|FAILED|REVIEW_REQUIRED|EXPIRED)$")
 
 
 class PublicCreatorResponse(BaseModel):

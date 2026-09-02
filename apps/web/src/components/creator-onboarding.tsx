@@ -31,6 +31,9 @@ export type CreatorOnboardingProfile = CreatorComplianceProjection & {
   available_languages: TaxonomyItem[];
   available_categories: TaxonomyItem[];
   development_verification_available: boolean;
+  staging_kyc_sandbox_available: boolean;
+  staging_kyc_session_reference: string | null;
+  staging_kyc_verification_id: string | null;
 };
 
 type PendingAction = "save" | "submit" | "verify" | null;
@@ -38,6 +41,10 @@ type PendingAction = "save" | "submit" | "verify" | null;
 export function canRunDevelopmentVerification(profile: CreatorOnboardingProfile): boolean {
   return profile.status === "pending_verification"
     && profile.development_verification_available;
+}
+
+export function canRunStagingKyc(profile: CreatorOnboardingProfile): boolean {
+  return profile.status === "pending_verification" && profile.staging_kyc_sandbox_available;
 }
 
 export function creatorHasCurrentVerification(profile: CreatorOnboardingProfile): boolean {
@@ -91,10 +98,15 @@ function statusCopy(profile: CreatorOnboardingProfile): { heading: string; body:
           heading: "Identity verification is next",
           body: "This local test environment exposes its development-only verification action.",
         }
-        : {
+        : canRunStagingKyc(profile)
+          ? {
+            heading: "Identity verification is next",
+            body: "Complete the staging sandbox identity check. Provider confirmation is asynchronous.",
+          }
+          : {
           heading: "Identity verification is pending",
           body: "Development verification is disabled here. A configured provider must continue this application; there is no browser shortcut.",
-        };
+          };
     case "pending_review":
       return {
         heading: "Your application is in review",
@@ -304,6 +316,47 @@ export function CreatorOnboarding() {
     }
   }
 
+  async function startStagingKyc() {
+    if (!profile || !canRunStagingKyc(profile) || actionLock.current) return;
+    actionLock.current = true;
+    setPendingAction("verify");
+    setError("");
+    setNotice("");
+    try {
+      const next = await api<CreatorOnboardingProfile>(
+        "/creators/me/verification/staging-sandbox/start",
+        { method: "POST" },
+      );
+      acceptProfile(next);
+      setNotice("Sandbox identity verification started. Provider confirmation is pending.");
+    } catch (verificationError) {
+      setError(creatorOnboardingError(verificationError, "Unable to start identity verification."));
+    } finally {
+      actionLock.current = false;
+      setPendingAction(null);
+    }
+  }
+
+  async function completeStagingKyc() {
+    if (!profile?.staging_kyc_verification_id || actionLock.current) return;
+    actionLock.current = true;
+    setPendingAction("verify");
+    setError("");
+    setNotice("");
+    try {
+      await api(`/creators/me/verification/staging-sandbox/${profile.staging_kyc_verification_id}/complete`, {
+        method: "POST",
+        body: JSON.stringify({ outcome: "VERIFIED" }),
+      });
+      setNotice("Sandbox identity result queued. The authoritative provider callback is pending.");
+    } catch (verificationError) {
+      setError(creatorOnboardingError(verificationError, "Unable to complete staging identity verification."));
+    } finally {
+      actionLock.current = false;
+      setPendingAction(null);
+    }
+  }
+
   if (!profile) {
     return (
       <section aria-busy={!error} className={`card ${styles.shell}`}>
@@ -356,6 +409,20 @@ export function CreatorOnboarding() {
           <p className={styles.mediaBoundary}>
             Avatar and cover editing will appear only after the media domain exposes an owner-authorised profile association command.
           </p>
+          {canRunStagingKyc(profile) && (
+            <button className={styles.secondaryButton} disabled={busy} onClick={startStagingKyc} type="button">
+              {pendingAction === "verify" ? "Starting…" : "Start identity check"}
+            </button>
+          )}
+          {profile.staging_kyc_verification_id && (
+            <div>
+              <p>For the staging sandbox, submit the signed test outcome. Production providers complete this outside FanBackstage.</p>
+              <button className={styles.secondaryButton} disabled={busy} onClick={completeStagingKyc} type="button">
+                {pendingAction === "verify" ? "Submitting…" : "Complete sandbox identity check"}
+              </button>
+            </div>
+          )}
+
         </aside>
 
         <div className={styles.editor}>

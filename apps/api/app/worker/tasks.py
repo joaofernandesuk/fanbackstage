@@ -101,6 +101,20 @@ def deliver_staging_payment_sandbox_events() -> dict[str, int]:
     return {"delivered": run_async(run())}
 
 
+@celery_app.task
+def deliver_staging_creator_kyc_sandbox_events() -> dict[str, int]:
+    """Emit due fictional KYC callbacks through the verified callback boundary."""
+    from app.creators.service import deliver_due_staging_kyc_events
+    from app.db.session import SessionLocal
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            delivered = await deliver_due_staging_kyc_events(session)
+            await session.commit()
+            return delivered
+
+    return {"delivered": run_async(run())}
+
 
 @celery_app.task
 def ffmpeg_version() -> dict[str, str]:

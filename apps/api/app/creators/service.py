@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import json
 import re
 import secrets
 from collections.abc import Sequence
@@ -19,6 +22,7 @@ from app.core.config import get_settings
 from app.models.compliance import CountryRegistry
 from app.models.creator import (
     CreatorCategory,
+    CreatorKycWebhookEvent,
     CreatorLanguage,
     CreatorProfile,
     CreatorSocialLink,
@@ -26,6 +30,7 @@ from app.models.creator import (
     CreatorStatusHistory,
     CreatorUsernameHistory,
     CreatorVerification,
+    StagingCreatorKycSandboxEvent,
     VerificationStatus,
 )
 from app.models.identity import Role, User
@@ -768,3 +773,261 @@ async def development_verify(
     if adult and profile.status == CreatorStatus.pending_verification:
         await set_status(db, profile, CreatorStatus.pending_review, actor_user_id)
     return verification
+
+
+_STAGING_KYC_OUTCOMES = {
+    "VERIFIED": ("kyc.verified", VerificationStatus.verified),
+    "FAILED": ("kyc.failed", VerificationStatus.failed),
+    "REVIEW_REQUIRED": ("kyc.review_required", VerificationStatus.needs_review),
+    "EXPIRED": ("kyc.expired", VerificationStatus.expired),
+}
+
+
+def _staging_kyc_signature(payload: bytes) -> str:
+    return hmac.new(
+        get_settings().staging_kyc_webhook_secret.encode(), payload, hashlib.sha256
+    ).hexdigest()
+
+
+async def start_staging_kyc(
+    db: AsyncSession, profile: CreatorProfile, actor_user_id: UUID
+) -> CreatorVerification:
+    """Create a pending external-style KYC session without granting anything."""
+    settings = get_settings()
+    if (
+        settings.environment not in {"staging", "test"}
+        or settings.kyc_provider != "staging_sandbox"
+    ):
+        raise ValueError("Staging creator KYC sandbox is unavailable")
+    if profile.status is not CreatorStatus.pending_verification:
+        raise ValueError("Creator KYC requires a pending creator verification")
+    existing = await latest_verification(db, profile.id)
+    if (
+        existing
+        and existing.provider == "staging_sandbox"
+        and existing.status is VerificationStatus.pending
+    ):
+        return existing
+    account = await db.get(User, profile.user_id)
+    try:
+        countries = resolve_jurisdiction_candidates(
+            JurisdictionSignals(account_country=account.country_code if account else None),
+            fallback_country=settings.effective_compliance_fallback_country(),
+            allow_untrusted_selection=False,
+        )
+    except ValueError:
+        countries = ()
+    if len(countries) != 1:
+        raise ValueError("Creator account jurisdiction is unresolved or conflicting")
+    verification = CreatorVerification(
+        creator_profile_id=profile.id,
+        provider="staging_sandbox",
+        provider_reference=f"stgkyc_{secrets.token_urlsafe(18)}",
+        status=VerificationStatus.pending,
+        country_code=countries[0],
+        metadata_json={"sandbox": "staging_test_only"},
+    )
+    db.add(verification)
+    await db.flush()
+    await record_event(
+        db,
+        "creator.kyc_started",
+        actor_user_id=actor_user_id,
+        target_type="creator_verification",
+        target_id=str(verification.id),
+        metadata={"provider": verification.provider},
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=profile.user_id,
+        notification_type="CREATOR_KYC_STARTED",
+        source_domain="creator_kyc",
+        source_id=str(verification.id),
+        title="Creator identity verification started",
+        body="Your creator identity verification is pending.",
+        target_path="/creator-studio",
+    )
+    return verification
+
+
+async def queue_staging_kyc_outcome(
+    db: AsyncSession, verification: CreatorVerification, outcome: str
+) -> StagingCreatorKycSandboxEvent:
+    if (
+        verification.provider != "staging_sandbox"
+        or verification.status is not VerificationStatus.pending
+    ):
+        raise ValueError("Creator KYC session is unavailable")
+    if outcome not in _STAGING_KYC_OUTCOMES:
+        raise ValueError("Invalid staging KYC outcome")
+    existing = await db.scalar(
+        select(StagingCreatorKycSandboxEvent)
+        .where(StagingCreatorKycSandboxEvent.creator_verification_id == verification.id)
+        .with_for_update()
+    )
+    if existing:
+        return existing
+    event = StagingCreatorKycSandboxEvent(
+        creator_verification_id=verification.id,
+        external_event_id=f"stg_kyc_evt_{secrets.token_urlsafe(18)}",
+        outcome=outcome,
+        deliver_after=datetime.now(UTC),
+    )
+    db.add(event)
+    return event
+
+
+async def process_staging_kyc_webhook(
+    db: AsyncSession, payload: bytes, signature: str | None
+) -> CreatorVerification | None:
+    expected = _staging_kyc_signature(payload)
+    if not signature or not hmac.compare_digest(expected, signature):
+        raise ValueError("Invalid creator KYC webhook signature")
+    try:
+        event = json.loads(payload)
+        if (
+            not isinstance(event, dict)
+            or not all(
+                isinstance(event.get(key), str) for key in ("id", "type", "provider_reference")
+            )
+            or any(len(event[key]) > 255 for key in ("id", "type", "provider_reference"))
+        ):
+            raise ValueError
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid creator KYC webhook payload") from exc
+    existing = await db.scalar(
+        select(CreatorKycWebhookEvent)
+        .where(
+            CreatorKycWebhookEvent.provider == "staging_sandbox",
+            CreatorKycWebhookEvent.external_event_id == event["id"],
+        )
+        .with_for_update()
+    )
+    if existing:
+        return None
+    webhook = CreatorKycWebhookEvent(
+        provider="staging_sandbox", external_event_id=event["id"], event_type=event["type"]
+    )
+    db.add(webhook)
+    verification = await db.scalar(
+        select(CreatorVerification)
+        .where(
+            CreatorVerification.provider == "staging_sandbox",
+            CreatorVerification.provider_reference == event["provider_reference"],
+        )
+        .with_for_update()
+    )
+    if not verification:
+        webhook.processed_at = datetime.now(UTC)
+        return None
+    webhook.creator_verification_id = verification.id
+    outcome = next(
+        (value for value in _STAGING_KYC_OUTCOMES.values() if value[0] == event["type"]), None
+    )
+    if outcome is None or verification.status is not VerificationStatus.pending:
+        webhook.processed_at = datetime.now(UTC)
+        return verification
+    _event_type, status = outcome
+    now = datetime.now(UTC)
+    verification.status = status
+    verification.identity_verified = status is VerificationStatus.verified
+    verification.adult_verified = status is VerificationStatus.verified
+    verification.verified_at = now if status is VerificationStatus.verified else None
+    verification.expires_at = (
+        now + timedelta(days=get_settings().manual_age_review_max_days)
+        if status is VerificationStatus.verified
+        else None
+    )
+    verification.failure_reason_code = (
+        None
+        if status is VerificationStatus.verified
+        else "MANUAL_REVIEW_REQUIRED"
+        if status is VerificationStatus.needs_review
+        else status.value.upper()
+    )
+    profile = await db.get(CreatorProfile, verification.creator_profile_id, with_for_update=True)
+    if (
+        profile
+        and status is VerificationStatus.verified
+        and profile.status is CreatorStatus.pending_verification
+    ):
+        await set_status(db, profile, CreatorStatus.pending_review, profile.user_id)
+    if profile:
+        notification = {
+            VerificationStatus.verified: (
+                "CREATOR_KYC_VERIFIED",
+                "Creator identity verification complete",
+                "Your verification is complete and your application is ready for review.",
+            ),
+            VerificationStatus.failed: (
+                "CREATOR_KYC_ACTION_REQUIRED",
+                "Creator identity verification needs attention",
+                "Your verification could not be completed. Start a new verification session.",
+            ),
+            VerificationStatus.needs_review: (
+                "CREATOR_KYC_REVIEW_REQUIRED",
+                "Creator identity verification needs review",
+                "Your verification requires a manual review.",
+            ),
+            VerificationStatus.expired: (
+                "CREATOR_KYC_REVERIFY_REQUIRED",
+                "Creator identity verification expired",
+                "Start a new verification session to continue.",
+            ),
+        }[status]
+        await emit_transactional(
+            db,
+            recipient_user_id=profile.user_id,
+            notification_type=notification[0],
+            source_domain="creator_kyc",
+            source_id=str(verification.id),
+            title=notification[1],
+            body=notification[2],
+            target_path="/creator-studio",
+        )
+    await record_event(
+        db,
+        "creator.verification_changed",
+        actor_user_id=None,
+        target_type="creator_verification",
+        target_id=str(verification.id),
+        metadata={"provider": "staging_sandbox", "status": status.value},
+    )
+    webhook.processed_at = now
+    return verification
+
+
+async def deliver_due_staging_kyc_events(db: AsyncSession, limit: int = 50) -> int:
+    rows = (
+        await db.scalars(
+            select(StagingCreatorKycSandboxEvent)
+            .where(
+                StagingCreatorKycSandboxEvent.delivered_at.is_(None),
+                StagingCreatorKycSandboxEvent.deliver_after <= datetime.now(UTC),
+            )
+            .order_by(StagingCreatorKycSandboxEvent.deliver_after, StagingCreatorKycSandboxEvent.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    delivered = 0
+    for event in rows:
+        verification = await db.get(
+            CreatorVerification, event.creator_verification_id, with_for_update=True
+        )
+        if not verification:
+            event.delivered_at = datetime.now(UTC)
+            continue
+        event_type, _status = _STAGING_KYC_OUTCOMES[event.outcome]
+        payload = json.dumps(
+            {
+                "id": event.external_event_id,
+                "type": event_type,
+                "provider_reference": verification.provider_reference,
+            },
+            separators=(",", ":"),
+        ).encode()
+        await process_staging_kyc_webhook(db, payload, _staging_kyc_signature(payload))
+        event.delivered_at = datetime.now(UTC)
+        delivered += 1
+    return delivered

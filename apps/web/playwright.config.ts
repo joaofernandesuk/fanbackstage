@@ -37,10 +37,16 @@ const environment = {
   // assertions with a shared `anonymous` throttle key.
   FANBACKSTAGE_MEDIA_RATE_LIMIT_ATTEMPTS: "1000",
   FANBACKSTAGE_ENVIRONMENT: "test",
+  // Focused sandbox-provider journeys override these two adapter selections
+  // explicitly. The normal suite keeps its existing local test adapters.
   FANBACKSTAGE_PAYMENT_PROVIDER: process.env.FANBACKSTAGE_PAYMENT_PROVIDER ?? "development",
+  FANBACKSTAGE_KYC_PROVIDER: process.env.FANBACKSTAGE_KYC_PROVIDER ?? "development",
   FANBACKSTAGE_STAGING_PAYMENT_WEBHOOK_SECRET:
     process.env.FANBACKSTAGE_STAGING_PAYMENT_WEBHOOK_SECRET
     ?? "fanbackstage-e2e-staging-payment-webhook-secret",
+  FANBACKSTAGE_STAGING_KYC_WEBHOOK_SECRET:
+    process.env.FANBACKSTAGE_STAGING_KYC_WEBHOOK_SECRET
+    ?? "fanbackstage-e2e-staging-kyc-webhook-secret",
   FANBACKSTAGE_API_ORIGIN: apiUrl,
   // The deterministic adapter performs the full provider callback lifecycle
   // inside this isolated browser stack. Configuration rejects it outside
