@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import record_event
 from app.compliance.locks import lock_compliance_subject
-from app.core.config import Settings, get_settings
+from app.core.config import STAGING_TEST_MARKER, Settings, get_settings
 from app.models.identity import Role, User, UserRole
 from app.models.legal import (
     LegalAcceptance,
@@ -1102,10 +1102,10 @@ async def production_legal_readiness(
     settings: Settings | None = None,
     now: datetime | None = None,
 ) -> tuple[bool, tuple[str, ...]]:
-    """Detect unsafe production legal state without treating demo text as authority."""
+    """Detect unsafe shared-environment legal state without conflating approval."""
 
     settings = settings or get_settings()
-    if settings.environment != "production":
+    if settings.environment in {"development", "test"}:
         return True, ()
     current = now or _now()
     effective_window = and_(
@@ -1119,6 +1119,40 @@ async def production_legal_readiness(
         ),
     )
     reasons: list[str] = []
+    if settings.environment == "staging":
+        active_versions = (
+            await db.execute(
+                select(LegalDocument.document_type, LegalDocumentVersion)
+                .join(
+                    LegalDocumentVersion,
+                    LegalDocumentVersion.document_id == LegalDocument.id,
+                )
+                .where(
+                    LegalDocumentVersion.status == LegalDocumentStatus.published,
+                    LegalDocumentVersion.published_at.is_not(None),
+                    effective_window,
+                )
+            )
+        ).all()
+        if any(
+            not version.is_demo or STAGING_TEST_MARKER not in version.title
+            for _, version in active_versions
+        ):
+            reasons.append("STAGING_LEGAL_VERSION_NOT_EXPLICITLY_MARKED")
+        ready_types = {
+            document_type
+            for document_type, version in active_versions
+            if document_type in REQUIRED_PRODUCTION_LEGAL_TYPES
+            and version.is_demo
+            and STAGING_TEST_MARKER in version.title
+            and version.approved_for_publication
+            and not version.requires_legal_review
+        }
+        for document_type in REQUIRED_PRODUCTION_LEGAL_TYPES:
+            if document_type not in ready_types:
+                reasons.append(f"MISSING_STAGING_LEGAL_{document_type.value.upper()}")
+        return not reasons, tuple(reasons)
+
     active_demo = await db.scalar(
         select(LegalDocumentVersion.id).where(
             LegalDocumentVersion.status == LegalDocumentStatus.published,

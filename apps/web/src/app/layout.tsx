@@ -9,7 +9,11 @@ import { RequireAuthentication } from "../components/require-authentication";
 import { SiteBanner } from "../components/site-banner";
 import { SiteFooter } from "../components/site-footer";
 
+const webOrigin = process.env.NEXT_PUBLIC_FANBACKSTAGE_WEB_ORIGIN ?? "http://localhost:3000";
+const privateStaging = process.env.FANBACKSTAGE_ENVIRONMENT === "staging";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(webOrigin),
   applicationName: "FanBackstage",
   title: {
     default: "FanBackstage — Get closer. Go backstage.",
@@ -27,6 +31,9 @@ export const metadata: Metadata = {
     title: "FanBackstage — Get closer. Go backstage.",
     description: "Discover creators, premium content, live experiences, and creator-led communities.",
   },
+  robots: privateStaging
+    ? { index: false, follow: false, nocache: true }
+    : { index: true, follow: true },
 };
 
 export const viewport: Viewport = {

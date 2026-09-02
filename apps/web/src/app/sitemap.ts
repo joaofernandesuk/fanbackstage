@@ -15,6 +15,9 @@ const SAFE_PUBLIC_ROUTES = [
 ] as const;
 
 export default function sitemap(): MetadataRoute.Sitemap {
+  if (process.env.FANBACKSTAGE_ENVIRONMENT === "staging") {
+    return [];
+  }
   return SAFE_PUBLIC_ROUTES.map((path) => ({
     url: `${webOrigin}${path || "/"}`,
     changeFrequency: path === "" ? "daily" : "hourly",

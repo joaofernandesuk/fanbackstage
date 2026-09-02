@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 from uuid import UUID
 
@@ -6,6 +7,7 @@ from app.core.config import get_settings
 from app.worker.celery_app import celery_app
 
 _event_loop: asyncio.AbstractEventLoop | None = None
+logger = logging.getLogger("fanbackstage.worker")
 
 
 def run_async(coroutine):
@@ -25,6 +27,26 @@ def run_async(coroutine):
 def health_ping(self) -> dict[str, str]:
     """Harmless worker readiness task; it creates no durable product state."""
     return {"status": "ok", "queue": self.request.delivery_info.get("routing_key", "default")}
+
+
+@celery_app.task
+def record_operations_heartbeat() -> dict[str, object]:
+    """Record one beat-to-worker round trip and safe queue depth gauges."""
+
+    from redis.asyncio import Redis
+
+    from app.observability.operations import record_operational_heartbeat
+
+    async def run() -> dict[str, object]:
+        redis = Redis.from_url(get_settings().redis_url)
+        try:
+            return await record_operational_heartbeat(redis)
+        finally:
+            await redis.aclose()
+
+    result = run_async(run())
+    logger.info("operations_heartbeat", extra={"metrics": result})
+    return result
 
 
 @celery_app.task(bind=True)
@@ -274,7 +296,9 @@ def process_live_provider_control_outbox() -> dict[str, int]:
             "terminal": result.terminal_count,
         }
 
-    return run_async(run())
+    result = run_async(run())
+    logger.info("live_provider_control_outbox_batch", extra={"metrics": result})
+    return result
 
 
 @celery_app.task

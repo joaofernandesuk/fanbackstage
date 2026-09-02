@@ -18,4 +18,20 @@ describe("public SEO projections", () => {
     expect(rules.disallow).toContain("/messages/");
     expect(rules.disallow).toContain("/creator-studio/");
   });
+
+  it("makes private staging non-indexable and omits its sitemap", () => {
+    const previous = process.env.FANBACKSTAGE_ENVIRONMENT;
+    process.env.FANBACKSTAGE_ENVIRONMENT = "staging";
+    try {
+      expect(sitemap()).toEqual([]);
+      const rules = robots().rules;
+      expect(Array.isArray(rules)).toBe(false);
+      if (Array.isArray(rules)) return;
+      expect(rules.disallow).toBe("/");
+      expect(robots().sitemap).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.FANBACKSTAGE_ENVIRONMENT;
+      else process.env.FANBACKSTAGE_ENVIRONMENT = previous;
+    }
+  });
 });

@@ -107,6 +107,9 @@ services:
     build: {context: ./apps/web, dockerfile: Dockerfile.dev}
     command: pnpm dev --hostname 0.0.0.0 --port 3000
     environment:
+      # Server-rendered pages run inside this container, where localhost is not
+      # the API service. Keep the public browser URL below for client requests.
+      FANBACKSTAGE_API_INTERNAL_URL: http://api:8000
       NEXT_PUBLIC_FANBACKSTAGE_API_URL: http://localhost:18000
     ports: ["13000:3000"]
     depends_on:

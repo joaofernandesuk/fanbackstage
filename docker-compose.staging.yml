@@ -1,0 +1,53 @@
+name: fanbackstage-staging
+
+x-api-image: &api-image ${FANBACKSTAGE_API_IMAGE:?set a release-SHA-tagged API image}
+x-api-env: &api-env
+  env_file: ${FANBACKSTAGE_STAGING_ENV_FILE:-.env.staging}
+  image: *api-image
+  restart: unless-stopped
+  networks: [application, egress]
+
+services:
+  migrate:
+    image: *api-image
+    env_file: ${FANBACKSTAGE_STAGING_ENV_FILE:-.env.staging}
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    networks: [application, egress]
+
+  api:
+    <<: *api-env
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--no-proxy-headers"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    networks: [application, egress, private_edge]
+
+  worker:
+    <<: *api-env
+    command: ["celery", "-A", "app.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=default,media,notifications,notifications_marketing,moderation,analytics,financial,scheduled"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  beat:
+    <<: *api-env
+    command: ["celery", "-A", "app.worker.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  web:
+    image: ${FANBACKSTAGE_WEB_IMAGE:?set a release-SHA-tagged web image}
+    env_file: ${FANBACKSTAGE_STAGING_ENV_FILE:-.env.staging}
+    restart: unless-stopped
+    depends_on: [api]
+    networks: [application, private_edge]
+
+networks:
+  application:
+    internal: true
+  # Outbound-only application traffic to managed PostgreSQL, Redis, object
+  # storage, SMTP, LiveKit, and provider endpoints. No service publishes a port
+  # on this network; inbound access remains confined to `private_edge`.
+  egress: {}
+  private_edge:
+    external: true
+    name: ${FANBACKSTAGE_PRIVATE_EDGE_NETWORK:?set the access-gateway network}

@@ -9,6 +9,7 @@ from app.core.config import get_settings
 
 
 class StorageProvider(Protocol):
+    def ready(self) -> bool: ...
     def create_upload_url(self, key: str, content_type: str, expires_in: int) -> str: ...
     def create_download_url(self, key: str, expires_in: int) -> str: ...
     def head(self, key: str) -> tuple[int, str]: ...
@@ -55,6 +56,12 @@ class S3StorageProvider:
         except ClientError:
             self.client.create_bucket(Bucket=self.bucket)
 
+    def ready(self) -> bool:
+        """Check the configured private bucket without creating shared infrastructure."""
+
+        self.client.head_bucket(Bucket=self.bucket)
+        return True
+
     def create_upload_url(self, key: str, content_type: str, expires_in: int) -> str:
         self.ensure_bucket()
         return self.signing_client.generate_presigned_url(
@@ -66,7 +73,16 @@ class S3StorageProvider:
     def create_download_url(self, key: str, expires_in: int) -> str:
         self.ensure_bucket()
         return self.signing_client.generate_presigned_url(
-            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires_in
+            "get_object",
+            Params={
+                "Bucket": self.bucket,
+                "Key": key,
+                # Playback derivatives are delivery resources, not file-download
+                # links. The response override removes the browser's attachment
+                # disposition while preserving the existing short-lived signature.
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=expires_in,
         )
 
     def head(self, key: str) -> tuple[int, str]:

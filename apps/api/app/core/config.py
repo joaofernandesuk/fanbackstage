@@ -11,8 +11,10 @@ IMPLEMENTED_AGE_ASSURANCE_PROVIDERS = {
     "test",
     "verifymyage",
 }
-IMPLEMENTED_KYC_PROVIDERS = {"development"}
-IMPLEMENTED_PAYMENT_PROVIDERS = {"development"}
+IMPLEMENTED_KYC_PROVIDERS = {"development", "staging_sandbox"}
+IMPLEMENTED_PAYMENT_PROVIDERS = {"development", "staging_sandbox"}
+STAGING_UNAVAILABLE_PROVIDER = "unavailable"
+STAGING_TEST_MARKER = "STAGING TEST ONLY"
 PRODUCTION_POSTGRES_TLS_MODES = frozenset({"require", "verify-ca", "verify-full"})
 HTTP_HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 
@@ -186,6 +188,8 @@ class Settings(BaseSettings):
     compliance_fallback_country: str = ""
     kyc_provider: str = "development"
     development_kyc_http_enabled: bool = False
+    staging_kyc_webhook_secret: str = ""
+    staging_kyc_sandbox_environment: str = ""
     storage_endpoint_url: str = "http://localhost:9000"
     storage_public_endpoint_url: str | None = None
     storage_access_key: str = "fanbackstage"
@@ -200,12 +204,20 @@ class Settings(BaseSettings):
     media_processing_max_attempts: int = 3
     payment_provider: str = "development"
     payment_webhook_secret: str = "development-payment-webhook-secret"
+    staging_payment_webhook_secret: str = ""
+    staging_payment_sandbox_environment: str = ""
     finance_default_commission_basis_points: int = 2000
     creator_earnings_settlement_seconds: int = 0
     subscription_grace_period_days: int = 3
     subscription_renewal_retry_limit: int = 3
     subscription_renewal_retry_seconds: int = 300
+    # Local development uses the host-native LiveKit process. Docker Desktop
+    # cannot reliably carry browser WebRTC media back to a container-bound
+    # loopback candidate on macOS.
     livekit_url: str = "ws://localhost:17880"
+    # Server-side control may need a different route to the same LiveKit
+    # authority. In Docker development the browser uses localhost while API
+    # and worker containers reach the host through host.docker.internal.
     livekit_control_url: str | None = None
     livekit_api_key: str = "devkey"
     livekit_api_secret: str = "fanbackstage-livekit-development-secret-2026"
@@ -218,6 +230,16 @@ class Settings(BaseSettings):
     discovery_rate_limit_attempts: int = 60
     discovery_rate_limit_window_seconds: int = 60
     demo_seed_enabled: bool = False
+    staging_dataset_enabled: bool = False
+    debug: bool = False
+    api_docs_enabled: bool = True
+    public_indexing_enabled: bool = True
+    private_access_gateway_configured: bool = False
+    livekit_webhook_configured: bool = False
+    release_sha: str = "development"
+    error_tracking_provider: str = "disabled"
+    error_tracking_dsn: str = ""
+    error_tracking_send_pii: bool = False
 
     def validate_production(self) -> None:
         if self.environment not in {"development", "test", "staging", "production"}:
@@ -259,6 +281,15 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "FANBACKSTAGE_DEVELOPMENT_KYC_HTTP_ENABLED is limited to development and test"
             )
+        if self.kyc_provider == "staging_sandbox" and self.environment not in {"staging", "test"}:
+            raise RuntimeError("The staging KYC sandbox provider is limited to staging and test")
+        if self.payment_provider == "staging_sandbox" and self.environment not in {
+            "staging",
+            "test",
+        }:
+            raise RuntimeError(
+                "The staging payment sandbox provider is limited to staging and test"
+            )
         if not 0 <= self.finance_default_commission_basis_points <= 10000:
             raise RuntimeError("FANBACKSTAGE_FINANCE_DEFAULT_COMMISSION_BASIS_POINTS is invalid")
         if self.creator_earnings_settlement_seconds < 0:
@@ -279,13 +310,16 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "FANBACKSTAGE_SMTP_USE_TLS and FANBACKSTAGE_SMTP_START_TLS cannot both be true"
             )
-        if self.environment != "production":
+        if self.environment in {"development", "test"}:
             if self.age_assurance_provider not in IMPLEMENTED_AGE_ASSURANCE_PROVIDERS:
                 raise RuntimeError("FANBACKSTAGE_AGE_ASSURANCE_PROVIDER is not implemented")
             if self.kyc_provider not in IMPLEMENTED_KYC_PROVIDERS:
                 raise RuntimeError("FANBACKSTAGE_KYC_PROVIDER is not implemented")
             if self.payment_provider not in IMPLEMENTED_PAYMENT_PROVIDERS:
                 raise RuntimeError("FANBACKSTAGE_PAYMENT_PROVIDER is not implemented")
+            return
+        if self.environment == "staging":
+            self._validate_staging()
             return
         _require_production_value(
             "FANBACKSTAGE_SESSION_SECRET",
@@ -321,6 +355,20 @@ class Settings(BaseSettings):
             self.livekit_api_secret,
             minimum_length=24,
             forbidden={"fanbackstage-livekit-development-secret-2026"},
+        )
+        if self.debug:
+            raise RuntimeError("Production debug mode is forbidden")
+        if self.api_docs_enabled:
+            raise RuntimeError("Production API documentation must be disabled")
+        if not self.livekit_webhook_configured:
+            raise RuntimeError("Production requires signed LiveKit webhook configuration")
+        if self.staging_dataset_enabled:
+            raise RuntimeError("The staging dataset cannot run in production")
+        _require_production_value(
+            "FANBACKSTAGE_RELEASE_SHA",
+            self.release_sha,
+            minimum_length=7,
+            forbidden={"development"},
         )
         if not self.cookie_secure:
             raise RuntimeError("Production requires secure session cookies")
@@ -455,10 +503,226 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Production requires an explicit reviewed compliance fallback country"
             )
-        if self.kyc_provider == "development":
-            raise RuntimeError("The development KYC provider cannot run in production")
-        if self.payment_provider == "development":
-            raise RuntimeError("The development payment provider cannot run in production")
+        if self.kyc_provider in {"development", "staging_sandbox"}:
+            raise RuntimeError("Development and staging KYC providers cannot run in production")
+        if self.payment_provider in {"development", "staging_sandbox"}:
+            raise RuntimeError("Development and staging payment providers cannot run in production")
+
+    def _validate_staging(self) -> None:
+        """Reject development shortcuts before a shared staging process starts.
+
+        Provider accounts remain separate operational readiness checks.  Staging
+        uses the explicit ``unavailable`` sentinel until the payment and creator
+        KYC sandbox adapters are implemented; a development adapter is never a
+        substitute for either integration.
+        """
+
+        for name, value, minimum_length, forbidden in (
+            (
+                "FANBACKSTAGE_SESSION_SECRET",
+                self.session_secret,
+                32,
+                {"change-me-for-development-only"},
+            ),
+            (
+                "FANBACKSTAGE_NOTIFICATION_WEBHOOK_SECRET",
+                self.notification_webhook_secret,
+                32,
+                {"development-notification-webhook-secret"},
+            ),
+            (
+                "FANBACKSTAGE_INTERNAL_COUNTRY_HANDOFF_SECRET",
+                self.internal_country_handoff_secret,
+                32,
+                frozenset(),
+            ),
+            (
+                "FANBACKSTAGE_PAYMENT_WEBHOOK_SECRET",
+                self.payment_webhook_secret,
+                32,
+                {"development-payment-webhook-secret"},
+            ),
+            (
+                "FANBACKSTAGE_LIVEKIT_API_KEY",
+                self.livekit_api_key,
+                8,
+                {"devkey"},
+            ),
+            (
+                "FANBACKSTAGE_LIVEKIT_API_SECRET",
+                self.livekit_api_secret,
+                24,
+                {"fanbackstage-livekit-development-secret-2026"},
+            ),
+            (
+                "FANBACKSTAGE_STORAGE_ACCESS_KEY",
+                self.storage_access_key,
+                8,
+                {"fanbackstage"},
+            ),
+            (
+                "FANBACKSTAGE_STORAGE_SECRET_KEY",
+                self.storage_secret_key,
+                32,
+                {"fanbackstage-development-only"},
+            ),
+            ("FANBACKSTAGE_RELEASE_SHA", self.release_sha, 7, {"development"}),
+        ):
+            _require_production_value(
+                name,
+                value,
+                minimum_length=minimum_length,
+                forbidden=forbidden,
+            )
+        if self.debug:
+            raise RuntimeError("Staging debug mode is forbidden")
+        if self.api_docs_enabled:
+            raise RuntimeError("Staging API documentation must be disabled")
+        if self.public_indexing_enabled:
+            raise RuntimeError("Staging public indexing must be disabled")
+        if not self.private_access_gateway_configured:
+            raise RuntimeError("Staging requires a private access gateway")
+        if not self.livekit_webhook_configured:
+            raise RuntimeError("Staging requires signed LiveKit webhook configuration")
+        if not self.cookie_secure:
+            raise RuntimeError("Staging requires secure session cookies")
+        _require_production_endpoint(
+            "FANBACKSTAGE_WEB_ORIGIN", self.web_origin, scheme="https", origin=True
+        )
+        _require_production_endpoint(
+            "FANBACKSTAGE_API_ORIGIN", self.api_origin, scheme="https", origin=True
+        )
+        _validate_production_country_proxy(
+            self.trusted_country_header,
+            self.trusted_proxy_cidrs,
+        )
+        if not self.trusted_country_header.strip():
+            raise RuntimeError("Staging requires trusted GeoIP country signal configuration")
+        _require_production_endpoint("FANBACKSTAGE_LIVEKIT_URL", self.livekit_url, scheme="wss")
+        if self.livekit_control_url:
+            _require_production_endpoint(
+                "FANBACKSTAGE_LIVEKIT_CONTROL_URL",
+                self.livekit_control_url,
+                scheme="wss",
+            )
+        try:
+            database = make_url(self.database_url)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("FANBACKSTAGE_DATABASE_URL is invalid for staging") from exc
+        if (
+            database.drivername != "postgresql+asyncpg"
+            or (database.host or "").lower() in {"", "localhost", "127.0.0.1", "::1"}
+            or (database.username or "").lower() in {"", "fanbackstage", "postgres"}
+            or (database.password or "").lower()
+            in UNSAFE_PRODUCTION_VALUES | {"fanbackstage", "postgres"}
+            or len(database.password or "") < 16
+        ):
+            raise RuntimeError("FANBACKSTAGE_DATABASE_URL uses unsafe staging settings")
+        database_query = database.normalized_query
+        database_tls_modes = database_query.get("ssl", ())
+        if (
+            "sslmode" in database_query
+            or len(database_tls_modes) != 1
+            or database_tls_modes[0] not in PRODUCTION_POSTGRES_TLS_MODES
+        ):
+            raise RuntimeError(
+                "FANBACKSTAGE_DATABASE_URL must configure staging TLS with exactly one "
+                "ssl=require, ssl=verify-ca, or ssl=verify-full query value"
+            )
+        try:
+            redis = urlsplit(self.redis_url)
+            redis_port = redis.port
+        except ValueError as exc:
+            raise RuntimeError("FANBACKSTAGE_REDIS_URL is invalid for staging") from exc
+        if (
+            redis.scheme != "rediss"
+            or (redis.hostname or "").lower() in {"", "localhost", "127.0.0.1", "::1"}
+            or redis_port is None
+            or len(redis.password or "") < 16
+            or (redis.password or "").lower() in UNSAFE_PRODUCTION_VALUES
+        ):
+            raise RuntimeError("FANBACKSTAGE_REDIS_URL uses unsafe staging settings")
+        if self.demo_seed_enabled:
+            raise RuntimeError("The development demo seed cannot run in staging")
+        smtp_host = self.smtp_host.strip()
+        if (
+            smtp_host != self.smtp_host
+            or not smtp_host
+            or smtp_host.rstrip(".").lower() == "mailpit"
+            or _is_local_host(smtp_host)
+            or any(character.isspace() for character in smtp_host)
+            or any(character in smtp_host for character in "/?#@")
+        ):
+            raise RuntimeError("FANBACKSTAGE_SMTP_HOST is invalid for staging")
+        if not (self.smtp_use_tls or self.smtp_start_tls):
+            raise RuntimeError("Staging SMTP requires implicit TLS or forced STARTTLS")
+        _require_production_value(
+            "FANBACKSTAGE_SMTP_USERNAME", self.smtp_username, minimum_length=1
+        )
+        _require_production_value(
+            "FANBACKSTAGE_SMTP_PASSWORD", self.smtp_password, minimum_length=16
+        )
+        if self.email_from.strip().lower().endswith((".local", "@localhost")):
+            raise RuntimeError("FANBACKSTAGE_EMAIL_FROM is invalid for staging")
+        _require_production_endpoint(
+            "FANBACKSTAGE_STORAGE_ENDPOINT_URL",
+            self.storage_endpoint_url,
+            scheme="https",
+        )
+        if self.storage_public_endpoint_url:
+            _require_production_endpoint(
+                "FANBACKSTAGE_STORAGE_PUBLIC_ENDPOINT_URL",
+                self.storage_public_endpoint_url,
+                scheme="https",
+            )
+        if not self.storage_bucket.strip():
+            raise RuntimeError("FANBACKSTAGE_STORAGE_BUCKET is required for staging")
+        if self.payment_provider != "staging_sandbox":
+            raise RuntimeError("Staging payment provider must be the staging sandbox provider")
+        if self.kyc_provider != "staging_sandbox":
+            raise RuntimeError("Staging KYC provider must be the staging sandbox provider")
+        if self.staging_payment_sandbox_environment != STAGING_TEST_MARKER:
+            raise RuntimeError("Staging payment sandbox environment marker is invalid")
+        if self.staging_kyc_sandbox_environment != STAGING_TEST_MARKER:
+            raise RuntimeError("Staging KYC sandbox environment marker is invalid")
+        _require_production_value(
+            "FANBACKSTAGE_STAGING_PAYMENT_WEBHOOK_SECRET",
+            self.staging_payment_webhook_secret,
+            minimum_length=32,
+        )
+        _require_production_value(
+            "FANBACKSTAGE_STAGING_KYC_WEBHOOK_SECRET",
+            self.staging_kyc_webhook_secret,
+            minimum_length=32,
+        )
+        if self.age_assurance_provider != "verifymyage":
+            raise RuntimeError("Staging requires the VerifyMyAge sandbox adapter selection")
+        if self.verifymyage_environment != "sandbox":
+            raise RuntimeError("Staging VerifyMyAge must use the sandbox environment")
+        if not self.compliance_fallback_country.strip():
+            raise RuntimeError("Staging requires an explicit compliance fallback country")
+        if self.age_test_provider_enabled or self.development_kyc_http_enabled:
+            raise RuntimeError("Development verification adapters cannot run in staging")
+        if self.error_tracking_send_pii:
+            raise RuntimeError("Staging error tracking must not send PII")
+
+    def staging_capability_readiness_reasons(self) -> tuple[str, ...]:
+        if self.environment != "staging":
+            return ()
+        reasons: list[str] = []
+        if self.payment_provider != "staging_sandbox":
+            reasons.append("PAYMENT_SANDBOX_PROVIDER_UNAVAILABLE")
+        if self.kyc_provider != "staging_sandbox":
+            reasons.append("CREATOR_KYC_SANDBOX_PROVIDER_UNAVAILABLE")
+        if not self.staging_payment_webhook_secret.strip():
+            reasons.append("PAYMENT_SANDBOX_WEBHOOK_CONFIGURATION_MISSING")
+        if not self.staging_kyc_webhook_secret.strip():
+            reasons.append("CREATOR_KYC_SANDBOX_WEBHOOK_CONFIGURATION_MISSING")
+        if not self.verifymyage_client_id.strip() or not self.verifymyage_client_secret.strip():
+            reasons.append("VERIFYMYAGE_SANDBOX_CONFIGURATION_MISSING")
+        if self.error_tracking_provider == "disabled" or not self.error_tracking_dsn.strip():
+            reasons.append("ERROR_TRACKING_UNCONFIGURED")
+        return tuple(reasons)
 
     def effective_compliance_fallback_country(self) -> str | None:
         if self.compliance_fallback_country.strip():

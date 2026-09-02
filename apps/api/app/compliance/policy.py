@@ -19,7 +19,7 @@ from app.compliance.types import (
     normalize_country_code,
     resolve_jurisdiction_candidates,
 )
-from app.core.config import Settings, get_settings
+from app.core.config import STAGING_TEST_MARKER, Settings, get_settings
 from app.models.compliance import (
     AgeAssuranceLevel,
     AgeProviderProbe,
@@ -1386,11 +1386,12 @@ async def resolve_compliance_decision(
 async def production_policy_readiness(
     db: AsyncSession, *, settings: Settings | None = None, now: datetime | None = None
 ) -> tuple[bool, tuple[str, ...]]:
-    """Database-aware readiness gate for production compliance authority."""
+    """Database-aware readiness gate for shared-environment compliance authority."""
 
     settings = settings or get_settings()
-    if settings.environment != "production":
+    if settings.environment in {"development", "test"}:
         return True, ()
+    staging = settings.environment == "staging"
     current = _now(now)
     reasons: list[str] = []
     fallback_country = settings.effective_compliance_fallback_country()
@@ -1428,22 +1429,34 @@ async def production_policy_readiness(
             .distinct(CompliancePolicyTemplateRevision.template_id)
         )
     ).all()
-    if any(revision.is_demo for revision in effective_template_revisions):
+    if staging:
+        if any(
+            not revision.is_demo or STAGING_TEST_MARKER not in revision.change_reason
+            for revision in effective_template_revisions
+        ):
+            reasons.append("STAGING_TEMPLATE_POLICY_NOT_EXPLICITLY_MARKED")
+    elif any(revision.is_demo for revision in effective_template_revisions):
         reasons.append("ACTIVE_DEMO_TEMPLATE_POLICY")
+    reviewed_conditions = [
+        JurisdictionPolicyRevision.status.in_(PUBLISHED_STATUSES),
+        JurisdictionPolicyRevision.reviewed_at.is_not(None),
+        JurisdictionPolicyRevision.effective_from <= current,
+        or_(
+            JurisdictionPolicyRevision.effective_until.is_(None),
+            JurisdictionPolicyRevision.effective_until > current,
+        ),
+    ]
+    if not staging:
+        reviewed_conditions.append(JurisdictionPolicyRevision.is_demo.is_(False))
     reviewed_policy = await db.scalar(
-        select(JurisdictionPolicyRevision.id).where(
-            JurisdictionPolicyRevision.status.in_(PUBLISHED_STATUSES),
-            JurisdictionPolicyRevision.is_demo.is_(False),
-            JurisdictionPolicyRevision.reviewed_at.is_not(None),
-            JurisdictionPolicyRevision.effective_from <= current,
-            or_(
-                JurisdictionPolicyRevision.effective_until.is_(None),
-                JurisdictionPolicyRevision.effective_until > current,
-            ),
-        )
+        select(JurisdictionPolicyRevision.id).where(*reviewed_conditions)
     )
     if not reviewed_policy:
-        reasons.append("NO_REVIEWED_EFFECTIVE_JURISDICTION_POLICY")
+        reasons.append(
+            "NO_REVIEWED_EFFECTIVE_STAGING_JURISDICTION_POLICY"
+            if staging
+            else "NO_REVIEWED_EFFECTIVE_JURISDICTION_POLICY"
+        )
     effective_rows = (
         await db.execute(
             select(JurisdictionPolicyRevision, CompliancePolicyTemplateRevision)
@@ -1481,7 +1494,12 @@ async def production_policy_readiness(
             reasons.append("ENABLED_JURISDICTION_POLICY_MISSING")
             break
     for jurisdiction, template in effective_rows:
-        if jurisdiction.is_demo and "ACTIVE_DEMO_JURISDICTION_POLICY" not in reasons:
+        if staging:
+            if (
+                not jurisdiction.is_demo or STAGING_TEST_MARKER not in jurisdiction.change_reason
+            ) and "STAGING_JURISDICTION_POLICY_NOT_EXPLICITLY_MARKED" not in reasons:
+                reasons.append("STAGING_JURISDICTION_POLICY_NOT_EXPLICITLY_MARKED")
+        elif jurisdiction.is_demo and "ACTIVE_DEMO_JURISDICTION_POLICY" not in reasons:
             reasons.append("ACTIVE_DEMO_JURISDICTION_POLICY")
         if template.status not in PUBLISHED_STATUSES:
             if "ACTIVE_POLICY_TEMPLATE_NOT_PUBLISHED" not in reasons:
@@ -1497,7 +1515,7 @@ async def production_policy_readiness(
             if "ACTIVE_POLICY_TEMPLATE_NOT_EFFECTIVE" not in reasons:
                 reasons.append("ACTIVE_POLICY_TEMPLATE_NOT_EFFECTIVE")
             continue
-        if template.is_demo:
+        if template.is_demo and not staging:
             if "ACTIVE_DEMO_TEMPLATE_POLICY" not in reasons:
                 reasons.append("ACTIVE_DEMO_TEMPLATE_POLICY")
             if "ACTIVE_POLICY_TEMPLATE_DEMO" not in reasons:
@@ -1561,7 +1579,13 @@ async def production_policy_readiness(
             .distinct(FeatureFlagRevision.feature, FeatureFlagRevision.country_scope)
         )
     ).all()
-    if any(revision.is_demo for revision in effective_feature_revisions):
+    if staging:
+        if any(
+            not revision.is_demo or STAGING_TEST_MARKER not in revision.change_reason
+            for revision in effective_feature_revisions
+        ):
+            reasons.append("STAGING_FEATURE_FLAG_NOT_EXPLICITLY_MARKED")
+    elif any(revision.is_demo for revision in effective_feature_revisions):
         reasons.append("ACTIVE_DEMO_FEATURE_FLAG")
     expected_callback = (
         f"{settings.api_origin.rstrip('/')}/api/v1/compliance/"

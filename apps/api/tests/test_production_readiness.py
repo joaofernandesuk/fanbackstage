@@ -13,6 +13,9 @@ def _production_settings(**overrides) -> Settings:
         "internal_country_handoff_secret": "i" * 40,
         "payment_webhook_secret": "p" * 40,
         "cookie_secure": True,
+        "api_docs_enabled": False,
+        "livekit_webhook_configured": True,
+        "release_sha": "0123456789abcdef",
         "web_origin": "https://fanbackstage.example",
         "api_origin": "https://api.fanbackstage.example",
         "database_url": (
@@ -40,11 +43,119 @@ def _production_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def _staging_settings(**overrides) -> Settings:
+    values = {
+        "environment": "staging",
+        "session_secret": "s" * 40,
+        "notification_webhook_secret": "n" * 40,
+        "internal_country_handoff_secret": "i" * 40,
+        "payment_webhook_secret": "p" * 40,
+        "cookie_secure": True,
+        "api_docs_enabled": False,
+        "public_indexing_enabled": False,
+        "private_access_gateway_configured": True,
+        "livekit_webhook_configured": True,
+        "release_sha": "0123456789abcdef",
+        "web_origin": "https://staging.fanbackstage.example",
+        "api_origin": "https://api.staging.fanbackstage.example",
+        "database_url": (
+            "postgresql+asyncpg://fan_staging:database-password-with-32-characters"
+            "@db.staging.internal:5432/fanbackstage?ssl=verify-full"
+        ),
+        "redis_url": "rediss://:redis-password-with-32-characters@redis.staging.internal:6380/0",
+        "smtp_host": "smtp.staging.example",
+        "smtp_username": "fanbackstage-staging",
+        "smtp_password": "smtp-password-with-at-least-32-characters",
+        "smtp_start_tls": True,
+        "email_from": "no-reply@staging.example",
+        "storage_endpoint_url": "https://storage.staging.example",
+        "storage_public_endpoint_url": "https://media.staging.example",
+        "storage_access_key": "staging-storage-access",
+        "storage_secret_key": "storage-secret-with-at-least-32-characters",
+        "storage_bucket": "fanbackstage-staging-private",
+        "livekit_url": "wss://livekit.staging.example",
+        "livekit_api_key": "livekit-staging-key",
+        "livekit_api_secret": "livekit-secret-with-at-least-24-characters",
+        "age_assurance_provider": "verifymyage",
+        "verifymyage_environment": "sandbox",
+        "kyc_provider": "staging_sandbox",
+        "payment_provider": "staging_sandbox",
+        "staging_payment_sandbox_environment": "STAGING TEST ONLY",
+        "staging_kyc_sandbox_environment": "STAGING TEST ONLY",
+        "staging_payment_webhook_secret": "staging-payment-webhook-secret-with-32-characters",
+        "staging_kyc_webhook_secret": "staging-kyc-webhook-secret-with-32-characters",
+        "trusted_country_header": "X-FanBackstage-Country",
+        "trusted_proxy_cidrs": "203.0.113.10/32",
+        "compliance_fallback_country": "PT",
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
 def test_default_media_delivery_budget_supports_media_heavy_public_pages():
     settings = Settings()
 
     assert settings.media_rate_limit_attempts == 300
     assert settings.media_rate_limit_window_seconds == 60
+
+
+def test_staging_accepts_shared_environment_configuration_and_reports_capabilities():
+    settings = _staging_settings()
+    settings.validate_production()
+    assert settings.staging_capability_readiness_reasons() == (
+        "VERIFYMYAGE_SANDBOX_CONFIGURATION_MISSING",
+        "ERROR_TRACKING_UNCONFIGURED",
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"staging_payment_webhook_secret": ""}, "PAYMENT_SANDBOX_WEBHOOK_CONFIGURATION_MISSING"),
+        ({"staging_kyc_webhook_secret": ""}, "CREATOR_KYC_SANDBOX_WEBHOOK_CONFIGURATION_MISSING"),
+        ({"staging_payment_sandbox_environment": "wrong"}, "environment marker"),
+    ],
+)
+def test_staging_sandbox_provider_configuration_fails_closed(overrides, message):
+    settings = _staging_settings(**overrides)
+    if "CONFIGURATION_MISSING" in message:
+        assert message in settings.staging_capability_readiness_reasons()
+    else:
+        with pytest.raises(RuntimeError, match=message):
+            settings.validate_production()
+
+
+@pytest.mark.parametrize("provider_name", ["payment_provider", "kyc_provider"])
+def test_production_rejects_staging_only_provider(provider_name):
+    settings = _production_settings(**{provider_name: "staging_sandbox"})
+    with pytest.raises(RuntimeError, match="staging"):
+        settings.validate_production()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"payment_provider": "development"}, "payment provider"),
+        ({"kyc_provider": "development"}, "KYC provider"),
+        ({"cookie_secure": False}, "secure session cookies"),
+        ({"web_origin": "http://localhost:3000"}, "WEB_ORIGIN"),
+        ({"api_docs_enabled": True}, "documentation"),
+        ({"public_indexing_enabled": True}, "indexing"),
+        ({"private_access_gateway_configured": False}, "access gateway"),
+        ({"demo_seed_enabled": True}, "demo seed"),
+        ({"session_secret": "change-me-for-development-only"}, "SESSION_SECRET"),
+        ({"smtp_host": "mailpit"}, "SMTP_HOST"),
+        ({"trusted_proxy_cidrs": "0.0.0.0/0"}, "TRUSTED_PROXY_CIDRS"),
+    ],
+)
+def test_staging_rejects_development_shortcuts(overrides, message):
+    with pytest.raises(RuntimeError, match=message):
+        _staging_settings(**overrides).validate_production()
+
+
+def test_staging_dataset_and_production_environment_cannot_be_confused():
+    with pytest.raises(RuntimeError, match="staging dataset"):
+        _production_settings(staging_dataset_enabled=True).validate_production()
 
 
 def test_production_rejects_unimplemented_payment_provider():
@@ -319,6 +430,7 @@ def test_demo_seed_guard_refuses_when_not_explicitly_enabled(monkeypatch):
 
 def test_storage_signs_browser_urls_without_exposing_private_network_host(monkeypatch):
     endpoints: list[str] = []
+    signed_params: list[dict] = []
 
     class Client:
         def __init__(self, endpoint: str) -> None:
@@ -327,7 +439,8 @@ def test_storage_signs_browser_urls_without_exposing_private_network_host(monkey
         def head_bucket(self, **_kwargs) -> None:
             return None
 
-        def generate_presigned_url(self, _operation: str, **_kwargs) -> str:
+        def generate_presigned_url(self, _operation: str, **kwargs) -> str:
+            signed_params.append(kwargs["Params"])
             return f"{self.endpoint}/signed"
 
     def client(_service: str, *, endpoint_url: str, **_kwargs):
@@ -348,3 +461,10 @@ def test_storage_signs_browser_urls_without_exposing_private_network_host(monkey
         "http://localhost:19010/"
     )
     assert endpoints == ["http://minio:9000", "http://localhost:19010"]
+    assert signed_params == [
+        {
+            "Bucket": "private",
+            "Key": "derivative/story",
+            "ResponseContentDisposition": "inline",
+        }
+    ]

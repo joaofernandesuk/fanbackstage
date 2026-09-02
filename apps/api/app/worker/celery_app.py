@@ -1,10 +1,33 @@
+import logging
+
 from celery import Celery
+from celery.signals import task_failure
 from kombu import Queue
 
 from app.core.config import get_settings
-from app.core.logging import configure_sensitive_http_logging
+from app.core.logging import configure_sensitive_http_logging, configure_structured_logging
 
+configure_structured_logging(
+    service="fanbackstage-worker",
+    environment=get_settings().environment,
+)
 configure_sensitive_http_logging()
+logger = logging.getLogger("fanbackstage.worker")
+
+
+@task_failure.connect
+def log_task_failure(sender=None, task_id=None, exception=None, **_kwargs) -> None:
+    """Emit a query/payload-free failure signal for every operational domain queue."""
+
+    logger.error(
+        "celery_task_failed",
+        extra={
+            "event_id": task_id,
+            "error_type": type(exception).__name__ if exception else "UnknownError",
+            "metrics": {"task": getattr(sender, "name", "unknown"), "status": "failed"},
+        },
+    )
+
 
 celery_app = Celery(
     "fanbackstage",
@@ -54,6 +77,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.reconcile_legal_acceptance_notifications": {"queue": "scheduled"},
     "app.worker.tasks.deliver_notification": {"queue": "notifications"},
     "app.worker.tasks.reconcile_notification_delivery": {"queue": "notifications"},
+    "app.worker.tasks.record_operations_heartbeat": {"queue": "scheduled"},
     "app.worker.tasks.*": {"queue": "default"},
 }
 celery_app.conf.beat_schedule = {
@@ -127,5 +151,9 @@ celery_app.conf.beat_schedule = {
     "notification-delivery-reconciliation": {
         "task": "app.worker.tasks.reconcile_notification_delivery",
         "schedule": 60.0,
+    },
+    "operations-heartbeat": {
+        "task": "app.worker.tasks.record_operations_heartbeat",
+        "schedule": 30.0,
     },
 }

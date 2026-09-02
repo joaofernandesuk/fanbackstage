@@ -1354,6 +1354,9 @@ def test_production_requires_fallback_even_when_trusted_geoip_is_configured():
         notification_webhook_secret="n" * 40,
         payment_webhook_secret="p" * 40,
         cookie_secure=True,
+        api_docs_enabled=False,
+        livekit_webhook_configured=True,
+        release_sha="0123456789abcdef",
         web_origin="https://example.test",
         api_origin="https://api.example.test",
         database_url=(
@@ -2150,6 +2153,23 @@ async def test_production_readiness_rejects_demo_and_policy_provider_mismatch(db
         ),
     )
     assert "FALLBACK_JURISDICTION_NOT_READY" in missing_fallback_reasons
+
+
+@pytest.mark.asyncio
+async def test_staging_compliance_readiness_does_not_auto_pass_unmarked_demo_policy(db_session):
+    ready, reasons = await production_policy_readiness(
+        db_session,
+        settings=Settings(
+            environment="staging",
+            age_assurance_provider="verifymyage",
+            verifymyage_environment="sandbox",
+            api_origin="https://api.staging.example.test",
+            compliance_fallback_country="PT",
+        ),
+    )
+    assert ready is False
+    assert "STAGING_TEMPLATE_POLICY_NOT_EXPLICITLY_MARKED" in reasons
+    assert "STAGING_JURISDICTION_POLICY_NOT_EXPLICITLY_MARKED" in reasons
 
 
 @pytest.mark.asyncio

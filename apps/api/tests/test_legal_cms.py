@@ -375,6 +375,42 @@ async def test_production_readiness_blocks_an_active_demo_legal_version(db_sessi
     assert "ACTIVE_DEMO_LEGAL_VERSION" in reasons
 
 
+async def test_staging_legal_readiness_requires_explicit_test_only_markers(db_session):
+    await ensure_country(db_session)
+    admin = await actor(db_session, "staging-legal-admin@example.com")
+    staging = Settings(environment="staging")
+    ready, reasons = await service.production_legal_readiness(db_session, settings=staging)
+    assert ready is False
+    assert "MISSING_STAGING_LEGAL_TERMS" in reasons
+
+    effective = datetime(2026, 8, 27, tzinfo=UTC)
+    for document_type in service.REQUIRED_PRODUCTION_LEGAL_TYPES:
+        _, version = await service.create_document(
+            db_session,
+            admin,
+            draft_values(
+                document_type=document_type,
+                slug=f"staging-{document_type.value.replace('_', '-')}",
+                title=f"STAGING TEST ONLY — {document_type.value}",
+                is_demo=True,
+            ),
+        )
+        await service.publish_version(
+            db_session,
+            admin,
+            version.id,
+            reason="STAGING TEST ONLY publication",
+            now=effective,
+        )
+    ready, reasons = await service.production_legal_readiness(
+        db_session,
+        settings=staging,
+        now=effective,
+    )
+    assert ready is True
+    assert reasons == ()
+
+
 async def test_mandatory_publication_notifies_only_applicable_verified_audience(
     db_session,
 ):

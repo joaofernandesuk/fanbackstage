@@ -1,5 +1,7 @@
 # Production environment requirements
 
+Private staging and production are distinct contracts. Staging uses the strict shared-environment validator, private access, noindex, explicitly marked `STAGING TEST ONLY` demo legal/policy records and explicit `unavailable` payment/KYC capabilities. Production rejects all demo policy/legal data and requires real approved providers and text. See [STAGING_DEPLOYMENT.md](STAGING_DEPLOYMENT.md); passing staging technical configuration is never production approval.
+
 No production environment is configured by this repository. Production startup rejects
 development or unknown age-assurance/KYC providers, every unimplemented payment provider, demo
 seeding, default session/notification/LiveKit/storage secrets, insecure cookies, local
