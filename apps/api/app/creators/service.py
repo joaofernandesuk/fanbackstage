@@ -181,6 +181,95 @@ async def latest_verification(
     )
 
 
+async def review_creator_kyc(
+    db: AsyncSession,
+    *,
+    verification_id: UUID,
+    reviewer: User,
+    action: str,
+    reason: str,
+    expected_status: VerificationStatus = VerificationStatus.needs_review,
+) -> CreatorVerification:
+    """Resolve provider-requested human review without inventing identity authority.
+
+    Manual approval is deliberately unsupported: only a signed provider result
+    may establish verified identity/adulthood. Operators may reject, request a
+    new provider session, or retain review state with an audited note.
+    """
+    verification = await db.scalar(
+        select(CreatorVerification)
+        .where(CreatorVerification.id == verification_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if verification is None:
+        raise ValueError("Creator KYC review not found")
+    if verification.status is not expected_status:
+        raise ValueError("Creator KYC review changed; refresh before deciding")
+    clean_reason = reason.strip()
+    if len(clean_reason) < 8:
+        raise ValueError("A review reason of at least 8 characters is required")
+    if action not in {"reject", "request_reverification", "leave_in_review"}:
+        raise ValueError("Manual creator KYC approval is not permitted")
+    profile = await db.scalar(
+        select(CreatorProfile)
+        .where(CreatorProfile.id == verification.creator_profile_id)
+        .with_for_update()
+    )
+    if profile is None:
+        raise ValueError("Creator profile not found")
+    if action != "leave_in_review":
+        verification.status = VerificationStatus.failed
+        verification.identity_verified = False
+        verification.adult_verified = False
+        verification.failure_reason_code = (
+            "manual_review_rejected" if action == "reject" else "reverification_requested"
+        )
+        verification.verified_at = None
+        verification.expires_at = None
+        verification.revoked_at = None
+        if profile.status is not CreatorStatus.pending_verification:
+            previous = profile.status
+            profile.status = CreatorStatus.pending_verification
+            db.add(
+                CreatorStatusHistory(
+                    creator_profile_id=profile.id,
+                    previous_status=previous,
+                    new_status=profile.status,
+                    actor_user_id=reviewer.id,
+                    reason="Creator identity review requires a new provider outcome",
+                )
+            )
+    await record_event(
+        db,
+        "creator.verification_manual_reviewed",
+        actor_user_id=reviewer.id,
+        target_type="creator_verification",
+        target_id=str(verification.id),
+        metadata={
+            "action": action,
+            "reason": clean_reason,
+            "provider": verification.provider,
+            "creator_profile_id": str(profile.id),
+        },
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=profile.user_id,
+        notification_type="CREATOR_KYC_REVIEWED",
+        source_domain="creators",
+        source_id=str(verification.id),
+        title="Identity review updated",
+        body=(
+            "Your identity review remains with our review team."
+            if action == "leave_in_review"
+            else "Your identity review needs another step in FanBackstage."
+        ),
+        target_path="/creator-onboarding",
+    )
+    return verification
+
+
 async def resolve_creator_compliance_eligibility(
     db: AsyncSession,
     *,

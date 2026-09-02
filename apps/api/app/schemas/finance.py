@@ -44,6 +44,16 @@ class RefundRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class FinanceRefundOperationInput(BaseModel):
+    reason: str = Field(min_length=8, max_length=500)
+    confirmed: bool
+
+
+class FinanceReconciliationInput(BaseModel):
+    confirmed: bool
+    limit: int = Field(default=25, ge=1, le=100)
+
+
 class CommissionUpdate(BaseModel):
     basis_points: int = Field(ge=0, le=10_000)
 

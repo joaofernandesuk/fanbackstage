@@ -62,6 +62,7 @@ describe("consumer navigation model", () => {
         expect.objectContaining({ label: "My Profile", href: "/creator/luna-sparks" }),
         expect.objectContaining({ label: "Creator Studio" }),
         expect.objectContaining({ label: "Analytics" }),
+        expect.objectContaining({ label: "Consent Releases" }),
       ]),
     );
     expect(labels(mobileNavigation(creator))).toContain("Create");
@@ -78,7 +79,7 @@ describe("consumer navigation model", () => {
   it("keeps moderator operations in the account menu", () => {
     const moderator = identity(["moderator"]);
     expect(labels(accountNavigation(moderator))).toEqual(
-      expect.arrayContaining(["Moderation", "Appeals", "Consent Review"]),
+      expect.arrayContaining(["Moderation", "Appeals", "Consent Review", "Creator KYC Review"]),
     );
     expect(labels(primaryNavigation(moderator))).not.toContain("Moderation");
   });
@@ -99,5 +100,7 @@ describe("consumer navigation model", () => {
       ]),
     );
     expect(labels(primaryNavigation(admin))).not.toContain("Platform Analytics");
+    expect(labels(accountNavigation(admin))).not.toContain("Finance Operations");
+    expect(labels(accountNavigation(identity(["super_admin"])))).toContain("Finance Operations");
   });
 });

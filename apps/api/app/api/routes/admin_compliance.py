@@ -28,6 +28,7 @@ from app.compliance.policy import (
 )
 from app.compliance.types import JurisdictionSignals
 from app.core.config import get_settings
+from app.creators import service as creator_service
 from app.integrations.age_verification import ProviderError, get_age_verification_provider
 from app.models.audit import AuditEvent
 from app.models.compliance import (
@@ -42,7 +43,7 @@ from app.models.compliance import (
     JurisdictionPolicyRevision,
     ProviderProbeStatus,
 )
-from app.models.creator import CreatorProfile, CreatorVerification
+from app.models.creator import CreatorProfile, CreatorVerification, VerificationStatus
 from app.models.identity import User
 from app.permissions.policies import Permission, authorize
 from app.schemas.compliance import (
@@ -58,6 +59,7 @@ from app.schemas.compliance import (
     TemplateRevisionInput,
     VerificationReviewInput,
 )
+from app.schemas.trust_safety import CreatorKycDecisionInput
 
 router = APIRouter(prefix="/admin/compliance", tags=["admin-compliance"])
 
@@ -79,43 +81,183 @@ def _page(page: int, page_size: int) -> tuple[int, int]:
     return (page - 1) * page_size, page_size
 
 
-@router.get("/creator-kyc", response_model=list[dict])
+@router.get("/creator-kyc")
 async def creator_kyc_operations(
     identity: OperatorRecoveryIdentity,
     db: Db,
+    search: str | None = None,
+    provider: str | None = None,
+    country_code: str | None = None,
+    status: VerificationStatus | None = None,
+    failure_reason: str | None = None,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=100),
-) -> list[dict]:
+) -> dict:
     """Safe operational projection; provider evidence and secrets stay private."""
-    await authorize(db, identity[0], Permission.COMPLIANCE_VERIFICATION_VIEW)
+    authorize(identity[0], Permission.COMPLIANCE_VERIFICATION_VIEW)
+    filters = []
+    if search:
+        pattern = f"%{search.strip()}%"
+        filters.append(
+            or_(
+                User.email.ilike(pattern),
+                CreatorProfile.username.ilike(pattern),
+                CreatorProfile.display_name.ilike(pattern),
+            )
+        )
+    if provider:
+        filters.append(CreatorVerification.provider == provider)
+    if country_code:
+        filters.append(CreatorVerification.country_code == country_code.upper())
+    if status:
+        filters.append(CreatorVerification.status == status)
+    if failure_reason:
+        filters.append(CreatorVerification.failure_reason_code == failure_reason)
+    if starts_at:
+        filters.append(CreatorVerification.created_at >= starts_at)
+    if ends_at:
+        filters.append(CreatorVerification.created_at <= ends_at)
     offset, limit = _page(page, page_size)
+    base = (
+        select(CreatorVerification, CreatorProfile, User)
+        .join(CreatorProfile, CreatorProfile.id == CreatorVerification.creator_profile_id)
+        .join(User, User.id == CreatorProfile.user_id)
+    )
+    total = await db.scalar(
+        select(func.count())
+        .select_from(CreatorVerification)
+        .join(CreatorProfile, CreatorProfile.id == CreatorVerification.creator_profile_id)
+        .join(User, User.id == CreatorProfile.user_id)
+        .where(*filters)
+    )
     rows = (
         await db.execute(
-            select(CreatorVerification, CreatorProfile.user_id)
-            .join(CreatorProfile, CreatorProfile.id == CreatorVerification.creator_profile_id)
+            base.where(*filters)
             .order_by(CreatorVerification.created_at.desc(), CreatorVerification.id.desc())
             .offset(offset)
             .limit(limit)
         )
     ).all()
-    return [
-        {
-            "verification_id": str(verification.id),
-            "creator_profile_id": str(verification.creator_profile_id),
-            "creator_user_id": str(user_id),
-            "provider": verification.provider,
-            "provider_reference": verification.provider_reference,
-            "status": verification.status.value,
-            "country_code": verification.country_code,
-            "started_at": verification.created_at.isoformat(),
-            "verified_at": verification.verified_at.isoformat()
-            if verification.verified_at
-            else None,
-            "expires_at": verification.expires_at.isoformat() if verification.expires_at else None,
-            "failure_reason_code": verification.failure_reason_code,
-        }
-        for verification, user_id in rows
-    ]
+    return {
+        "items": [
+            {
+                "verification_id": str(verification.id),
+                "creator": {
+                    "display_name": profile.display_name,
+                    "username": profile.username,
+                    "email": user.email,
+                    "application_status": profile.status.value,
+                },
+                "provider": verification.provider,
+                "provider_reference": verification.provider_reference,
+                "status": verification.status.value,
+                "country_code": verification.country_code,
+                "started_at": verification.created_at,
+                "verified_at": verification.verified_at,
+                "expires_at": verification.expires_at,
+                "failure_reason_code": verification.failure_reason_code,
+                "review_category": verification.metadata_json.get("review_category")
+                or verification.failure_reason_code,
+            }
+            for verification, profile, user in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": int(total or 0),
+    }
+
+
+@router.get("/creator-kyc/{verification_id}")
+async def creator_kyc_detail(
+    verification_id: UUID, identity: OperatorRecoveryIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.COMPLIANCE_VERIFICATION_VIEW)
+    row = await db.execute(
+        select(CreatorVerification, CreatorProfile, User)
+        .join(CreatorProfile, CreatorProfile.id == CreatorVerification.creator_profile_id)
+        .join(User, User.id == CreatorProfile.user_id)
+        .where(CreatorVerification.id == verification_id)
+    )
+    record = row.one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Creator KYC review not found")
+    verification, profile, user = record
+    audits = list(
+        await db.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.target_type == "creator_verification",
+                AuditEvent.target_id == str(verification.id),
+            )
+            .order_by(AuditEvent.created_at.desc())
+            .limit(100)
+        )
+    )
+    return {
+        "verification_id": str(verification.id),
+        "creator": {
+            "display_name": profile.display_name,
+            "username": profile.username,
+            "email": user.email,
+            "application_status": profile.status.value,
+        },
+        "provider": verification.provider,
+        "provider_reference": verification.provider_reference,
+        "country_code": verification.country_code,
+        "status": verification.status.value,
+        "started_at": verification.created_at,
+        "verified_at": verification.verified_at,
+        "expires_at": verification.expires_at,
+        "review_category": verification.metadata_json.get("review_category")
+        or verification.failure_reason_code,
+        "identity_verified": verification.identity_verified,
+        "adult_verified": verification.adult_verified,
+        "allowed_actions": ["reject", "request_reverification", "leave_in_review"]
+        if verification.status is VerificationStatus.needs_review
+        else [],
+        "manual_approval_permitted": False,
+        "audit": [
+            {
+                "type": event.event_type,
+                "actor_user_id": str(event.actor_user_id) if event.actor_user_id else None,
+                "created_at": event.created_at,
+            }
+            for event in audits
+        ],
+    }
+
+
+@router.post("/creator-kyc/{verification_id}/decision")
+async def decide_creator_kyc(
+    verification_id: UUID,
+    payload: CreatorKycDecisionInput,
+    identity: OperatorRecoveryIdentity,
+    db: Db,
+) -> dict:
+    authorize(identity[0], Permission.COMPLIANCE_VERIFICATION_REVIEW)
+    try:
+        verification = await creator_service.review_creator_kyc(
+            db,
+            verification_id=verification_id,
+            reviewer=identity[0],
+            action=payload.action,
+            reason=payload.reason,
+            expected_status=VerificationStatus(payload.expected_status),
+        )
+        await db.commit()
+        return {"verification_id": str(verification.id), "status": verification.status.value}
+    except ValueError as exc:
+        await db.rollback()
+        status_code = (
+            404
+            if "not found" in str(exc).lower()
+            else 409
+            if "changed" in str(exc).lower()
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 def _raise_bad_request(exc: Exception) -> None:

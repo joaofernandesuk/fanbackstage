@@ -340,9 +340,8 @@ async def test_consent_submission_verification_scope_revocation_and_supersession
     with pytest.raises(service.TrustSafetyError):
         await service.verify_consent_release(db_session, release, owner, True)
     await service.verify_consent_release(db_session, release, reviewer, True)
-    assert (
+    with pytest.raises(service.TrustSafetyError, match="changed"):
         await service.verify_consent_release(db_session, release, reviewer, True)
-    ).id == release.id
     assert await service.valid_verified_release_for_content(db_session, first_content.id)
     assert not await service.valid_verified_release_for_content(db_session, other_content.id)
     replacement = await service.submit_consent_release(
@@ -367,10 +366,9 @@ async def test_consent_submission_verification_scope_revocation_and_supersession
         [other_content.id],
     )
     await service.verify_consent_release(db_session, rejected, reviewer, False)
-    assert (
+    with pytest.raises(service.TrustSafetyError, match="changed"):
         await service.verify_consent_release(db_session, rejected, reviewer, False)
-    ).id == rejected.id
-    with pytest.raises(service.TrustSafetyError, match="not pending"):
+    with pytest.raises(service.TrustSafetyError, match="changed"):
         await service.verify_consent_release(db_session, rejected, reviewer, True)
 
 

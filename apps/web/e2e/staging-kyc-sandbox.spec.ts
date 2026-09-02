@@ -8,6 +8,7 @@ import { securityLink } from "./mailpit";
 const apiBase = process.env.E2E_API_URL ?? "http://127.0.0.1:38180";
 const secret = process.env.FANBACKSTAGE_STAGING_KYC_WEBHOOK_SECRET
   ?? "fanbackstage-e2e-staging-kyc-webhook-secret";
+const operator = { email: "phase2-e2e-admin@example.com", password: "phase2-e2e-admin-password" };
 
 type ApiResponse = { status: number; body: Record<string, unknown> | null };
 type CreatorSelf = {
@@ -66,6 +67,19 @@ async function registerCreator(page: Page, stamp: number) {
   await expect.poll(async () => (await api(page, "/creators/me")).body?.status).toBe("pending_verification");
 }
 
+async function login(page: Page, email: string, password: string) {
+  await page.goto("/login");
+  await page.getByLabel("Email").fill(email);
+  await page.getByRole("textbox", { name: /^Password\b/ }).fill(password);
+  await page.getByRole("button", { name: "Log in" }).click();
+  await expectAuthenticatedAs(page, email);
+}
+
+async function logout(page: Page) {
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Log out" }).click();
+}
+
 async function start(page: Page): Promise<CreatorSelf> {
   expect((await api(page, "/creators/me/verification/staging-sandbox/start", "POST")).status).toBe(200);
   const current = (await api(page, "/creators/me")).body as unknown as CreatorSelf;
@@ -86,6 +100,18 @@ test("staging creator KYC uses signed asynchronous callbacks without browser sho
   const review = await start(page);
   expect((await api(page, `/creators/me/verification/staging-sandbox/${review.staging_kyc_verification_id}/complete`, "POST", { outcome: "REVIEW_REQUIRED" })).status).toBe(202);
   await expect.poll(async () => (await api(page, "/creators/me")).body?.verification_status).toBe("needs_review");
+
+  await logout(page);
+  await login(page, operator.email, operator.password);
+  await page.goto("/admin/creator-kyc");
+  await page.getByRole("button", { name: /Staging KYC Creator/ }).click();
+  await page.getByLabel("Review reason").fill("Provider requested a fresh identity capture.");
+  await page.getByRole("checkbox", { name: /confirm this audited outcome/ }).check();
+  await page.getByRole("button", { name: "Record review outcome" }).click();
+  await expect(page.getByRole("status")).toContainText("recorded");
+  await logout(page);
+  await login(page, `staging-kyc-${stamp}@example.com`, "staging-kyc-e2e-password");
+  await expect.poll(async () => (await api(page, "/creators/me")).body?.verification_status).toBe("failed");
 
   const verified = await start(page);
   expect((await api(page, "/creators/me/verification/staging-sandbox/00000000-0000-0000-0000-000000000000/complete", "POST", { outcome: "VERIFIED" })).status).toBe(404);

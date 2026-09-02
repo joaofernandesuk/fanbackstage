@@ -1,18 +1,25 @@
+from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.compliance.http import resolve_request_compliance_decision
 from app.featuring.service import booking_for_payment_attempt
-from app.finance import service
+from app.finance import operations, service
 from app.media.service import approved_creator
 from app.models.compliance import ComplianceFeature
 from app.models.content import ContentItem
 from app.models.creator import CreatorProfile
-from app.models.finance import CommissionRule, PaymentAttempt, Purchase
+from app.models.finance import (
+    CommissionRule,
+    PaymentAttempt,
+    PaymentStatus,
+    Purchase,
+    StagingPaymentSandboxEvent,
+)
 from app.models.marketplace import MarketplaceOrder
 from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
 from app.models.notification import NotificationIntent
@@ -23,6 +30,8 @@ from app.schemas.finance import (
     CommissionUpdate,
     CreatorEarningsResponse,
     DevelopmentPaymentCompletionResponse,
+    FinanceReconciliationInput,
+    FinanceRefundOperationInput,
     PaymentCheckoutResponse,
     PurchaseHistoryResponse,
     PurchaseResponse,
@@ -31,6 +40,139 @@ from app.schemas.finance import (
 )
 
 router = APIRouter(tags=["finance"])
+
+
+@router.get("/admin/finance/operations")
+async def finance_operations(
+    identity: CurrentIdentity,
+    db: Db,
+    search: str | None = None,
+    creator: str | None = None,
+    provider: str | None = None,
+    status: str | None = None,
+    currency: str | None = None,
+    source_domain: str | None = None,
+    refund_state: str | None = None,
+    exceptions: bool = False,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    try:
+        resolved_status = PaymentStatus(status) if status else None
+        return await operations.search_payments(
+            db,
+            search=search,
+            creator=creator,
+            provider=provider,
+            status=resolved_status,
+            currency=currency,
+            source_domain=source_domain,
+            refund_state=refund_state,
+            exceptions_only=exceptions,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            page=page,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/admin/finance/operations/exceptions")
+async def finance_exception_counts(identity: CurrentIdentity, db: Db) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    return await operations.exception_counts(db)
+
+
+@router.get("/admin/finance/operations/{payment_attempt_id}")
+async def finance_operation_detail(
+    payment_attempt_id: UUID, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    detail = await operations.payment_detail(db, payment_attempt_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+    try:
+        authorize(identity[0], Permission.FINANCIAL_AUDIT)
+    except HTTPException:
+        detail["audit"] = []
+    return detail
+
+
+@router.post("/admin/finance/operations/{payment_attempt_id}/refund", status_code=202)
+async def request_finance_refund(
+    payment_attempt_id: UUID,
+    payload: FinanceRefundOperationInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_REFUND)
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Refund confirmation is required")
+    attempt = await db.get(PaymentAttempt, payment_attempt_id, with_for_update=True)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+    if attempt.status in {PaymentStatus.refunded, PaymentStatus.chargeback}:
+        return {"id": str(attempt.id), "status": attempt.status.value, "queued": False}
+    if attempt.provider != "staging_sandbox":
+        raise HTTPException(
+            status_code=409,
+            detail="Provider refund commands are unavailable until its adapter supports them",
+        )
+    if attempt.status not in {PaymentStatus.succeeded, PaymentStatus.disputed}:
+        raise HTTPException(
+            status_code=409, detail="Only settled or disputed payments can be refunded"
+        )
+    try:
+        existing = await db.scalar(
+            select(StagingPaymentSandboxEvent).where(
+                StagingPaymentSandboxEvent.payment_attempt_id == attempt.id,
+                StagingPaymentSandboxEvent.event_type == "payment.refunded",
+            )
+        )
+        if existing is not None:
+            return {"id": str(attempt.id), "status": attempt.status.value, "queued": False}
+        event = await service.staging_checkout(db, attempt, outcome="REFUND")
+        await record_event(
+            db,
+            "finance.refund_requested",
+            actor_user_id=identity[0].id,
+            target_type="payment_attempt",
+            target_id=str(attempt.id),
+            metadata={
+                "provider": attempt.provider,
+                "provider_event_id": event.external_event_id,
+                "reason": payload.reason,
+            },
+        )
+        await db.commit()
+        return {"id": str(attempt.id), "status": attempt.status.value, "queued": True}
+    except service.FinancialError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/finance/reconciliation")
+async def reconcile_finance_operations(
+    payload: FinanceReconciliationInput, identity: CurrentIdentity, db: Db
+) -> dict:
+    authorize(identity[0], Permission.FINANCIAL_RECONCILE)
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="Reconciliation confirmation is required")
+    reconciled = await service.reconcile_succeeded_payments(db, limit=payload.limit)
+    await record_event(
+        db,
+        "finance.reconciliation_requested",
+        actor_user_id=identity[0].id,
+        target_type="payment_operations",
+        target_id="bounded_batch",
+        metadata={"limit": payload.limit, "reconciled": reconciled},
+    )
+    await db.commit()
+    return {"reconciled": reconciled}
 
 
 async def request_ppv_decisions(db: Db, request: Request, user):
@@ -330,7 +472,7 @@ async def admin_purchases(identity: CurrentIdentity, db: Db) -> list[PurchaseRes
 async def refund(
     purchase_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
 ) -> PurchaseResponse:
-    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    authorize(identity[0], Permission.FINANCIAL_REFUND)
     purchase = await db.get(Purchase, purchase_id)
     if not purchase:
         raise HTTPException(status_code=404, detail="Purchase not found")
@@ -347,7 +489,7 @@ async def refund(
 async def refund_subscription_period(
     period_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
 ) -> dict:
-    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    authorize(identity[0], Permission.FINANCIAL_REFUND)
     period = await db.get(SubscriptionPeriod, period_id)
     if not period:
         raise HTTPException(status_code=404, detail="Subscription period not found")
@@ -364,7 +506,7 @@ async def refund_subscription_period(
 async def refund_message_unlock(
     purchase_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
 ) -> dict:
-    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    authorize(identity[0], Permission.FINANCIAL_REFUND)
     purchase = await db.get(MessageUnlockPurchase, purchase_id)
     if not purchase:
         raise HTTPException(404, "Message unlock not found")
@@ -377,7 +519,7 @@ async def refund_message_unlock(
 async def refund_message_send(
     send_id: UUID, payload: RefundRequest, identity: CurrentIdentity, db: Db
 ) -> dict:
-    authorize(identity[0], Permission.FINANCIAL_ACCESS)
+    authorize(identity[0], Permission.FINANCIAL_REFUND)
     pending = await db.get(PendingMessageSend, send_id)
     if not pending:
         raise HTTPException(404, "Message send not found")

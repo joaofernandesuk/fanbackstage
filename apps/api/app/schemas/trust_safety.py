@@ -27,6 +27,17 @@ class AppealDecisionInput(AppealInput):
     outcome: str
 
 
+class ConsentDecisionInput(BaseModel):
+    approved: bool
+    reason: str = Field(min_length=8, max_length=500)
+
+
+class CreatorKycDecisionInput(BaseModel):
+    action: str = Field(pattern="^(reject|request_reverification|leave_in_review)$")
+    reason: str = Field(min_length=8, max_length=500)
+    expected_status: str = Field(pattern="^needs_review$")
+
+
 class ConsentReleaseInput(BaseModel):
     release_type: str
     participant_reference: str = Field(min_length=1, max_length=512)

@@ -2,6 +2,18 @@
 
 Server-side authorisation rules for users, creators, managers, moderators and administrators.
 
+## Operations backoffice boundaries
+
+- `financial.access` reads bounded finance operations projections.
+- `financial.refund` queues provider-supported refund commands; it does not mutate settled truth directly.
+- `financial.reconcile` runs the bounded canonical reconciliation service.
+- `financial.audit` permits sensitive financial audit inspection.
+- `compliance.verification.view` and `compliance.verification.review` separate creator-KYC queue visibility from audited review commands. Manual KYC approval is not an available command.
+- `moderation.appeal.review` owns appeal assignment and decisions.
+- `consent.release.manage` owns consent decisions, while `moderation.sensitive_evidence` independently controls evidence-reference visibility.
+
+Ordinary admins have finance read access but do not inherit refund, reconciliation, or sensitive finance-audit access. Super-admin remains the exceptional role for those commands. Browser navigation mirrors these boundaries but is never authorization.
+
 ## Phase 15 notifications
 
 Users may read and change only their own in-app notifications and optional preferences.

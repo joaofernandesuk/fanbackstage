@@ -179,10 +179,10 @@ async def target_snapshot(
         creator_user_id = await db.scalar(
             select(CreatorProfile.user_id).where(CreatorProfile.id == row.creator_id)
         )
-        if (
-            row.kind is not LiveCommerceKind.paid_request
-            or reporter.id not in {row.buyer_user_id, creator_user_id}
-        ):
+        if row.kind is not LiveCommerceKind.paid_request or reporter.id not in {
+            row.buyer_user_id,
+            creator_user_id,
+        }:
             raise TrustSafetyError("Report target not found")
 
     snapshot = {"target_type": target_type.value, "target_id": str(target_id)}
@@ -651,6 +651,8 @@ async def submit_appeal(
     now: datetime | None = None,
 ) -> ModerationAppeal:
     now = now or datetime.now(UTC)
+    if not reason.strip():
+        raise TrustSafetyError("Appeal reason is required")
     if action.target_type is not ReportTargetType.media:
         raise TrustSafetyError("This action is not appealable through this workflow")
     content = await db.get(ContentItem, action.target_id)
@@ -676,6 +678,14 @@ async def submit_appeal(
     )
     db.add(appeal)
     await db.flush()
+    await record_event(
+        db,
+        "trust_safety.appeal_submitted",
+        actor_user_id=appellant.id,
+        target_type="moderation_appeal",
+        target_id=str(appeal.id),
+        metadata={"moderation_action_id": str(action.id), "case_id": str(action.case_id)},
+    )
     await emit_transactional(
         db,
         recipient_user_id=appellant.id,
@@ -689,6 +699,31 @@ async def submit_appeal(
     return appeal
 
 
+async def claim_appeal(db: AsyncSession, appeal_id: UUID, reviewer: User) -> ModerationAppeal:
+    appeal = await db.scalar(
+        select(ModerationAppeal)
+        .where(ModerationAppeal.id == appeal_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if appeal is None:
+        raise TrustSafetyError("Appeal not found")
+    if appeal.status is AppealStatus.under_review and appeal.reviewer_user_id == reviewer.id:
+        return appeal
+    if appeal.status is not AppealStatus.submitted:
+        raise TrustSafetyError("Appeal changed; refresh before claiming")
+    appeal.status = AppealStatus.under_review
+    appeal.reviewer_user_id = reviewer.id
+    await record_event(
+        db,
+        "trust_safety.appeal_claimed",
+        actor_user_id=reviewer.id,
+        target_type="moderation_appeal",
+        target_id=str(appeal.id),
+    )
+    return appeal
+
+
 async def decide_appeal(
     db: AsyncSession, appeal: ModerationAppeal, reviewer: User, outcome: AppealStatus, reason: str
 ) -> ModerationAppeal:
@@ -698,6 +733,20 @@ async def decide_appeal(
         AppealStatus.partially_overturned,
     }:
         raise TrustSafetyError("Invalid appeal decision")
+    appeal = await db.scalar(
+        select(ModerationAppeal)
+        .where(ModerationAppeal.id == appeal.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if appeal is None:
+        raise TrustSafetyError("Appeal not found")
+    if appeal.status not in {AppealStatus.submitted, AppealStatus.under_review}:
+        raise TrustSafetyError("Appeal changed; refresh before deciding")
+    if appeal.reviewer_user_id is not None and appeal.reviewer_user_id != reviewer.id:
+        raise TrustSafetyError("Appeal is assigned to another reviewer")
+    if not reason.strip():
+        raise TrustSafetyError("Appeal decision reason is required")
     action = await db.get(ModerationAction, appeal.moderation_action_id)
     case = await db.get(ModerationCase, appeal.moderation_case_id)
     assert action and case
@@ -716,6 +765,18 @@ async def decide_appeal(
         reviewer.id,
         reason.strip(),
         datetime.now(UTC),
+    )
+    await record_event(
+        db,
+        "trust_safety.appeal_decided",
+        actor_user_id=reviewer.id,
+        target_type="moderation_appeal",
+        target_id=str(appeal.id),
+        metadata={
+            "outcome": outcome.value,
+            "moderation_action_id": str(action.id),
+            "reason": reason.strip(),
+        },
     )
     await emit_transactional(
         db,
@@ -767,6 +828,19 @@ async def submit_consent_release(
     await db.flush()
     for content_id in set(content_ids):
         db.add(ConsentReleaseContent(consent_release_id=release.id, content_id=content_id))
+    await record_event(
+        db,
+        "trust_safety.consent_release_submitted",
+        actor_user_id=actor.id,
+        target_type="consent_release",
+        target_id=str(release.id),
+        metadata={
+            "creator_profile_id": str(creator.id),
+            "release_type": release_type.value,
+            "content_ids": release.scope_snapshot["content_ids"],
+            "has_evidence": bool(evidence_reference),
+        },
+    )
     await emit_transactional(
         db,
         recipient_user_id=creator.user_id,
@@ -781,15 +855,26 @@ async def submit_consent_release(
 
 
 async def verify_consent_release(
-    db: AsyncSession, release: ConsentRelease, reviewer: User, approved: bool
+    db: AsyncSession,
+    release: ConsentRelease,
+    reviewer: User,
+    approved: bool,
+    reason: str = "Consent review decision",
 ) -> ConsentRelease:
+    release = await db.scalar(
+        select(ConsentRelease)
+        .where(ConsentRelease.id == release.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if release is None:
+        raise TrustSafetyError("Consent release not found")
+    if len(reason.strip()) < 8:
+        raise TrustSafetyError("A consent decision reason is required")
     if release.created_by_user_id == reviewer.id:
         raise TrustSafetyError("Consent release cannot be self-verified")
-    requested = ConsentReleaseStatus.verified if approved else ConsentReleaseStatus.rejected
-    if release.status is requested:
-        return release
     if release.status is not ConsentReleaseStatus.pending:
-        raise TrustSafetyError("Consent release is not pending")
+        raise TrustSafetyError("Consent release changed; refresh before deciding")
     release.status = ConsentReleaseStatus.verified if approved else ConsentReleaseStatus.rejected
     release.verified_at = datetime.now(UTC) if approved else None
     release.verified_by_user_id = reviewer.id if approved else None
@@ -803,7 +888,7 @@ async def verify_consent_release(
         actor_user_id=reviewer.id,
         target_type="consent_release",
         target_id=str(release.id),
-        metadata={"approved": approved},
+        metadata={"approved": approved, "reason": reason.strip()},
     )
     creator = await db.get(CreatorProfile, release.owner_creator_id)
     assert creator is not None
@@ -1164,4 +1249,12 @@ async def revoke_consent_release(
     )
     for content_id in linked_content_ids:
         await _open_consent_review_case(db, release, content_id, "revocation", effective_at, actor)
+    await record_event(
+        db,
+        "trust_safety.consent_release_revoked",
+        actor_user_id=actor.id,
+        target_type="consent_release",
+        target_id=str(release.id),
+        metadata={"content_ids": [str(content_id) for content_id in linked_content_ids]},
+    )
     return release

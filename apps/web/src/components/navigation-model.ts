@@ -72,6 +72,7 @@ export function accountNavigation(identity: NavigationIdentity): NavigationItem[
       { label: "Analytics", href: "/creator-studio/analytics", group: "creator" },
       { label: "Marketplace", href: "/creator-studio#marketplace", group: "creator" },
       { label: "Live Studio", href: "/creator-studio#live", group: "creator" },
+      { label: "Consent Releases", href: "/creator-studio/consent", group: "creator" },
     );
   }
 
@@ -88,6 +89,7 @@ export function accountNavigation(identity: NavigationIdentity): NavigationItem[
       { label: "Moderation", href: "/moderation", group: "operations" },
       { label: "Appeals", href: "/moderation/appeals", group: "operations" },
       { label: "Consent Review", href: "/moderation/consent", group: "operations" },
+      { label: "Creator KYC Review", href: "/admin/creator-kyc", group: "operations" },
     );
   }
 
@@ -103,6 +105,10 @@ export function accountNavigation(identity: NavigationIdentity): NavigationItem[
       { label: "Legal & Policies", href: "/admin/legal", group: "operations" },
       { label: "Site Settings", href: "/admin/site-settings", group: "operations" },
     );
+  }
+
+  if (hasAnyRole(identity, ["super_admin"])) {
+    items.push({ label: "Finance Operations", href: "/admin/finance", group: "operations" });
   }
 
   return items;

@@ -10,6 +10,7 @@ const creator = {
   email: "consumer-e2e-creator@example.com",
   password: "consumer-e2e-creator-password",
 };
+const operator = { email: "phase2-e2e-admin@example.com", password: "phase2-e2e-admin-password" };
 const sandboxSecret =
   process.env.FANBACKSTAGE_STAGING_PAYMENT_WEBHOOK_SECRET
   ?? "fanbackstage-e2e-staging-payment-webhook-secret";
@@ -109,4 +110,21 @@ test("staging payment sandbox settles subscription retry only through signed cal
   expect((await signedWebhook(request, payload)).status()).toBe(204);
   expect((await signedWebhook(request, { ...payload, id: `${payload.id}_invalid` }, "invalid")).status()).toBe(400);
   await expect.poll(async () => (await api(page, "/subscriptions/mine")).body[0]?.status, { timeout: 15_000 }).toBe("active");
+
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Log out" }).click();
+  await login(page, operator.email, operator.password);
+  await page.goto("/admin/finance");
+  await page.getByLabel("Account or provider reference").fill(checkout.body.provider_reference);
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await page.getByRole("button", { name: new RegExp(buyerEmail) }).click();
+  await expect(page.locator("aside").getByText(checkout.body.provider_reference)).toBeVisible();
+  await page.getByLabel("Reason").fill("Customer requested cancellation in staging.");
+  await page.getByRole("checkbox", { name: /confirm this refund/ }).check();
+  await page.getByRole("button", { name: "Queue refund" }).click();
+  await expect(page.getByRole("status")).toContainText("queued");
+  await expect.poll(async () => {
+    const result = await api(page, `/admin/finance/operations/${retry.body.payment_attempt_id}`);
+    return (result.body as { payment?: { status?: string } }).payment?.status;
+  }, { timeout: 15_000 }).toBe("refunded");
 });

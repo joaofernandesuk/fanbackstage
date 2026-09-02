@@ -17,7 +17,6 @@ from app.models.creator import (
     CreatorVerification,
     VerificationStatus,
 )
-from app.models.finance import PaymentRefundRequirement, RefundRequirementStatus
 from app.models.groups import Group, GroupCreatorMembership
 from app.models.identity import User
 from app.models.marketplace import (
@@ -833,11 +832,9 @@ async def operations_overview(identity: CurrentIdentity, db: Db) -> dict:
         .select_from(ConsentRelease)
         .where(ConsentRelease.status == ConsentReleaseStatus.pending)
     )
-    payment_exception_count = await db.scalar(
-        select(func.count())
-        .select_from(PaymentRefundRequirement)
-        .where(PaymentRefundRequirement.status == RefundRequirementStatus.required)
-    )
+    from app.finance.operations import exception_counts
+
+    finance_counts = await exception_counts(db)
     return {
         "queues": [
             {
@@ -858,7 +855,7 @@ async def operations_overview(identity: CurrentIdentity, db: Db) -> dict:
                 "key": "kyc_review",
                 "label": "KYC manual reviews",
                 "count": int(kyc_review_count or 0),
-                "href": "/admin/compliance",
+                "href": "/admin/creator-kyc?status=needs_review",
                 "description": "Verification outcomes requiring a separately authorised compliance review.",
             },
             {
@@ -885,9 +882,9 @@ async def operations_overview(identity: CurrentIdentity, db: Db) -> dict:
             {
                 "key": "payment_exceptions",
                 "label": "Payment exceptions",
-                "count": int(payment_exception_count or 0),
-                "href": "/admin/analytics",
-                "description": "Duplicate-capture refund requirements awaiting ledger-backed resolution.",
+                "count": finance_counts["total"],
+                "href": "/admin/finance?exceptions=true",
+                "description": "Refund requirements, disputes, and stale payments awaiting safe resolution.",
             },
         ]
     }
