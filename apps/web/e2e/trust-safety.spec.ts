@@ -88,9 +88,11 @@ async function createApprovedCreator(page: Page, stamp: string): Promise<Creator
 
 async function publishGallery(page: Page, creator: Creator, title: string, requiresConsent = false, approve = true): Promise<Content> {
   await page.goto("/creator-studio");
+  await page.getByRole("button", { name: /^Media library / }).click();
+  await expect(page.getByRole("heading", { name: "Upload media" })).toBeVisible();
   const existingAssets = await apiOk<{ id: string }[]>(page, "/media/mine");
   const existingAssetIds = new Set(existingAssets.map((item) => item.id));
-  await page.getByLabel("Upload image or video").setInputFiles({ name: `${title}.png`, mimeType: "image/png", buffer: image });
+  await page.locator('input[type="file"]').setInputFiles({ name: `${title}.png`, mimeType: "image/png", buffer: image });
   await page.getByRole("button", { name: "Upload media" }).click();
   let readyAssetId: string | undefined;
   await expect.poll(async () => {

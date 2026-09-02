@@ -109,7 +109,8 @@ test("creator media travels through the real private processing stack", async ({
     return await response.json();
   }, { apiBase }), { timeout: 15_000 }).toMatchObject({ status: "approved", is_public: true });
   await page.goto("/creator-studio");
-  await expect(page.getByRole("heading", { name: "Media library" })).toBeVisible();
+  await page.getByRole("button", { name: /^Media library / }).click();
+  await expect(page.getByRole("heading", { name: "Upload media" })).toBeVisible();
   const browserErrors: string[] = [];
   const storageRequests: { url: string; method: string; headers: Record<string, string> }[] = [];
   const storageResponses: { url: string; status: number; headers: Record<string, string>; body: string }[] = [];
@@ -135,7 +136,7 @@ test("creator media travels through the real private processing stack", async ({
       storageFailures.push({ url: request.url(), error: request.failure()?.errorText ?? null });
     }
   });
-  await page.getByLabel("Upload image or video").setInputFiles({ name: "gallery.png", mimeType: "image/png", buffer: image });
+  await page.locator('input[type="file"]').setInputFiles({ name: "gallery.png", mimeType: "image/png", buffer: image });
   await page.getByRole("button", { name: "Upload media" }).click();
   await expect.poll(() => storageRequests.length, { timeout: 10000 }).toBe(1);
   await expect.poll(() => storageResponses.length + storageFailures.length, { timeout: 10000 }).toBeGreaterThan(0);
@@ -158,7 +159,7 @@ test("creator media travels through the real private processing stack", async ({
     "free-second.png",
     "free-third.png",
   ].entries()) {
-    await page.getByLabel("Upload image or video").setInputFiles({
+    await page.locator('input[type="file"]').setInputFiles({
       name,
       mimeType: "image/png",
       buffer: image,
@@ -174,21 +175,20 @@ test("creator media travels through the real private processing stack", async ({
   await page.reload();
   await selectReadyImages(page, [0]);
   await page.getByLabel("Gallery title").fill(galleryTitle);
-  // The studio now also contains a post composer access policy. Scope these
-  // selections to the gallery editor's control order so this remains a real
-  // PPV/subscription media journey rather than silently creating FREE items.
-  await page.getByLabel("Access policy").nth(1).selectOption("ppv");
-  await page.getByLabel("PPV price (minor units; only when PPV)").first().fill("999");
+  // The media workspace owns the gallery and video policy controls. Keep the
+  // gallery journey scoped to the first control in that authoritative panel.
+  await page.getByLabel("Access policy").first().selectOption("ppv");
+  await page.getByLabel("PPV price (minor units)").first().fill("999");
   await page.getByRole("button", { name: "Create and submit gallery" }).click();
   await expect(page.getByText(/pending_review/)).toBeVisible();
   await selectReadyImages(page, [1, 2, 3]);
   await page.getByLabel("Gallery title").fill(subscriptionTitle);
-  await page.getByLabel("Access policy").nth(1).selectOption("subscription");
+  await page.getByLabel("Access policy").first().selectOption("subscription");
   await page.getByRole("button", { name: "Create and submit gallery" }).click();
   await expect(page.getByText(/pending_review/)).toHaveCount(2);
   await selectReadyImages(page, [4, 5, 6]);
   await page.getByLabel("Gallery title").fill(freeGalleryTitle);
-  await page.getByLabel("Access policy").nth(1).selectOption("free");
+  await page.getByLabel("Access policy").first().selectOption("free");
   await page.getByRole("button", { name: "Create and submit gallery" }).click();
   await expect(page.getByText(/pending_review/)).toHaveCount(3);
 
@@ -217,6 +217,7 @@ test("creator media travels through the real private processing stack", async ({
   expect(owner.media.map((item: { position: number }) => item.position)).toEqual([0]);
   expect(JSON.stringify(owner)).not.toContain("original/");
   await page.goto("/creator-studio");
+  await page.getByRole("button", { name: /^Audience / }).click();
   await page.getByLabel("Enable subscriptions").check();
   for (const [index, price] of ["1000", "3000", "6000", "12000"].entries()) {
     await page.getByLabel("Price (minor units)").nth(index).fill(price);
@@ -441,7 +442,8 @@ test("creator media travels through the real private processing stack", async ({
   await anonymous.close();
 
   await page.goto("/creator-studio");
-  await page.getByLabel("Upload image or video").setInputFiles({ name: "video.mp4", mimeType: "video/mp4", buffer: videoFixture() });
+  await page.getByRole("button", { name: /^Media library / }).click();
+  await page.locator('input[type="file"]').setInputFiles({ name: "video.mp4", mimeType: "video/mp4", buffer: videoFixture() });
   await page.getByRole("button", { name: "Upload media" }).click();
   await expect.poll(async () => page.evaluate(async ({ apiBase }) => {
     const response = await fetch(`${apiBase}/api/v1/media/mine`, { credentials: "include" });
@@ -450,11 +452,10 @@ test("creator media travels through the real private processing stack", async ({
   await page.reload();
   await page.getByLabel("Ready video").selectOption({ index: 1 });
   await page.getByLabel("Video title").fill(videoTitle);
-  await page.getByLabel("Access policy").nth(2).selectOption("ppv");
-  await page.getByLabel("PPV price (minor units; only when PPV)").nth(1).fill("499");
+  await page.getByLabel("Access policy").nth(1).selectOption("ppv");
+  await page.getByLabel("PPV price (minor units)").nth(1).fill("499");
   await page.getByLabel("Preview duration (seconds)").fill("1");
   await page.getByRole("button", { name: "Create video" }).click();
-  await expect(page.getByText(`${videoTitle} (processing)`)).toBeVisible();
   await expect.poll(async () => page.evaluate(async ({ apiBase, videoTitle }) => {
     const response = await fetch(`${apiBase}/api/v1/content/mine`, { credentials: "include" });
     return (await response.json() as { id: string; title: string }[]).some(item => item.title === videoTitle);

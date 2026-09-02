@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 
 import { api, ApiError } from "../../lib/api";
@@ -15,40 +16,74 @@ import { PrivateSessionQueue } from "../../components/private-session-queue";
 import { GroupMemberships } from "../../components/group-memberships";
 import { MarketplaceFulfilment } from "../../components/marketplace-fulfilment";
 import { ReferralDashboard } from "../../components/referral-dashboard";
+import { MediaDropzone } from "../../components/media-dropzone";
+import styles from "./creator-studio.module.css";
 
 type Asset = { id: string; status: string; media_type?: string };
 type Upload = Asset & { upload_url?: string };
 type Content = { id: string; title: string; content_type: string; status: string; access_policy: string; price_amount_minor?: number | null; price_currency?: string | null };
 type FeedPost = { id: string; body: string | null; status: string; pinned_at: string | null; access_policy: string };
+type CreatorAccess = {
+  status: string;
+  is_public: boolean;
+  creator_compliance: { public_allowed: boolean; reason: string };
+};
+type StudioWorkspace = "overview" | "publish" | "library" | "live" | "audience" | "business";
 
 const policies = ["free", "followers", "subscription", "ppv", "private"];
+const workspaceForHash: Record<string, StudioWorkspace> = {
+  "#posts": "publish",
+  "#media-content": "library",
+  "#live": "live",
+  "#subscriptions": "audience",
+  "#marketplace-fulfilment": "business",
+};
 
 export default function CreatorStudioPage() {
+  return <CreatorStudio />;
+}
+
+function CreatorStudio() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [content, setContent] = useState<Content[]>([]);
   const [posts, setPosts] = useState<FeedPost[]>([]);
+  const [creatorAccess, setCreatorAccess] = useState<CreatorAccess | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadResetToken, setUploadResetToken] = useState(0);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [workspace, setWorkspace] = useState<StudioWorkspace>("overview");
   const readyImages = assets.filter((asset) => asset.status === "ready" && asset.media_type === "image");
   const readyVideos = assets.filter((asset) => asset.status === "ready" && asset.media_type === "video");
 
   async function refresh() {
-    const [media, managedContent, managedPosts] = await Promise.all([
+    const [media, managedContent, managedPosts, creator] = await Promise.all([
       api<Asset[]>("/media/mine"),
       api<Content[]>("/content/mine"),
       api<{ items: FeedPost[] }>("/feed/mine"),
+      api<CreatorAccess>("/creators/me"),
     ]);
     setAssets(media);
     setContent(managedContent);
     setPosts(managedPosts.items);
+    setCreatorAccess(creator);
   }
 
   useEffect(() => { refresh().catch((e: unknown) => setError(e instanceof ApiError ? e.message : "Unable to load creator media")); }, []);
 
+  useEffect(() => {
+    const syncWorkspaceFromHash = () => {
+      setWorkspace(workspaceForHash[window.location.hash] ?? "overview");
+    };
+    syncWorkspaceFromHash();
+    window.addEventListener("hashchange", syncWorkspaceFromHash);
+    return () => window.removeEventListener("hashchange", syncWorkspaceFromHash);
+  }, []);
+
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const file = new FormData(event.currentTarget).get("file");
-    if (!(file instanceof File)) return;
+    const file = uploadFile;
+    if (!file) { setError("Drop a media file or choose one from your device."); return; }
     try {
       const created = await api<Upload>("/media/uploads", { method: "POST", body: JSON.stringify({ filename: file.name, mime_type: file.type }) });
       if (!created.upload_url) throw new Error("The upload authorization is missing");
@@ -56,6 +91,8 @@ export default function CreatorStudioPage() {
       if (!uploadResponse.ok) throw new Error(`Storage upload failed (${uploadResponse.status})`);
       await api<Upload>(`/media/${created.id}/finalize`, { method: "POST" });
       setMessage("Upload queued for processing.");
+      setUploadFile(null);
+      setUploadResetToken((current) => current + 1);
       await refresh();
     } catch (e) { setError(e instanceof ApiError ? e.message : "Upload failed"); }
   }
@@ -126,5 +163,100 @@ export default function CreatorStudioPage() {
     try { await api(`/feed/posts/${postId}/${action}`, { method: action === "unpin" ? "DELETE" : "POST" }); await refresh(); } catch (e) { setError(e instanceof ApiError ? e.message : "Post could not be updated"); }
   }
 
-  return <section className="card"><p className="eyebrow">CREATOR STUDIO</p><h1>Media library</h1><CreatorStudioProgress /><CreatorEarnings /><div id="marketplace-fulfilment"><MarketplaceFulfilment /></div><GroupMemberships /><ReferralDashboard heading="Creator referral earnings" /><div id="subscriptions"><SubscriptionSettings /></div><SubscriptionPromotionSettings /><MessagingSettings /><MassMessageCampaign /><div id="live"><LiveStudio /><LivePaidRequestStudio /></div><PrivateSessionQueue /><h2 id="posts">Post composer</h2><form onSubmit={createPost}><label>Post text<textarea name="post-body" required maxLength={5000} /></label><label>Access policy<select name="post-policy">{policies.slice(0, 4).map((policy) => <option key={policy}>{policy}</option>)}</select></label><label>Schedule (UTC)<input name="post-scheduled-at" type="datetime-local" /></label><label>Reference Gallery or Video<select name="post-content"><option value="">No reference</option>{content.filter(item => item.status === "published").map(item => <option key={item.id} value={item.id}>{item.content_type}: {item.title}</option>)}</select></label><fieldset><legend>Ready post media</legend>{assets.filter(asset => asset.status === "ready").map(asset => <label key={asset.id}><input name="post-media" type="checkbox" value={asset.id} />{asset.media_type}: {asset.id}</label>)}</fieldset><label><input name="post-comments" type="checkbox" defaultChecked /> Allow comments</label><label><input name="publish-now" type="checkbox" defaultChecked /> Publish now</label><button>Save post</button></form><h2>Post manager</h2><ul>{posts.map(post => <li key={post.id}>{post.status}: {post.body} <button onClick={() => postAction(post.id, post.pinned_at ? "unpin" : "pin")}>{post.pinned_at ? "Unpin" : "Pin"}</button><button onClick={() => postAction(post.id, "archive")}>Archive</button></li>)}</ul><form onSubmit={upload}><label>Upload image or video<input name="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" required /></label><button>Upload media</button></form><h2 id="media-content">Gallery editor</h2><form onSubmit={createGallery}><label>Gallery title<input name="gallery-title" required /></label><label>Gallery description<textarea name="gallery-description" maxLength={5000} /></label><label>Access policy<select name="gallery-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><label>PPV price (minor units; only when PPV)<input name="gallery-price-minor" type="number" min="1" step="1" /></label><label>PPV currency<input name="gallery-currency" defaultValue="EUR" maxLength={3} /></label><label>Public preview images<input name="gallery-preview-count" type="number" min="0" max="100" defaultValue="1" /></label><label>Cover image<select name="gallery-cover"><option value="">First selected image</option>{readyImages.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><fieldset><legend>Ready images</legend>{readyImages.map((asset) => <label key={asset.id}><input name="image" type="checkbox" value={asset.id} />{asset.id}</label>)}</fieldset><button>Create and submit gallery</button></form><h2>Video editor</h2><form onSubmit={createVideo}><label>Video title<input name="video-title" required /></label><label>Video description<textarea name="video-description" maxLength={5000} /></label><label>Ready video<select name="video" required defaultValue=""><option value="" disabled>{readyVideos.length ? "Choose a processed video" : "Upload and process a video first"}</option>{readyVideos.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><label>Access policy<select name="video-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><label>PPV price (minor units; only when PPV)<input name="video-price-minor" type="number" min="1" step="1" /></label><label>PPV currency<input name="video-currency" defaultValue="EUR" maxLength={3} /></label><label>Preview starts at (seconds)<input name="video-preview-start" type="number" min="0" defaultValue="0" /></label><label>Preview duration (seconds)<input name="video-preview-duration" type="number" min="1" max="120" defaultValue="2" /></label><button>Create video</button></form><h2>Library status</h2><ul>{assets.map((asset) => <li key={asset.id}>{asset.id}: {asset.status}</li>)}</ul><h2>Content</h2><ul>{content.map((item) => <li key={item.id}>{item.content_type}: {item.title} ({item.status})</li>)}</ul>{message && <p>{message}</p>}{error && <p className="error">{error}</p>}</section>;
+  const selectWorkspace = (next: StudioWorkspace) => {
+    setWorkspace(next);
+    window.history.replaceState(null, "", next === "overview" ? "/creator-studio" : `/creator-studio#${
+      next === "publish" ? "posts" : next === "library" ? "media-content" : next === "audience" ? "subscriptions" : next === "business" ? "marketplace-fulfilment" : "live"
+    }`);
+  };
+  const nav: Array<[StudioWorkspace, string, string]> = [
+    ["overview", "Overview", "Your next actions and earnings"],
+    ["publish", "Publish", "Posts and Stories"],
+    ["library", "Media library", "Uploads, galleries, and videos"],
+    ["live", "Live", "Public rooms and private sessions"],
+    ["audience", "Audience", "Subscribers and messages"],
+    ["business", "Business", "Orders, groups, and referrals"],
+  ];
+  const liveReady = Boolean(
+    creatorAccess?.status === "approved" &&
+    creatorAccess.is_public &&
+    creatorAccess.creator_compliance.public_allowed,
+  );
+  const publicationIsOnlyRemainingLiveStep = Boolean(
+    creatorAccess?.status === "approved" &&
+    !creatorAccess.is_public &&
+    creatorAccess.creator_compliance.public_allowed,
+  );
+
+  return (
+    <section className={`card ${styles.studio}`}>
+      <header className={styles.header}>
+        <div>
+          <p className="eyebrow">CREATOR STUDIO</p>
+          <h1>Your studio</h1>
+          <p>Choose one workspace at a time. Your publishing tools, audience, and business controls stay organised here.</p>
+        </div>
+        <div className={styles.quickActions}>
+          <Link className={styles.primaryAction} href="/creator-studio/stories">Create a Story</Link>
+          <button onClick={() => selectWorkspace("publish")} type="button">Create a post</button>
+          <button onClick={() => selectWorkspace("live")} type="button">Go live</button>
+        </div>
+      </header>
+
+      <nav aria-label="Creator Studio workspaces" className={styles.workspaceNav}>
+        {nav.map(([key, label, description]) => (
+          <button aria-current={workspace === key ? "page" : undefined} className={workspace === key ? styles.activeWorkspace : undefined} key={key} onClick={() => selectWorkspace(key)} type="button">
+            <strong>{label}</strong><span>{description}</span>
+          </button>
+        ))}
+      </nav>
+
+      {message && <p className={styles.success} role="status">{message}</p>}
+      {error && <p className={styles.error} role="alert">{error}</p>}
+
+      {workspace === "overview" && <div className={styles.workspace}>
+        <CreatorStudioProgress />
+        <CreatorEarnings />
+        <section className={styles.emptyAction}><h2>Ready to share?</h2><p>Create a Story for a quick 24-hour update, publish a post, or add a gallery or video from your media library.</p><div><Link className={styles.primaryAction} href="/creator-studio/stories">Create a Story</Link><button onClick={() => selectWorkspace("library")} type="button">Open media library</button></div></section>
+      </div>}
+
+      {workspace === "publish" && <div className={styles.workspace}>
+        <section className={styles.panel}><div className={styles.panelHeading}><div><p className="eyebrow">POSTS</p><h2>Create a post</h2><p>Share an update, attach ready media, or point fans to a published gallery or video.</p></div><Link className={styles.primaryAction} href="/creator-studio/stories">Story composer</Link></div>
+          <form className={styles.form} onSubmit={createPost}><label>Post text<textarea name="post-body" required maxLength={5000} /></label><div className={styles.twoColumns}><label>Access policy<select name="post-policy">{policies.slice(0, 4).map((policy) => <option key={policy}>{policy}</option>)}</select></label><label>Schedule (UTC)<input name="post-scheduled-at" type="datetime-local" /></label></div><label>Reference a published gallery or video<select name="post-content"><option value="">No reference</option>{content.filter(item => item.status === "published").map(item => <option key={item.id} value={item.id}>{item.content_type}: {item.title}</option>)}</select></label><fieldset><legend>Attach ready media</legend>{assets.filter(asset => asset.status === "ready").map(asset => <label key={asset.id}><input name="post-media" type="checkbox" value={asset.id} />{asset.media_type}: {asset.id}</label>)}{!assets.some(asset => asset.status === "ready") && <p>No ready media yet. Upload an image or video first.</p>}</fieldset><div className={styles.inlineChecks}><label><input name="post-comments" type="checkbox" defaultChecked /> Allow comments</label><label><input name="publish-now" type="checkbox" defaultChecked /> Publish now</label></div><button className={styles.primaryAction}>Save post</button></form>
+        </section>
+        <section className={styles.panel}><h2>Recent posts</h2>{posts.length ? <ul className={styles.recordList}>{posts.map(post => <li key={post.id}><div><strong>{post.status}</strong><span>{post.body ?? "Media post"}</span></div><div><button onClick={() => postAction(post.id, post.pinned_at ? "unpin" : "pin")} type="button">{post.pinned_at ? "Unpin" : "Pin"}</button><button onClick={() => postAction(post.id, "archive")} type="button">Archive</button></div></li>)}</ul> : <p>No posts yet.</p>}</section>
+      </div>}
+
+      {workspace === "library" && <div className={styles.workspace}>
+        <section className={styles.panel}><div className={styles.panelHeading}><div><p className="eyebrow">MEDIA LIBRARY</p><h2>Upload media</h2><p>Drop an image or video here, or browse your device. Images can be cropped for the card or surface you plan to use; video stays untouched.</p></div></div><form className={styles.form} onSubmit={upload}><MediaDropzone accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" onChange={setUploadFile} resetToken={uploadResetToken} /><button className={styles.primaryAction} disabled={!uploadFile}>Upload media</button></form></section>
+        <div className={styles.twoPanels}><section className={styles.panel}><h2>Create a gallery</h2><form className={styles.form} onSubmit={createGallery}><label>Gallery title<input name="gallery-title" required /></label><label>Description<textarea name="gallery-description" maxLength={5000} /></label><label>Access policy<select name="gallery-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><div className={styles.twoColumns}><label>PPV price (minor units)<input name="gallery-price-minor" type="number" min="1" step="1" /></label><label>Currency<input name="gallery-currency" defaultValue="EUR" maxLength={3} /></label></div><label>Public preview images<input name="gallery-preview-count" type="number" min="0" max="100" defaultValue="1" /></label><label>Cover image<select name="gallery-cover"><option value="">First selected image</option>{readyImages.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><fieldset><legend>Ready images</legend>{readyImages.map((asset) => <label key={asset.id}><input name="image" type="checkbox" value={asset.id} />{asset.id}</label>)}</fieldset><button className={styles.primaryAction}>Create and submit gallery</button></form></section>
+        <section className={styles.panel}><h2>Create a video</h2><form className={styles.form} onSubmit={createVideo}><label>Video title<input name="video-title" required /></label><label>Description<textarea name="video-description" maxLength={5000} /></label><label>Ready video<select name="video" required defaultValue=""><option value="" disabled>{readyVideos.length ? "Choose a processed video" : "Upload and process a video first"}</option>{readyVideos.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><label>Access policy<select name="video-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><div className={styles.twoColumns}><label>PPV price (minor units)<input name="video-price-minor" type="number" min="1" step="1" /></label><label>Currency<input name="video-currency" defaultValue="EUR" maxLength={3} /></label></div><div className={styles.twoColumns}><label>Preview starts at (seconds)<input name="video-preview-start" type="number" min="0" defaultValue="0" /></label><label>Preview duration (seconds)<input name="video-preview-duration" type="number" min="1" max="120" defaultValue="2" /></label></div><button className={styles.primaryAction}>Create video</button></form></section></div>
+        <section className={styles.panel}><h2>Library status</h2>{assets.length ? <ul className={styles.recordList}>{assets.map(asset => <li key={asset.id}><strong>{asset.media_type ?? "media"}</strong><span>{asset.id}</span><em>{asset.status}</em></li>)}</ul> : <p>Your uploads will appear here.</p>}<h2>Content</h2>{content.length ? <ul className={styles.recordList}>{content.map(item => <li key={item.id}><strong>{item.content_type}</strong><span>{item.title}</span><em>{item.status}</em>{item.status !== "published" && <button onClick={() => submitForReview(item.id)} type="button">Submit for review</button>}</li>)}</ul> : <p>Your galleries and videos will appear here.</p>}</section>
+      </div>}
+
+      {workspace === "live" && <div className={styles.workspace}>
+        {!liveReady ? (
+          <section className={styles.emptyAction}>
+            <p className="eyebrow">LIVE SETUP</p>
+            <h2>{publicationIsOnlyRemainingLiveStep ? "Publish your creator profile to go live" : "Finish your public creator profile before going live"}</h2>
+            {publicationIsOnlyRemainingLiveStep ? (
+              <>
+                <p>Your creator identity and age checks are complete. Your profile is currently private, so Live is intentionally unavailable to fans.</p>
+                <ol className={styles.readinessSteps}>
+                  <li>Open <strong>Profile publishing</strong>.</li>
+                  <li>Turn on <strong>Make my approved creator profile public</strong>.</li>
+                  <li>Select <strong>Save profile</strong>, then return here to start a public or private session.</li>
+                </ol>
+              </>
+            ) : (
+              <p>{creatorAccess?.creator_compliance.reason ?? "Your creator eligibility is still loading."} Complete the remaining profile requirements, then return here to start public or private sessions.</p>
+            )}
+            <Link className={styles.primaryAction} href="/creator-onboarding#publication">Open profile publishing</Link>
+          </section>
+        ) : <><LiveStudio /><LivePaidRequestStudio /><PrivateSessionQueue /></>}
+      </div>}
+      {workspace === "audience" && <div className={styles.workspace}><SubscriptionSettings /><SubscriptionPromotionSettings /><MessagingSettings /><MassMessageCampaign /></div>}
+      {workspace === "business" && <div className={styles.workspace}><div id="marketplace-fulfilment"><MarketplaceFulfilment /></div><GroupMemberships /><ReferralDashboard heading="Creator referral earnings" /></div>}
+    </section>
+  );
 }

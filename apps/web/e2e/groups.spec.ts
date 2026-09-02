@@ -31,7 +31,7 @@ test("Phase 8 manager proposal requires creator rejection or acceptance", async 
   await login(page, manager.email, manager.password);
   const group = await api(page, "/groups", "POST", { name: `E2E contracts ${stamp}`, slug: `e2e-contracts-${stamp}`, default_creator_basis_points: 5000 }); expect(group.status).toBe(200);
   const invitation = await api(page, `/groups/${group.body.id}/invitations`, "POST", { creator_id: application.id, creator_basis_points: 5000, permissions: [] }); expect(invitation.status).toBe(200);
-  await login(page, creatorEmail, password); await page.goto("/creator-studio"); await page.getByRole("button", { name: "Accept", exact: true }).click(); await expect(page.getByText("v1: 50% / 50% (active)")).toBeVisible();
+  await login(page, creatorEmail, password); await page.goto("/creator-studio"); await page.getByRole("button", { name: /^Business / }).click(); await page.getByRole("button", { name: "Accept", exact: true }).click(); await expect(page.getByText("v1: 50% / 50% (active)")).toBeVisible();
   await login(page, manager.email, manager.password); await page.goto("/groups"); await page.getByLabel("Group").selectOption(group.body.id); await expect(page.getByLabel("Group")).toHaveValue(group.body.id); await expect(page.locator("li", { hasText: "Contract creator — active" })).toBeVisible();
   const split = page.getByLabel("Proposed creator split for Contract creator"); await split.fill("7000"); await page.getByRole("button", { name: "Propose amendment" }).click(); await expect(page.getByRole("status")).toContainText("creator must explicitly accept");
   await login(page, creatorEmail, password);
@@ -43,7 +43,7 @@ test("Phase 8 manager proposal requires creator rejection or acceptance", async 
     const membership = memberships.body.find((row: { group_id: string }) => row.group_id === group.body.id);
     return membership?.contracts.some((contract: { version: number; status: string }) => contract.version === 2 && contract.status === "proposed") ?? false;
   }, { timeout: 15_000 }).toBe(true);
-  await page.goto("/creator-studio"); await page.reload();
+  await page.goto("/creator-studio"); await page.reload(); await page.getByRole("button", { name: /^Business / }).click();
   await page.locator("li", { hasText: group.body.id }).getByRole("button", { name: "Reject amendment" }).click(); await expect(page.locator("li", { hasText: group.body.id }).getByText("rejected")).toBeVisible();
   await login(page, manager.email, manager.password); expect((await api(page, `/groups/memberships/${invitation.body.id}/amendments`, "POST", { creator_basis_points: 7000 })).status).toBe(200);
   await login(page, creatorEmail, password);
@@ -52,7 +52,7 @@ test("Phase 8 manager proposal requires creator rejection or acceptance", async 
     const membership = memberships.body.find((row: { group_id: string }) => row.group_id === group.body.id);
     return membership?.contracts.some((contract: { version: number; status: string }) => contract.version === 3 && contract.status === "proposed") ?? false;
   }, { timeout: 15_000 }).toBe(true);
-  await page.goto("/creator-studio"); await page.reload(); await page.locator("li", { hasText: group.body.id }).getByRole("button", { name: "Accept amendment" }).click();
+  await page.goto("/creator-studio"); await page.reload(); await page.getByRole("button", { name: /^Business / }).click(); await page.locator("li", { hasText: group.body.id }).getByRole("button", { name: "Accept amendment" }).click();
   await expect.poll(async () => { const memberships = await api(page, "/groups/mine/memberships"); const membership = memberships.body.find((row: { group_id: string }) => row.group_id === group.body.id); return membership ? [...membership.contracts].sort((left: { version: number }, right: { version: number }) => left.version - right.version).map((contract: { status: string }) => contract.status) : []; }, { timeout: 15_000 }).toEqual(["ended", "rejected", "active"]);
   const memberships = await api(page, "/groups/mine/memberships"); const membership = memberships.body.find((row: { group_id: string }) => row.group_id === group.body.id); expect(membership).toBeTruthy(); const contracts = [...membership.contracts].sort((left: { version: number }, right: { version: number }) => left.version - right.version); expect(contracts[2].creator_basis_points).toBe(7000);
 });
