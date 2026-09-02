@@ -17,9 +17,11 @@ never password-reset or other required transactional mail. Hard bounces and comp
 create durable suppression records. Delivery attempts retain a destination snapshot and
 safe status/error metadata, never rendered body content or tokens.
 
-The SMTP adapter delivers without authentication or TLS to local Mailpit. Production startup
-requires a non-local SMTP host, username/password authentication, and exactly one encrypted
-transport mode: implicit TLS or forced STARTTLS. It is behind the `EmailProvider` boundary;
+The SMTP adapter supports local unauthenticated Mailpit only in development/test. Staging and
+production startup require a non-local SMTP host, username/password authentication, and exactly
+one encrypted transport mode: implicit TLS or forced STARTTLS. Private staging must use a sink
+that cannot deliver to the public Internet; Mailpit is not required. The adapter remains behind
+the `EmailProvider` boundary;
 future provider adapters can provide independent transactional and marketing streams without
 changing domain services. Provider events require the configured webhook secret and are
 idempotent. SMTP messages use intent keys as stable message references.
