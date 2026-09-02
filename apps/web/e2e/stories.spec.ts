@@ -292,4 +292,21 @@ test("active Stories render from safe derivatives and expired Stories stay absen
   await expect(viewer).toHaveURL(`/creator/${username}`);
   await expect(viewer.getByRole("heading", { name: displayName })).toBeVisible();
   await viewerContext.close();
+
+  await page.goto("/creator-studio/stories");
+  await page.locator('input[type="file"][accept="image/jpeg,image/png,image/webp"]').setInputFiles({
+    name: `story-composer-${stamp}.png`,
+    mimeType: "image/png",
+    buffer: image,
+  });
+  await expect(page.getByRole("img", { name: "Story composition preview" })).toBeVisible();
+  await page.getByLabel("Story text").fill("Created in the Story composer");
+  await page.getByLabel("Caption (optional)").fill("Story composer publication");
+  await page.getByLabel("Alt text (optional)").fill("A composed Story photo");
+  await page.getByRole("button", { name: "Publish Story" }).click();
+  await expect(page.getByRole("status")).toContainText("Story published", { timeout: 45_000 });
+  await expect.poll(async () => {
+    const ownStories = await api<Story[]>(page, "/stories/mine");
+    return ownStories.body.some((story) => story.caption === "Story composer publication");
+  }, { timeout: 15_000 }).toBe(true);
 });

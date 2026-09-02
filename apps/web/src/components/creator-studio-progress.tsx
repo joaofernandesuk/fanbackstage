@@ -186,6 +186,7 @@ export function CreatorStudioProgress() {
             ))}
           </ol>
           <nav aria-label="Creator business destinations" className={styles.destinations}>
+            <Link href="/creator-studio/stories">Create a Story</Link>
             <Link href="#marketplace-fulfilment">Marketplace</Link>
             <Link href="/creator-studio/analytics">Analytics</Link>
             <Link href="/notifications">Notifications</Link>

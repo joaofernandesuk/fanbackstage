@@ -16,6 +16,7 @@ import {
   useLoginGate,
 } from "./consumer-ui";
 import { ReportDialog, type ReportTarget } from "./report-dialog";
+import { FeedStoryComposerPrompt } from "./feed-story-composer-prompt";
 import styles from "./social-surface.module.css";
 
 type PostMedia = {
@@ -684,6 +685,7 @@ export function Feed({ creatorId }: { creatorId?: string }) {
 
   return (
     <section aria-label={creatorId ? "Creator feed" : "Social feed"} className={styles.feed}>
+      {!creatorId && <FeedStoryComposerPrompt />}
       {!creatorId && (
         <div aria-label="Choose feed" className={styles.feedTabs} role="tablist">
           <button aria-selected={tab === "following"} onClick={() => authenticated ? setTab("following") : requireLogin()} role="tab" type="button">Following</button>

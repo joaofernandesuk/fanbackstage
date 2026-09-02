@@ -97,6 +97,19 @@
   min-width: 0;
 }
 
+.storyComposerPrompt {
+  align-items: center;
+  background: radial-gradient(circle at 14% 5%, rgb(14 165 255 / .19), transparent 45%), linear-gradient(122deg, rgb(25 35 76 / .9), rgb(46 22 69 / .84));
+  border: 1px solid rgb(115 147 255 / .35);
+  border-radius: 22px;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  padding: 22px 24px;
+}
+
+.storyComposerPrompt h2 { font-size: clamp(1.2rem, 2.4vw, 1.65rem); margin: 4px 0 7px; }
+.storyComposerPrompt p:not(.eyebrow) { color: var(--text-secondary); margin: 0; max-width: 620px; }
 
 .feedTabs {
   background: rgb(11 16 33 / 0.78);
@@ -2135,6 +2148,11 @@
 }
 
 @media (max-width: 800px) {
+  .storyComposerPrompt {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .profileInfo {
     align-items: start;
     grid-template-columns: auto minmax(0, 1fr);

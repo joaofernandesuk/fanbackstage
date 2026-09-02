@@ -1,0 +1,2 @@
+# Preserve audited third-party MediaPipe runtime bytes verbatim.
+apps/web/public/mediapipe/wasm/*.js -whitespace
