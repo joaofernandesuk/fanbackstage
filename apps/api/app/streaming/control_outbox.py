@@ -18,6 +18,7 @@ from app.models.streaming import (
     LiveProviderControlIntent,
     LiveProviderControlStatus,
 )
+from app.observability.errors import capture_exception
 
 LIVE_PROVIDER_CONTROL_LEASE_SECONDS = 60
 LIVE_PROVIDER_CONTROL_RETRY_BASE_SECONDS = 5
@@ -604,6 +605,13 @@ async def process_next_live_provider_control_intent(
                 claim.intent.participant_identity,
             )
     except Exception as exc:  # noqa: BLE001 - the durable boundary must retain every failure
+        capture_exception(
+            exc,
+            correlation_id=None,
+            route=None,
+            category="livekit_control_failure",
+            task_name="live_provider_control_outbox",
+        )
         pending = await _finalize_retryable_failure(
             intent_id=claim.intent.id,
             expected_attempt_count=claim.intent.attempt_count,

@@ -570,9 +570,7 @@ async def update_listing(
     listing.origin_country_code = _country_code(values["origin_country_code"], "Origin country")
     listing.shipping_charged_minor = values["shipping_charged_minor"]
     db.add_all(
-        MarketplaceListingMedia(
-            listing_id=listing.id, media_asset_id=asset_id, position=position
-        )
+        MarketplaceListingMedia(listing_id=listing.id, media_asset_id=asset_id, position=position)
         for position, asset_id in enumerate(media_asset_ids)
     )
     listing.status = MarketplaceListingStatus.draft
@@ -600,7 +598,10 @@ async def deactivate_listing(
     )
     if listing is None:
         raise MarketplaceError("Marketplace listing not found")
-    if listing.status not in {MarketplaceListingStatus.published, MarketplaceListingStatus.sold_out}:
+    if listing.status not in {
+        MarketplaceListingStatus.published,
+        MarketplaceListingStatus.sold_out,
+    }:
         raise MarketplaceError("Only an active listing can be deactivated")
     listing.status = MarketplaceListingStatus.paused
     await record_event(

@@ -38,6 +38,8 @@ def _production_settings(**overrides) -> Settings:
         "verifymyage_client_id": "vma-client-id",
         "verifymyage_client_secret": "vma-client-secret-long",
         "compliance_fallback_country": "PT",
+        "error_tracking_provider": "sentry",
+        "error_tracking_dsn": "https://public-key@errors.example.com/1",
     }
     values.update(overrides)
     return Settings(**values)
@@ -87,6 +89,8 @@ def _staging_settings(**overrides) -> Settings:
         "trusted_country_header": "X-FanBackstage-Country",
         "trusted_proxy_cidrs": "203.0.113.10/32",
         "compliance_fallback_country": "PT",
+        "error_tracking_provider": "sentry",
+        "error_tracking_dsn": "https://public-key@errors.staging.example/1",
     }
     values.update(overrides)
     return Settings(**values)
@@ -104,8 +108,24 @@ def test_staging_accepts_shared_environment_configuration_and_reports_capabiliti
     settings.validate_production()
     assert settings.staging_capability_readiness_reasons() == (
         "VERIFYMYAGE_SANDBOX_CONFIGURATION_MISSING",
-        "ERROR_TRACKING_UNCONFIGURED",
     )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"error_tracking_provider": "disabled", "error_tracking_dsn": ""},
+        {"error_tracking_provider": "sentry", "error_tracking_dsn": ""},
+        {
+            "error_tracking_provider": "sentry",
+            "error_tracking_dsn": "https://public-key@errors.staging.example/1",
+            "error_tracking_send_pii": True,
+        },
+    ],
+)
+def test_staging_rejects_missing_or_unsafe_error_exporter(overrides):
+    with pytest.raises(RuntimeError, match="ERROR|Sentry|PII"):
+        _staging_settings(**overrides).validate_production()
 
 
 @pytest.mark.parametrize(
@@ -419,7 +439,13 @@ def test_unimplemented_identity_providers_are_rejected(field, value, message):
 
 def test_development_kyc_http_opt_in_is_forbidden_outside_dev_and_test():
     with pytest.raises(RuntimeError, match="limited to development and test"):
-        Settings(environment="staging", development_kyc_http_enabled=True).validate_production()
+        Settings(
+            environment="staging",
+            development_kyc_http_enabled=True,
+            error_tracking_provider="sentry",
+            error_tracking_dsn="https://public-key@errors.staging.example/1",
+            release_sha="abcdef123",
+        ).validate_production()
 
 
 def test_demo_seed_guard_refuses_when_not_explicitly_enabled(monkeypatch):

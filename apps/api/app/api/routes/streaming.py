@@ -523,8 +523,7 @@ async def paid_request_options_for_room(
             compliance_decision=await request_live_decision(db, request, identity[0]),
         )
         return [
-            PaidRequestOptionResponse.model_validate(item, from_attributes=True)
-            for item in items
+            PaidRequestOptionResponse.model_validate(item, from_attributes=True) for item in items
         ]
     except ComplianceAccessError as exc:
         raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
@@ -604,9 +603,7 @@ async def update_paid_request_option(
 
 
 @router.get("/paid-requests/mine/creator", response_model=list[LiveCommerceResponse])
-async def my_pending_paid_requests(
-    identity: CurrentIdentity, db: Db
-) -> list[LiveCommerceResponse]:
+async def my_pending_paid_requests(identity: CurrentIdentity, db: Db) -> list[LiveCommerceResponse]:
     return [
         live_commerce_response(item)
         for item in await service.creator_pending_paid_requests(db, identity[0])
@@ -639,9 +636,7 @@ async def decline_paid_request(
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
-@router.post(
-    "/rooms/{room_id}/reactions", response_model=LiveReactionSummaryResponse
-)
+@router.post("/rooms/{room_id}/reactions", response_model=LiveReactionSummaryResponse)
 async def react_to_live_room(
     room_id: UUID,
     payload: LiveReactionInput,
@@ -668,9 +663,7 @@ async def react_to_live_room(
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
-@router.get(
-    "/rooms/{room_id}/reactions", response_model=LiveReactionSummaryResponse
-)
+@router.get("/rooms/{room_id}/reactions", response_model=LiveReactionSummaryResponse)
 async def live_room_reactions(
     room_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> LiveReactionSummaryResponse:
@@ -688,9 +681,7 @@ async def live_room_reactions(
         raise HTTPException(403, str(exc)) from exc
 
 
-@router.get(
-    "/rooms/{room_id}/supporters", response_model=list[LiveSupporterRankingEntry]
-)
+@router.get("/rooms/{room_id}/supporters", response_model=list[LiveSupporterRankingEntry])
 async def live_room_supporters(
     room_id: UUID,
     request: Request,
@@ -778,9 +769,7 @@ async def update_goal(
     goal_id: UUID, payload: LiveGoalUpdate, identity: CurrentIdentity, db: Db
 ) -> LiveGoalResponse:
     try:
-        goal = await service.update_live_goal(
-            db, identity[0], goal_id, **payload.model_dump()
-        )
+        goal = await service.update_live_goal(db, identity[0], goal_id, **payload.model_dump())
         await db.commit()
         return LiveGoalResponse.model_validate(goal, from_attributes=True)
     except (PermissionError, ValueError) as exc:
@@ -941,9 +930,7 @@ async def request_private(
 async def private_invite_candidates(
     creator_id: UUID, request: Request, identity: CurrentIdentity, db: Db
 ) -> list[PrivateInviteCandidateResponse]:
-    await enforce_streaming_rate_limit(
-        request, str(identity[0].id), "private_invite_candidates"
-    )
+    await enforce_streaming_rate_limit(request, str(identity[0].id), "private_invite_candidates")
     try:
         return [
             PrivateInviteCandidateResponse(user_id=user.id, label=label)
@@ -954,18 +941,14 @@ async def private_invite_candidates(
 
 
 @router.get("/private-invitations/mine", response_model=list[PrivateRequestResponse])
-async def my_private_invitations(
-    identity: CurrentIdentity, db: Db
-) -> list[PrivateRequestResponse]:
+async def my_private_invitations(identity: CurrentIdentity, db: Db) -> list[PrivateRequestResponse]:
     return [
         await private_request_response(db, item)
         for item in await service.invited_private_requests(db, identity[0])
     ]
 
 
-@router.post(
-    "/private-invitations/{request_id}/{decision}", response_model=PrivateRequestResponse
-)
+@router.post("/private-invitations/{request_id}/{decision}", response_model=PrivateRequestResponse)
 async def decide_private_invitation(
     request_id: UUID, decision: str, identity: CurrentIdentity, db: Db
 ) -> PrivateRequestResponse:

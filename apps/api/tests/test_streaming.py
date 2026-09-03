@@ -233,7 +233,10 @@ async def test_livekit_room_controls_use_authenticated_twirp_and_token_exp_is_au
         "RemoveParticipant",
         "DeleteRoom",
     ]
-    assert all(request.full_url.startswith("http://control-livekit.internal:17880/") for request in requests)
+    assert all(
+        request.full_url.startswith("http://control-livekit.internal:17880/")
+        for request in requests
+    )
     assert json.loads(requests[0].data) == {
         "room": "room-authority",
         "identity": "fan-authority",
@@ -502,7 +505,11 @@ async def test_creator_can_decline_pending_private_request_without_creating_paym
 async def test_live_tip_and_gift_settle_once_then_emit_one_activity_event(db_session):
     owner, _ = await creator(db_session, "live-commerce-owner@example.com")
     viewer, _ = await accounts.register(
-        db_session, "live-commerce-viewer@example.com", "strong-password-123", None, country_code="PT"
+        db_session,
+        "live-commerce-viewer@example.com",
+        "strong-password-123",
+        None,
+        country_code="PT",
     )
     room = await streaming.start_live(db_session, owner, "Commerce live", LiveAccessMode.public)
     await streaming.join_live(db_session, viewer, room.id)
@@ -513,11 +520,24 @@ async def test_live_tip_and_gift_settle_once_then_emit_one_activity_event(db_ses
     await finance.process_development_webhook(db_session, payload, signature)
     await finance.process_development_webhook(db_session, payload, signature)
     assert tip.status is LiveCommerceStatus.completed and tip.ledger_transaction_id
-    assert len((await db_session.scalars(select(LedgerTransaction).where(LedgerTransaction.id == tip.ledger_transaction_id))).all()) == 1
+    assert (
+        len(
+            (
+                await db_session.scalars(
+                    select(LedgerTransaction).where(
+                        LedgerTransaction.id == tip.ledger_transaction_id
+                    )
+                )
+            ).all()
+        )
+        == 1
+    )
     events = await streaming.live_activity_history(db_session, viewer, room.id)
     assert [event.event_type for event in events] == ["tip"]
 
-    gift = LiveGiftCatalogItem(name="Rose", icon="/live/gifts/rose.svg", amount_minor=300, currency="EUR")
+    gift = LiveGiftCatalogItem(
+        name="Rose", icon="/live/gifts/rose.svg", amount_minor=300, currency="EUR"
+    )
     db_session.add(gift)
     await db_session.flush()
     charge = await streaming.initiate_live_gift(db_session, viewer, room.id, gift.id, "gift-1")
@@ -527,7 +547,10 @@ async def test_live_tip_and_gift_settle_once_then_emit_one_activity_event(db_ses
     await finance.process_development_webhook(db_session, payload, signature)
     assert charge.status is LiveCommerceStatus.completed and charge.ledger_transaction_id
     assert len((await db_session.scalars(select(LiveCommerceCharge))).all()) == 2
-    assert [event.event_type for event in await streaming.live_activity_history(db_session, viewer, room.id)] == ["tip", "gift"]
+    assert [
+        event.event_type
+        for event in await streaming.live_activity_history(db_session, viewer, room.id)
+    ] == ["tip", "gift"]
 
 
 @pytest.mark.asyncio
@@ -563,27 +586,33 @@ async def test_paid_request_snapshots_price_waits_for_creator_and_settles_once(d
     assert charge.status is LiveCommerceStatus.paid_pending_creator
     assert charge.gross_amount_minor == 700
     assert charge.ledger_transaction_id is None
-    assert await db_session.scalar(
-        select(LedgerTransaction.id).where(
-            LedgerTransaction.transaction_type == LedgerTransactionType.live_paid_request
+    assert (
+        await db_session.scalar(
+            select(LedgerTransaction.id).where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.live_paid_request
+            )
         )
-    ) is None
+        is None
+    )
 
     accepted = await streaming.accept_paid_request(db_session, owner, charge.id)
     replay = await streaming.accept_paid_request(db_session, owner, charge.id)
     assert accepted.id == replay.id
     assert accepted.status is LiveCommerceStatus.completed
     assert accepted.ledger_transaction_id
-    assert len(
-        (
-            await db_session.scalars(
-                select(LedgerTransaction).where(
-                    LedgerTransaction.transaction_type
-                    == LedgerTransactionType.live_paid_request
+    assert (
+        len(
+            (
+                await db_session.scalars(
+                    select(LedgerTransaction).where(
+                        LedgerTransaction.transaction_type
+                        == LedgerTransactionType.live_paid_request
+                    )
                 )
-            )
-        ).all()
-    ) == 1
+            ).all()
+        )
+        == 1
+    )
     assert [
         event.event_type
         for event in await streaming.live_activity_history(db_session, viewer, room.id)
@@ -645,11 +674,14 @@ async def test_paid_request_decline_and_expiry_require_refunds_without_success_l
     assert await streaming.expire_paid_requests(db_session) == 1
     assert expiring.status is LiveCommerceStatus.expired
     assert len((await db_session.scalars(select(PaymentRefundRequirement))).all()) == 2
-    assert await db_session.scalar(
-        select(LedgerTransaction.id).where(
-            LedgerTransaction.transaction_type == LedgerTransactionType.live_paid_request
+    assert (
+        await db_session.scalar(
+            select(LedgerTransaction.id).where(
+                LedgerTransaction.transaction_type == LedgerTransactionType.live_paid_request
+            )
         )
-    ) is None
+        is None
+    )
     assert [
         event.event_type
         for event in await streaming.live_activity_history(db_session, viewer, room.id)
@@ -679,9 +711,10 @@ async def test_live_reactions_are_bounded_aggregates_and_reversed_value_leaves_r
     counts = await streaming.add_live_reaction(db_session, viewer, room.id, "love")
     assert counts == {"love": 2}
     assert len((await db_session.scalars(select(LiveReactionAggregate))).all()) == 1
-    assert await db_session.scalar(
-        select(LiveEvent.id).where(LiveEvent.event_type == "reaction")
-    ) is None
+    assert (
+        await db_session.scalar(select(LiveEvent.id).where(LiveEvent.event_type == "reaction"))
+        is None
+    )
     with pytest.raises(streaming.StreamingError, match="Unsupported"):
         await streaming.add_live_reaction(db_session, viewer, room.id, "unbounded")
 
@@ -1316,9 +1349,7 @@ async def test_private_token_expiry_is_bounded_by_every_required_participant(
         PrivateSessionMode.two_to_one,
         invited.id,
     )
-    await streaming.resolve_private_invitation(
-        db_session, invited, request.id, accept=True
-    )
+    await streaming.resolve_private_invitation(db_session, invited, request.id, accept=True)
     session = await streaming.accept_private_request(db_session, owner, request.id)
     session.status = PrivateSessionStatus.ready
     invitee_expiry = datetime.now(UTC) + timedelta(seconds=30)
@@ -1942,9 +1973,7 @@ async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_sessio
         )
     with pytest.raises(streaming.StreamingError, match="invited viewer must accept"):
         await streaming.accept_private_request(db_session, owner, request.id)
-    await streaming.resolve_private_invitation(
-        db_session, invited, request.id, accept=True
-    )
+    await streaming.resolve_private_invitation(db_session, invited, request.id, accept=True)
     session = await streaming.accept_private_request(db_session, owner, request.id)
     participants = (
         await db_session.scalars(
@@ -1972,9 +2001,10 @@ async def test_two_to_one_invitee_decline_is_terminal_before_payment(db_session)
     await streaming.resolve_private_invitation(db_session, invited, request.id, accept=False)
     assert request.status is PrivateRequestStatus.cancelled
     assert request.invitation_status.value == "declined"
-    assert await db_session.scalar(
-        select(PaymentAttempt).where(PaymentAttempt.id == request.id)
-    ) is None
+    assert (
+        await db_session.scalar(select(PaymentAttempt).where(PaymentAttempt.id == request.id))
+        is None
+    )
     with pytest.raises(streaming.StreamingError, match="not pending"):
         await streaming.accept_private_request(db_session, owner, request.id)
 
@@ -2017,9 +2047,7 @@ async def test_two_to_one_real_lifecycle_has_one_payer_timer_and_settlement(
     request = await streaming.request_private_session(
         db_session, payer, profile.id, PrivateSessionMode.two_to_one, invited.id
     )
-    await streaming.resolve_private_invitation(
-        db_session, invited, request.id, accept=True
-    )
+    await streaming.resolve_private_invitation(db_session, invited, request.id, accept=True)
     session = await streaming.accept_private_request(db_session, owner, request.id)
     assert session.mode is PrivateSessionMode.two_to_one
     assert session.payer_user_id == payer.id

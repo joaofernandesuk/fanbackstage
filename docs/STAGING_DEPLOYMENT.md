@@ -11,13 +11,13 @@ This repository can describe and build a private staging release; it does not pr
 - remote LiveKit over WSS, with TURN/TLS capacity and its signed webhook registered at the staging API;
 - a provider-neutral identity-aware access gateway with MFA;
 - a trusted edge country signal that strips browser input before injection;
-- error tracking/log aggregation configured with PII disabled.
+- Sentry error tracking configured with PII disabled, alongside the existing structured log sink.
 
 The fictional payment and creator-KYC sandbox adapters are staging-only integration boundaries. They exercise signed asynchronous events without claiming production capability. VerifyMyAge remains red until a sandbox account, credentials, callback and provider-console confirmation exist. No placeholder is production capability.
 
 ## Build and configuration
 
-Build `apps/api/Dockerfile` once for API, Celery worker, beat and migrations. Build `apps/web/Dockerfile` with the exact staging web/API origins. Tag both with the immutable release SHA and record their digests. Copy `.env.staging.example` to the secret/configuration system, never into the repository. The API rejects localhost origins, weak secrets, insecure cookies, public indexing, development providers and default local infrastructure.
+Build `apps/api/Dockerfile` once for API, Celery worker, beat and migrations. Build `apps/web/Dockerfile` with the exact staging web/API origins, public-safe browser Sentry DSN, staging environment and release SHA. Tag both images with that same immutable release SHA and record their digests. Copy `.env.staging.example` to the secret/configuration system, never into the repository. The API rejects localhost origins, weak secrets, insecure cookies, public indexing, development providers and default local infrastructure. See [OBSERVABILITY.md](OBSERVABILITY.md) for the PII boundary, operator diagnostic, and private source-map release workflow.
 
 `docker-compose.staging.yml` is a topology reference, not an infrastructure provisioner. Attach its web/API services to the private access-gateway network; do not publish application ports directly. The internal application network carries web/API traffic, while an unexposed egress network lets migrations, API, workers, and beat reach managed PostgreSQL, Redis, object storage, SMTP, LiveKit, and provider endpoints. Apply infrastructure-level egress policy to that network. The topology deliberately defines one beat service. Running multiple beat schedulers is unsupported unless a distributed scheduler lock is introduced.
 
@@ -36,7 +36,7 @@ Staging returns `X-Robots-Tag: noindex, nofollow, noarchive`, `robots.txt` disal
 3. Run one `migrate` job with `alembic upgrade head`; do not run Alembic from every API replica.
 4. Start API and workers, then exactly one beat scheduler, then web.
 5. Confirm `/health`; `/ready` is expected to remain unavailable while the explicit payment/KYC/VMA or policy/legal blockers remain.
-6. Inspect structured request/error logs, worker/beat heartbeat and queue-depth events.
+6. Inspect structured request/error logs, worker/beat heartbeat and queue-depth events; invoke the audited staging-only error-tracking diagnostic and confirm its event under the image release SHA.
 7. Run signed callback, media upload/delivery, legal acceptance, notification-sink and live-control smoke tests.
 
 The API emits query-free request latency/status/correlation fields and safe error event IDs. Celery emits a safe failure event for every queue and a LiveKit control-outbox batch metric; the operations heartbeat proves beat-to-worker delivery and reports named queue depths. Alert externally on API 5xx/latency, stale heartbeat, queue growth/age, task failures (including notification, media, finance reconciliation and signed-webhook work), and nonzero/repeated outbox retries. The repository provides these signals and readiness inputs, not a hosted metrics/error account.
@@ -83,6 +83,8 @@ At least once before relying on staging, provision a new isolated database whose
 
 Teardown removes the access routes and application workloads first, then snapshots/retains data according to the approved policy before removing external services. Never reuse staging credentials elsewhere.
 
-## Operator-only gaps
+## Operator workflows
 
-The full moderator/admin browser backoffice is outside this block. Some report, appeal, consent, creator review, group and referral operations still require permissioned API/manual operator use. Record every such runbook action and do not describe those workflows as complete UI acceptance.
+The permissioned operations backoffice covers finance exceptions/refunds, creator KYC review,
+moderation appeals, consent/release review, group applications, referral administration, and
+observability. API automation remains permission-checked and audited; it is not a gateway bypass.

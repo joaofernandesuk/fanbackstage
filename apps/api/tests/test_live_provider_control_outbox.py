@@ -18,6 +18,7 @@ from app.models.streaming import (
     LiveProviderControlIntent,
     LiveProviderControlStatus,
 )
+from app.streaming import control_outbox
 from app.streaming.control_outbox import (
     LIVE_PROVIDER_CONTROL_LEASE_SECONDS,
     LIVE_PROVIDER_CONTROL_RETRY_BASE_SECONDS,
@@ -253,9 +254,15 @@ async def test_provider_failure_stays_retryable_then_succeeds_with_audit(monkeyp
                 raise StreamingProviderError("transient provider failure")
 
     provider = _FailsOnceProvider()
+    captured = []
     from app.streaming import service as streaming_service
 
     monkeypatch.setattr(streaming_service, "livekit_control_provider", lambda: provider)
+    monkeypatch.setattr(
+        control_outbox,
+        "capture_exception",
+        lambda exception, **context: captured.append((exception, context)) or "safe-event-id",
+    )
     intent_id = await _enqueue(key="delete-room:retry", room="provider-room-retry")
     first_at = datetime.now(UTC) + timedelta(seconds=1)
     first = await _process_next(intent_id=intent_id, now=first_at)
@@ -284,6 +291,13 @@ async def test_provider_failure_stays_retryable_then_succeeds_with_audit(monkeyp
     assert second.intent.attempt_count == 2
     assert second.intent.last_error_code == "PROVIDER_STREAMINGPROVIDERERROR"
     assert provider.calls == ["provider-room-retry", "provider-room-retry"]
+    assert len(captured) == 1
+    assert captured[0][1] == {
+        "correlation_id": None,
+        "route": None,
+        "category": "livekit_control_failure",
+        "task_name": "live_provider_control_outbox",
+    }
 
     async with SessionLocal() as audit_db:
         event_types = list(

@@ -65,6 +65,10 @@ jobs:
           docker build --tag fanbackstage-web:${GITHUB_SHA}
           --build-arg FANBACKSTAGE_ENVIRONMENT=staging
           --build-arg NEXT_PUBLIC_FANBACKSTAGE_API_URL=https://api.staging.invalid
+          --build-arg NEXT_PUBLIC_FANBACKSTAGE_ENVIRONMENT=staging
+          --build-arg NEXT_PUBLIC_FANBACKSTAGE_ERROR_TRACKING_PROVIDER=sentry
+          --build-arg NEXT_PUBLIC_FANBACKSTAGE_ERROR_TRACKING_DSN=https://public-key@errors.staging.invalid/1
+          --build-arg NEXT_PUBLIC_FANBACKSTAGE_RELEASE_SHA=${GITHUB_SHA}
           --build-arg NEXT_PUBLIC_FANBACKSTAGE_WEB_ORIGIN=https://staging.invalid
           apps/web
 

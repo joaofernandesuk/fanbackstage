@@ -843,9 +843,7 @@ async def test_admin_creator_queue_notifies_reviewers_and_records_decision_reaso
         assert notification is not None
         assert notification.target_path == "/admin/creators?status=pending_review"
         assert applicant_email not in notification.body
-        assert (
-            await applicant_client.get("/api/v1/admin/operations/overview")
-        ).status_code == 403
+        assert (await applicant_client.get("/api/v1/admin/operations/overview")).status_code == 403
 
         assert (
             await admin_client.post(

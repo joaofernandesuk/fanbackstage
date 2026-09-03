@@ -11,7 +11,7 @@ from app.api.router import api_router, health_router
 from app.audit.service import bind_request_metadata, reset_request_metadata
 from app.core.config import get_settings
 from app.core.logging import configure_sensitive_http_logging, configure_structured_logging
-from app.observability.errors import capture_exception
+from app.observability.errors import capture_exception, configure_error_tracking
 
 configure_structured_logging(service="fanbackstage-api", environment=get_settings().environment)
 configure_sensitive_http_logging()
@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
 
 
 settings = get_settings()
+configure_error_tracking(settings)
 app = FastAPI(
     title="FanBackstage API",
     version="0.1.0",
@@ -42,6 +43,16 @@ app.add_middleware(
 )
 app.include_router(health_router)
 app.include_router(api_router)
+
+
+def _error_category(route: str) -> str:
+    if "/payments/webhooks/" in route:
+        return "payment_callback_failure"
+    if "/creators/webhooks/" in route or "/age-verification/callback/" in route:
+        return "kyc_callback_failure"
+    if route.endswith("/webhooks/livekit"):
+        return "livekit_control_failure"
+    return "api_uncaught_error"
 
 
 @app.middleware("http")
@@ -89,10 +100,14 @@ async def correlation_id(request: Request, call_next):
 @app.exception_handler(Exception)
 async def unhandled_exception(request: Request, exc: Exception):
     correlation_id = getattr(request.state, "correlation_id", None)
+    route = getattr(request.scope.get("route"), "path", "unmatched_route")
     event_id = capture_exception(
         exc,
         correlation_id=correlation_id,
-        route=request.url.path,
+        route=route,
+        method=request.method,
+        status_code=500,
+        category=_error_category(route),
     )
     if get_settings().environment in {"development", "test"}:
         logger.exception("unhandled_application_exception", exc_info=exc)

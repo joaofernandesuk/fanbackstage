@@ -420,12 +420,26 @@ async def public_profile(
         display_name=profile.display_name or profile.username,
         bio=profile.bio if compliance_allowed else None,
         avatar_reference=(
-            next((f"/media/profile/{profile.id}/avatar" for row in await service.profile_media(db, profile.id) if row.kind == "avatar"), safe_public_profile_media_reference(profile.avatar_reference))
+            next(
+                (
+                    f"/media/profile/{profile.id}/avatar"
+                    for row in await service.profile_media(db, profile.id)
+                    if row.kind == "avatar"
+                ),
+                safe_public_profile_media_reference(profile.avatar_reference),
+            )
             if compliance_allowed
             else None
         ),
         cover_reference=(
-            next((f"/media/profile/{profile.id}/cover" for row in await service.profile_media(db, profile.id) if row.kind == "cover"), safe_public_profile_media_reference(profile.cover_reference))
+            next(
+                (
+                    f"/media/profile/{profile.id}/cover"
+                    for row in await service.profile_media(db, profile.id)
+                    if row.kind == "cover"
+                ),
+                safe_public_profile_media_reference(profile.cover_reference),
+            )
             if compliance_allowed
             else None
         ),

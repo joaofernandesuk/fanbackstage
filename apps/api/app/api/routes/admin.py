@@ -6,6 +6,7 @@ from sqlalchemy import func, or_, select
 from app.api.deps import CurrentIdentity, Db
 from app.audit.service import record_event
 from app.content import service as content_service
+from app.core.config import get_settings
 from app.creators import service as creator_service
 from app.marketplace import service as marketplace_service
 from app.media import service as media_service
@@ -37,6 +38,7 @@ from app.models.trust_safety import (
     ModerationCase,
     ModerationCaseStatus,
 )
+from app.observability.errors import capture_diagnostic
 from app.permissions.policies import Permission, authorize
 from app.referrals import service as referral_service
 from app.schemas.admin import (
@@ -911,6 +913,28 @@ async def operations_overview(identity: CurrentIdentity, db: Db) -> dict:
             },
         ]
     }
+
+
+@router.post("/operations/error-tracking-diagnostic")
+async def error_tracking_diagnostic(identity: CurrentIdentity, db: Db) -> dict[str, str]:
+    """Emit one PII-free staging diagnostic through the configured exporter."""
+
+    authorize(identity[0], Permission.ADMIN_ACCESS)
+    settings = get_settings()
+    if settings.environment != "staging" or settings.error_tracking_provider != "sentry":
+        raise HTTPException(status_code=404, detail="Not found")
+    event_id = capture_diagnostic()
+    await record_event(
+        db,
+        "operations.error_tracking_diagnostic_requested",
+        actor_user_id=identity[0].id,
+        target_type="error_tracking",
+        target_id=event_id,
+        correlation_id="error-tracking-diagnostic",
+        metadata={"provider": "sentry", "release_sha": settings.release_sha},
+    )
+    await db.commit()
+    return {"event_id": event_id, "status": "queued"}
 
 
 async def content_review_action(

@@ -6,25 +6,59 @@ from kombu import Queue
 
 from app.core.config import get_settings
 from app.core.logging import configure_sensitive_http_logging, configure_structured_logging
+from app.observability.errors import capture_exception, configure_error_tracking
+
+settings = get_settings()
+settings.validate_production()
 
 configure_structured_logging(
     service="fanbackstage-worker",
-    environment=get_settings().environment,
+    environment=settings.environment,
 )
 configure_sensitive_http_logging()
+configure_error_tracking(settings)
 logger = logging.getLogger("fanbackstage.worker")
+
+
+def _failure_category(task_name: str) -> str:
+    if "media" in task_name or "preview" in task_name:
+        return "media_processing_failure"
+    if "payment" in task_name or "financial" in task_name:
+        return "payment_callback_failure"
+    if "kyc" in task_name:
+        return "kyc_callback_failure"
+    if "live" in task_name:
+        return "livekit_control_failure"
+    return "worker_task_failure"
 
 
 @task_failure.connect
 def log_task_failure(sender=None, task_id=None, exception=None, **_kwargs) -> None:
     """Emit a query/payload-free failure signal for every operational domain queue."""
 
+    task_name = getattr(sender, "name", "unknown")
+    request = getattr(sender, "request", None)
+    delivery_info = getattr(request, "delivery_info", {}) or {}
+    queue_name = delivery_info.get("routing_key")
+    captured_event_id = capture_exception(
+        exception or RuntimeError("Celery task failed without exception context"),
+        correlation_id=None,
+        route=None,
+        category=_failure_category(task_name),
+        task_name=task_name,
+        queue_name=str(queue_name) if queue_name else None,
+    )
     logger.error(
         "celery_task_failed",
         extra={
-            "event_id": task_id,
+            "event_id": captured_event_id,
             "error_type": type(exception).__name__ if exception else "UnknownError",
-            "metrics": {"task": getattr(sender, "name", "unknown"), "status": "failed"},
+            "metrics": {
+                "task": task_name,
+                "queue": queue_name,
+                "status": "failed",
+                "task_id_present": bool(task_id),
+            },
         },
     )
 

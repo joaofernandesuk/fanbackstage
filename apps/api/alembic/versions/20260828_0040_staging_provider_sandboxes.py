@@ -1,8 +1,9 @@
 """Add staging-only payment and creator-KYC simulator delivery records."""
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "20260828_0040"
 down_revision = "20260831_0047"

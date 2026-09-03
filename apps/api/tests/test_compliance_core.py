@@ -1382,6 +1382,8 @@ def test_production_requires_fallback_even_when_trusted_geoip_is_configured():
         compliance_fallback_country="",
         trusted_country_header="x-country",
         trusted_proxy_cidrs="10.0.0.0/16",
+        error_tracking_provider="sentry",
+        error_tracking_dsn="https://public-key@errors.example.test/1",
     )
     with pytest.raises(RuntimeError, match="reviewed compliance fallback country"):
         settings.validate_production()

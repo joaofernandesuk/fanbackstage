@@ -196,9 +196,7 @@ async def create_managed_listing(
 
 
 @router.get("/listings/mine", response_model=list[MarketplaceOwnedListingResponse])
-async def my_listings(
-    identity: CurrentIdentity, db: Db
-) -> list[MarketplaceOwnedListingResponse]:
+async def my_listings(identity: CurrentIdentity, db: Db) -> list[MarketplaceOwnedListingResponse]:
     creator = await approved_creator(db, identity[0])
     rows = (
         await db.scalars(

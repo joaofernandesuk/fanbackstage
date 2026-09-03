@@ -111,11 +111,13 @@ async def set_profile_media(
             MediaAsset.moderation_status == ModerationStatus.approved,
             MediaAsset.audience == MediaAudience.safe_public,
             MediaAsset.deleted_at.is_(None),
-            select(MediaDerivative.id).where(
+            select(MediaDerivative.id)
+            .where(
                 MediaDerivative.media_asset_id == MediaAsset.id,
                 MediaDerivative.derivative_type == DerivativeType.display,
                 MediaDerivative.status == MediaStatus.ready,
-            ).exists(),
+            )
+            .exists(),
         )
         .with_for_update()
     )

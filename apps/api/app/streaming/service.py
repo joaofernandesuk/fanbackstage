@@ -451,14 +451,23 @@ async def initiate_live_gift(
 
 
 async def initiate_live_paid_request(
-    db: AsyncSession, buyer: User, room_id: UUID, option_id: UUID, message: str, idempotency_key: str,
-    *, compliance_decision: ComplianceDecision | None = None,
+    db: AsyncSession,
+    buyer: User,
+    room_id: UUID,
+    option_id: UUID,
+    message: str,
+    idempotency_key: str,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
 ) -> LiveCommerceCharge:
     room, creator, settings = await _live_commerce_room(db, buyer, room_id, compliance_decision)
-    option = await db.scalar(select(LivePaidRequestOption).where(
-        LivePaidRequestOption.id == option_id, LivePaidRequestOption.creator_id == creator.id,
-        LivePaidRequestOption.enabled.is_(True),
-    ))
+    option = await db.scalar(
+        select(LivePaidRequestOption).where(
+            LivePaidRequestOption.id == option_id,
+            LivePaidRequestOption.creator_id == creator.id,
+            LivePaidRequestOption.enabled.is_(True),
+        )
+    )
     if (
         not idempotency_key
         or len(idempotency_key) > 100
@@ -469,24 +478,46 @@ async def initiate_live_paid_request(
     normalized_message = message.strip()
     if not normalized_message or len(normalized_message) > 500:
         raise StreamingError("Paid request message is required and must be at most 500 characters")
-    existing_attempt = await finance.lock_payment_idempotency(db, buyer.id, f"live-request:{idempotency_key}")
+    existing_attempt = await finance.lock_payment_idempotency(
+        db, buyer.id, f"live-request:{idempotency_key}"
+    )
     if existing_attempt:
-        existing = await db.scalar(select(LiveCommerceCharge).where(LiveCommerceCharge.payment_attempt_id == existing_attempt.id))
+        existing = await db.scalar(
+            select(LiveCommerceCharge).where(
+                LiveCommerceCharge.payment_attempt_id == existing_attempt.id
+            )
+        )
         if existing:
             return existing
         raise StreamingError("Payment idempotency key is already in use")
-    attempt = PaymentAttempt(buyer_user_id=buyer.id, provider=get_settings().payment_provider,
-        provider_reference=new_provider_reference(), amount_minor=option.amount_minor,
-        currency=currency_code(option.currency), idempotency_key=f"live-request:{idempotency_key}")
-    db.add(attempt); await db.flush()
-    charge = LiveCommerceCharge(live_room_id=room.id, creator_id=creator.id, buyer_user_id=buyer.id,
-        kind=LiveCommerceKind.paid_request, status=LiveCommerceStatus.pending_payment,
-        paid_request_option_id=option.id, request_label=option.label, request_message=normalized_message,
-        gross_amount_minor=option.amount_minor, currency=currency_code(option.currency),
-        commission_basis_points=await finance.commission_for(db, "tip"), payment_attempt_id=attempt.id,
+    attempt = PaymentAttempt(
+        buyer_user_id=buyer.id,
+        provider=get_settings().payment_provider,
+        provider_reference=new_provider_reference(),
+        amount_minor=option.amount_minor,
+        currency=currency_code(option.currency),
+        idempotency_key=f"live-request:{idempotency_key}",
+    )
+    db.add(attempt)
+    await db.flush()
+    charge = LiveCommerceCharge(
+        live_room_id=room.id,
+        creator_id=creator.id,
+        buyer_user_id=buyer.id,
+        kind=LiveCommerceKind.paid_request,
+        status=LiveCommerceStatus.pending_payment,
+        paid_request_option_id=option.id,
+        request_label=option.label,
+        request_message=normalized_message,
+        gross_amount_minor=option.amount_minor,
+        currency=currency_code(option.currency),
+        commission_basis_points=await finance.commission_for(db, "tip"),
+        payment_attempt_id=attempt.id,
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
-        creator_acceptance_required=option.requires_creator_acceptance)
-    db.add(charge); await db.flush()
+        creator_acceptance_required=option.requires_creator_acceptance,
+    )
+    db.add(charge)
+    await db.flush()
     return charge
 
 
@@ -581,9 +612,7 @@ async def room_paid_request_options(
     )
 
 
-async def creator_pending_paid_requests(
-    db: AsyncSession, actor: User
-) -> list[LiveCommerceCharge]:
+async def creator_pending_paid_requests(db: AsyncSession, actor: User) -> list[LiveCommerceCharge]:
     creator = await approved_creator(db, actor)
     return list(
         await db.scalars(
@@ -786,9 +815,7 @@ async def add_live_reaction(
         },
     )
     await db.execute(statement)
-    return await live_reaction_summary(
-        db, actor, room_id, compliance_decision=compliance_decision
-    )
+    return await live_reaction_summary(db, actor, room_id, compliance_decision=compliance_decision)
 
 
 async def live_reaction_summary(
@@ -1042,9 +1069,7 @@ async def _complete_live_commerce_charge(
     return charge
 
 
-async def accept_paid_request(
-    db: AsyncSession, actor: User, charge_id: UUID
-) -> LiveCommerceCharge:
+async def accept_paid_request(db: AsyncSession, actor: User, charge_id: UUID) -> LiveCommerceCharge:
     creator = await approved_creator(db, actor)
     charge = await db.scalar(
         select(LiveCommerceCharge)
@@ -2626,9 +2651,7 @@ async def eligible_private_invitees(
     return eligible
 
 
-async def invited_private_requests(
-    db: AsyncSession, actor: User
-) -> list[PrivateSessionRequest]:
+async def invited_private_requests(db: AsyncSession, actor: User) -> list[PrivateSessionRequest]:
     return list(
         await db.scalars(
             select(PrivateSessionRequest)

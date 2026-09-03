@@ -286,9 +286,7 @@ class LivePaidRequestOption(UUIDPrimaryKey, Timestamped, Base):
     currency: Mapped[str] = mapped_column(String(3))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    requires_creator_acceptance: Mapped[bool] = mapped_column(
-        Boolean, default=True, nullable=False
-    )
+    requires_creator_acceptance: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class LiveGoal(UUIDPrimaryKey, Timestamped, Base):
@@ -352,9 +350,7 @@ class LiveCommerceCharge(UUIDPrimaryKey, Timestamped, Base):
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    creator_acceptance_required: Mapped[bool] = mapped_column(
-        Boolean, default=True, nullable=False
-    )
+    creator_acceptance_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class LiveReactionAggregate(UUIDPrimaryKey, Timestamped, Base):
@@ -362,9 +358,7 @@ class LiveReactionAggregate(UUIDPrimaryKey, Timestamped, Base):
 
     __tablename__ = "live_reaction_aggregates"
     __table_args__ = (
-        CheckConstraint(
-            "reaction_count >= 0", name="ck_live_reaction_aggregate_nonnegative"
-        ),
+        CheckConstraint("reaction_count >= 0", name="ck_live_reaction_aggregate_nonnegative"),
         UniqueConstraint(
             "live_room_id",
             "reaction_type",

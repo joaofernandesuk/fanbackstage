@@ -13,6 +13,7 @@ IMPLEMENTED_AGE_ASSURANCE_PROVIDERS = {
 }
 IMPLEMENTED_KYC_PROVIDERS = {"development", "staging_sandbox"}
 IMPLEMENTED_PAYMENT_PROVIDERS = {"development", "staging_sandbox"}
+IMPLEMENTED_ERROR_TRACKING_PROVIDERS = {"disabled", "sentry"}
 STAGING_UNAVAILABLE_PROVIDER = "unavailable"
 STAGING_TEST_MARKER = "STAGING TEST ONLY"
 PRODUCTION_POSTGRES_TLS_MODES = frozenset({"require", "verify-ca", "verify-full"})
@@ -244,6 +245,31 @@ class Settings(BaseSettings):
     def validate_production(self) -> None:
         if self.environment not in {"development", "test", "staging", "production"}:
             raise RuntimeError("FANBACKSTAGE_ENVIRONMENT is invalid")
+        if self.error_tracking_provider not in IMPLEMENTED_ERROR_TRACKING_PROVIDERS:
+            raise RuntimeError("FANBACKSTAGE_ERROR_TRACKING_PROVIDER is not implemented")
+        if self.environment in {"staging", "production"}:
+            if self.error_tracking_provider != "sentry":
+                raise RuntimeError("Shared environments require the Sentry error exporter")
+            try:
+                error_tracking_dsn = urlsplit(self.error_tracking_dsn)
+                _ = error_tracking_dsn.port
+            except ValueError as exc:
+                raise RuntimeError("FANBACKSTAGE_ERROR_TRACKING_DSN is invalid") from exc
+            if (
+                error_tracking_dsn.scheme != "https"
+                or not error_tracking_dsn.hostname
+                or _is_local_host(error_tracking_dsn.hostname)
+                or not error_tracking_dsn.username
+                or error_tracking_dsn.password is not None
+                or not error_tracking_dsn.path.strip("/")
+                or error_tracking_dsn.query
+                or error_tracking_dsn.fragment
+            ):
+                raise RuntimeError("FANBACKSTAGE_ERROR_TRACKING_DSN is invalid")
+            if self.error_tracking_send_pii:
+                raise RuntimeError("Shared-environment error tracking must not send PII")
+            if self.release_sha == "development" or len(self.release_sha.strip()) < 7:
+                raise RuntimeError("Shared-environment error tracking requires a release SHA")
         if not self.adult_attestation_version.strip() or len(self.adult_attestation_version) > 64:
             raise RuntimeError("FANBACKSTAGE_ADULT_ATTESTATION_VERSION is invalid")
         if not self.adult_access_cookie_name.strip() or len(self.adult_access_cookie_name) > 128:
@@ -703,8 +729,6 @@ class Settings(BaseSettings):
             raise RuntimeError("Staging requires an explicit compliance fallback country")
         if self.age_test_provider_enabled or self.development_kyc_http_enabled:
             raise RuntimeError("Development verification adapters cannot run in staging")
-        if self.error_tracking_send_pii:
-            raise RuntimeError("Staging error tracking must not send PII")
 
     def staging_capability_readiness_reasons(self) -> tuple[str, ...]:
         if self.environment != "staging":
@@ -720,7 +744,7 @@ class Settings(BaseSettings):
             reasons.append("CREATOR_KYC_SANDBOX_WEBHOOK_CONFIGURATION_MISSING")
         if not self.verifymyage_client_id.strip() or not self.verifymyage_client_secret.strip():
             reasons.append("VERIFYMYAGE_SANDBOX_CONFIGURATION_MISSING")
-        if self.error_tracking_provider == "disabled" or not self.error_tracking_dsn.strip():
+        if self.error_tracking_provider != "sentry" or not self.error_tracking_dsn.strip():
             reasons.append("ERROR_TRACKING_UNCONFIGURED")
         return tuple(reasons)
 

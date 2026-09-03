@@ -34,9 +34,7 @@ router = APIRouter(prefix="/media", tags=["media"])
 async def profile_media_delivery(
     creator_id: UUID, kind: str, request: Request, identity: OptionalIdentity, db: Db
 ) -> RedirectResponse:
-    await enforce_media_rate_limit(
-        request, str(identity[0].id) if identity else "anonymous"
-    )
+    await enforce_media_rate_limit(request, str(identity[0].id) if identity else "anonymous")
     if kind not in {"avatar", "cover"}:
         raise HTTPException(404, "Media not found")
     row = await db.scalar(
@@ -66,7 +64,9 @@ async def profile_media_delivery(
     if row is None or derivative is None:
         raise HTTPException(404, "Media not found")
     return RedirectResponse(
-        storage_provider().create_download_url(derivative.storage_key, get_settings().media_url_ttl_seconds),
+        storage_provider().create_download_url(
+            derivative.storage_key, get_settings().media_url_ttl_seconds
+        ),
         headers={"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"},
     )
 
