@@ -66,6 +66,10 @@ class MarketplaceListingCreate(BaseModel):
     media_asset_ids: list[UUID] = Field(default_factory=list, max_length=12)
 
 
+class MarketplaceListingUpdate(MarketplaceListingCreate):
+    pass
+
+
 class MarketplaceListingMediaResponse(BaseModel):
     derivative_id: UUID
     delivery_path: str
@@ -99,6 +103,10 @@ class MarketplaceListingResponse(BaseModel):
     shipping_charged_minor: int
     media: list[MarketplaceListingMediaResponse] = Field(default_factory=list)
     seller: MarketplaceSellerResponse | None = None
+
+
+class MarketplaceOwnedListingResponse(MarketplaceListingResponse):
+    media_asset_ids: list[UUID] = Field(default_factory=list)
 
 
 class MarketplaceCheckoutInput(BaseModel):

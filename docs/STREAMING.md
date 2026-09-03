@@ -18,6 +18,8 @@ Live reactions use a small server enum and aggregate room/type counters under an
 
 Live reporting resolves through the central Trust & Safety target snapshot and report queue. Participant removal is a central enforcement action that audits the actor and enqueues the existing durable LiveKit `remove_participant` control. The creator cannot be removed as a participant; room termination is the explicit creator-level control. Neither report handling nor removal mutates settled ledger history.
 
+Creator Studio configures the server-owned tip menu and ledger-derived Live goals through authenticated creator commands. Resetting a goal advances its contribution baseline; the client cannot write current progress. A 2-to-1 request can name only an eligible follower returned by a bounded, masked candidate projection. The invited fan must explicitly accept before creator acceptance or payment authorization, and only the sole payer receives the payment-attempt identifier.
+
 The server-control JWTs are method-scoped: room deletion receives only `roomCreate`; participant listing/removal receives `roomAdmin` plus the exact room name. Browser tokens never receive either administrative grant.
 
 Private staging supplies only a remote `wss://` endpoint, API key/secret, and an operator-confirmed signed webhook registration; this repository does not provision LiveKit. The access gateway may exempt the exact webhook path from MFA, but it must preserve the raw body and authorization header so application signature verification remains mandatory. Production additionally needs reviewed TLS/TURN, capacity, region and recording controls.

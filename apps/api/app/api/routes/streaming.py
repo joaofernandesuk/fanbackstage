@@ -15,6 +15,7 @@ from app.finance.service import currency_code
 from app.integrations.streaming import LiveKitStreamingProvider, StreamingProviderError
 from app.models.compliance import ComplianceFeature
 from app.models.creator import CreatorProfile, CreatorStatus
+from app.models.identity import User
 from app.models.streaming import (
     LiveAccessMode,
     LiveReport,
@@ -32,6 +33,7 @@ from app.schemas.streaming import (
     LiveGiftInput,
     LiveGoalInput,
     LiveGoalResponse,
+    LiveGoalUpdate,
     LiveReactionInput,
     LiveReactionSummaryResponse,
     LiveReportInput,
@@ -42,6 +44,7 @@ from app.schemas.streaming import (
     PaidRequestInput,
     PaidRequestOptionInput,
     PaidRequestOptionResponse,
+    PrivateInviteCandidateResponse,
     PrivateRequestInput,
     PrivateRequestResponse,
     PrivateSessionResponse,
@@ -55,6 +58,22 @@ from app.trust_safety import service as trust_safety_service
 router = APIRouter(prefix="/live", tags=["streaming"])
 logger = logging.getLogger("fanbackstage.streaming")
 LIVEKIT_WEBHOOK_MAX_BYTES = 64 * 1024
+
+
+async def private_request_response(db: Db, item) -> PrivateRequestResponse:
+    invited = await db.get(User, item.invited_user_id) if item.invited_user_id else None
+    return PrivateRequestResponse(
+        id=item.id,
+        creator_id=item.creator_id,
+        status=item.status.value,
+        mode=item.mode.value,
+        per_minute_price_minor=item.per_minute_price_minor,
+        minimum_charge_minor=item.minimum_charge_minor,
+        currency=item.currency,
+        expires_at=item.expires_at,
+        invitation_status=item.invitation_status.value,
+        invited_viewer_label=service.private_invitee_label(invited),
+    )
 
 
 def compliance_detail(exc: ComplianceAccessError) -> dict[str, object]:
@@ -105,7 +124,8 @@ def room_response(
     )
 
 
-def private_session_response(session) -> PrivateSessionResponse:
+def private_session_response(session, actor: User) -> PrivateSessionResponse:
+    role = "payer" if session.payer_user_id == actor.id else "participant"
     return PrivateSessionResponse(
         id=session.id,
         request_id=session.request_id,
@@ -115,7 +135,8 @@ def private_session_response(session) -> PrivateSessionResponse:
         minimum_charge_minor=session.minimum_charge_minor,
         currency=session.currency,
         billable_seconds=session.billable_seconds,
-        payment_attempt_id=session.payment_attempt_id,
+        payment_attempt_id=session.payment_attempt_id if role == "payer" else None,
+        participant_role=role,
     )
 
 
@@ -741,6 +762,43 @@ async def create_goal(
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
+@router.get("/goals", response_model=list[LiveGoalResponse])
+async def my_goals(identity: CurrentIdentity, db: Db) -> list[LiveGoalResponse]:
+    try:
+        return [
+            LiveGoalResponse.model_validate(goal, from_attributes=True)
+            for goal in await service.creator_live_goals(db, identity[0])
+        ]
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.put("/goals/{goal_id}", response_model=LiveGoalResponse)
+async def update_goal(
+    goal_id: UUID, payload: LiveGoalUpdate, identity: CurrentIdentity, db: Db
+) -> LiveGoalResponse:
+    try:
+        goal = await service.update_live_goal(
+            db, identity[0], goal_id, **payload.model_dump()
+        )
+        await db.commit()
+        return LiveGoalResponse.model_validate(goal, from_attributes=True)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/goals/{goal_id}/reset", response_model=LiveGoalResponse)
+async def reset_goal(goal_id: UUID, identity: CurrentIdentity, db: Db) -> LiveGoalResponse:
+    try:
+        goal = await service.reset_live_goal(db, identity[0], goal_id)
+        await db.commit()
+        return LiveGoalResponse.model_validate(goal, from_attributes=True)
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
 @router.get("/rooms/{room_id}/goals", response_model=list[LiveGoalResponse])
 async def room_goals(room_id: UUID, identity: CurrentIdentity, db: Db) -> list[LiveGoalResponse]:
     try:
@@ -867,19 +925,58 @@ async def request_private(
             compliance_decision=decision,
         )
         await db.commit()
-        return PrivateRequestResponse(
-            id=item.id,
-            creator_id=item.creator_id,
-            status=item.status.value,
-            mode=item.mode.value,
-            per_minute_price_minor=item.per_minute_price_minor,
-            minimum_charge_minor=item.minimum_charge_minor,
-            currency=item.currency,
-            expires_at=item.expires_at,
-        )
+        return await private_request_response(db, item)
     except ComplianceAccessError as exc:
         await db.rollback()
         raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.get(
+    "/creators/{creator_id}/private-invite-candidates",
+    response_model=list[PrivateInviteCandidateResponse],
+)
+async def private_invite_candidates(
+    creator_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> list[PrivateInviteCandidateResponse]:
+    await enforce_streaming_rate_limit(
+        request, str(identity[0].id), "private_invite_candidates"
+    )
+    try:
+        return [
+            PrivateInviteCandidateResponse(user_id=user.id, label=label)
+            for user, label in await service.eligible_private_invitees(db, identity[0], creator_id)
+        ]
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@router.get("/private-invitations/mine", response_model=list[PrivateRequestResponse])
+async def my_private_invitations(
+    identity: CurrentIdentity, db: Db
+) -> list[PrivateRequestResponse]:
+    return [
+        await private_request_response(db, item)
+        for item in await service.invited_private_requests(db, identity[0])
+    ]
+
+
+@router.post(
+    "/private-invitations/{request_id}/{decision}", response_model=PrivateRequestResponse
+)
+async def decide_private_invitation(
+    request_id: UUID, decision: str, identity: CurrentIdentity, db: Db
+) -> PrivateRequestResponse:
+    if decision not in {"accept", "decline"}:
+        raise HTTPException(404, "Invitation action not found")
+    try:
+        item = await service.resolve_private_invitation(
+            db, identity[0], request_id, accept=decision == "accept"
+        )
+        await db.commit()
+        return await private_request_response(db, item)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
@@ -891,19 +988,7 @@ async def creator_private_requests(
 ) -> list[PrivateRequestResponse]:
     try:
         rows = await service.creator_pending_private_requests(db, identity[0])
-        return [
-            PrivateRequestResponse(
-                id=item.id,
-                creator_id=item.creator_id,
-                status=item.status.value,
-                mode=item.mode.value,
-                per_minute_price_minor=item.per_minute_price_minor,
-                minimum_charge_minor=item.minimum_charge_minor,
-                currency=item.currency,
-                expires_at=item.expires_at,
-            )
-            for item in rows
-        ]
+        return [await private_request_response(db, item) for item in rows]
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
 
@@ -911,7 +996,7 @@ async def creator_private_requests(
 @router.get("/private-sessions/mine", response_model=list[PrivateSessionResponse])
 async def my_private_sessions(identity: CurrentIdentity, db: Db) -> list[PrivateSessionResponse]:
     return [
-        private_session_response(session)
+        private_session_response(session, identity[0])
         for session in await service.participant_private_sessions(db, identity[0])
     ]
 
@@ -926,7 +1011,7 @@ async def accept_private(
             db, identity[0], request_id, compliance_decision=decision
         )
         await db.commit()
-        return private_session_response(session)
+        return private_session_response(session, identity[0])
     except ComplianceAccessError as exc:
         await db.rollback()
         raise HTTPException(exc.status_code, compliance_detail(exc)) from exc
@@ -942,16 +1027,7 @@ async def decline_private(
     try:
         item = await service.decline_private_request(db, identity[0], request_id)
         await db.commit()
-        return PrivateRequestResponse(
-            id=item.id,
-            creator_id=item.creator_id,
-            status=item.status.value,
-            mode=item.mode.value,
-            per_minute_price_minor=item.per_minute_price_minor,
-            minimum_charge_minor=item.minimum_charge_minor,
-            currency=item.currency,
-            expires_at=item.expires_at,
-        )
+        return await private_request_response(db, item)
     except (PermissionError, ValueError) as exc:
         await db.rollback()
         raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
@@ -966,7 +1042,7 @@ async def end_private(
             db, identity[0], session_id, "ended_by_participant"
         )
         await db.commit()
-        return private_session_response(session)
+        return private_session_response(session, identity[0])
     except StreamingProviderError as exc:
         await db.rollback()
         raise HTTPException(503, "Live provider control is temporarily unavailable") from exc

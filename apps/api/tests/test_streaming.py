@@ -31,6 +31,7 @@ from app.models.finance import (
     PaymentStatus,
 )
 from app.models.messaging import UserBlock
+from app.models.social import Follow
 from app.models.streaming import (
     LiveAccessMode,
     LiveChatMessage,
@@ -1307,12 +1308,16 @@ async def test_private_token_expiry_is_bounded_by_every_required_participant(
         "strong-password-123",
         None,
     )
+    db_session.add(Follow(user_id=invited.id, creator_id=profile.id))
     request = await streaming.request_private_session(
         db_session,
         payer,
         profile.id,
         PrivateSessionMode.two_to_one,
         invited.id,
+    )
+    await streaming.resolve_private_invitation(
+        db_session, invited, request.id, accept=True
     )
     session = await streaming.accept_private_request(db_session, owner, request.id)
     session.status = PrivateSessionStatus.ready
@@ -1923,6 +1928,7 @@ async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_sessio
     invited, _ = await accounts.register(
         db_session, "two-invited@example.com", "strong-password-123", None, country_code="PT"
     )
+    db_session.add(Follow(user_id=invited.id, creator_id=profile.id))
     settings = await streaming.settings_for_creator(db_session, profile.id)
     settings.one_to_one_price_minor, settings.two_to_one_price_minor = 100, 275
     request = await streaming.request_private_session(
@@ -1934,6 +1940,11 @@ async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_sessio
         await streaming.request_private_session(
             db_session, payer, profile.id, PrivateSessionMode.two_to_one
         )
+    with pytest.raises(streaming.StreamingError, match="invited viewer must accept"):
+        await streaming.accept_private_request(db_session, owner, request.id)
+    await streaming.resolve_private_invitation(
+        db_session, invited, request.id, accept=True
+    )
     session = await streaming.accept_private_request(db_session, owner, request.id)
     participants = (
         await db_session.scalars(
@@ -1943,6 +1954,49 @@ async def test_two_to_one_snapshots_separate_rate_and_specific_invitee(db_sessio
         )
     ).all()
     assert {participant.user_id for participant in participants} == {owner.id, payer.id, invited.id}
+
+
+@pytest.mark.asyncio
+async def test_two_to_one_invitee_decline_is_terminal_before_payment(db_session):
+    owner, profile = await creator(db_session, "invite-decline-owner@example.com")
+    payer, _ = await accounts.register(
+        db_session, "invite-decline-payer@example.com", "strong-password-123", None
+    )
+    invited, _ = await accounts.register(
+        db_session, "invite-decline-fan@example.com", "strong-password-123", None
+    )
+    db_session.add(Follow(user_id=invited.id, creator_id=profile.id))
+    request = await streaming.request_private_session(
+        db_session, payer, profile.id, PrivateSessionMode.two_to_one, invited.id
+    )
+    await streaming.resolve_private_invitation(db_session, invited, request.id, accept=False)
+    assert request.status is PrivateRequestStatus.cancelled
+    assert request.invitation_status.value == "declined"
+    assert await db_session.scalar(
+        select(PaymentAttempt).where(PaymentAttempt.id == request.id)
+    ) is None
+    with pytest.raises(streaming.StreamingError, match="not pending"):
+        await streaming.accept_private_request(db_session, owner, request.id)
+
+
+@pytest.mark.asyncio
+async def test_creator_can_update_and_reset_live_goal_without_setting_progress(db_session):
+    owner, _profile = await creator(db_session, "goal-control-owner@example.com")
+    goal = await streaming.create_live_goal(
+        db_session, owner, title="First target", target_amount_minor=500
+    )
+    original_start = goal.starts_at
+    await streaming.update_live_goal(
+        db_session,
+        owner,
+        goal.id,
+        title="Updated target",
+        target_amount_minor=900,
+        active=False,
+    )
+    assert goal.title == "Updated target" and goal.target_amount_minor == 900 and not goal.active
+    await streaming.reset_live_goal(db_session, owner, goal.id)
+    assert goal.active and goal.completed_at is None and goal.starts_at >= original_start
 
 
 @pytest.mark.asyncio
@@ -1956,11 +2010,15 @@ async def test_two_to_one_real_lifecycle_has_one_payer_timer_and_settlement(
     invited, _ = await accounts.register(
         db_session, "waiting-invited@example.com", "strong-password-123", None, country_code="PT"
     )
+    db_session.add(Follow(user_id=invited.id, creator_id=profile.id))
     stranger, _ = await accounts.register(
         db_session, "waiting-stranger@example.com", "strong-password-123", None, country_code="PT"
     )
     request = await streaming.request_private_session(
         db_session, payer, profile.id, PrivateSessionMode.two_to_one, invited.id
+    )
+    await streaming.resolve_private_invitation(
+        db_session, invited, request.id, accept=True
     )
     session = await streaming.accept_private_request(db_session, owner, request.id)
     assert session.mode is PrivateSessionMode.two_to_one

@@ -44,6 +44,7 @@ from app.models.finance import (
 )
 from app.models.identity import User
 from app.models.messaging import UserBlock
+from app.models.social import Follow
 from app.models.streaming import (
     CreatorLiveSettings,
     LiveAccessMode,
@@ -69,6 +70,7 @@ from app.models.streaming import (
     LiveRoom,
     LiveRoomStatus,
     LiveTipMenuItem,
+    PrivateInvitationStatus,
     PrivateRequestStatus,
     PrivateSession,
     PrivateSessionMode,
@@ -669,6 +671,46 @@ async def create_live_goal(
     return goal
 
 
+async def update_live_goal(
+    db: AsyncSession,
+    actor: User,
+    goal_id: UUID,
+    *,
+    title: str,
+    target_amount_minor: int,
+    active: bool,
+) -> LiveGoal:
+    creator = await approved_creator(db, actor)
+    goal = await db.scalar(
+        select(LiveGoal)
+        .where(LiveGoal.id == goal_id, LiveGoal.creator_id == creator.id)
+        .with_for_update()
+    )
+    if goal is None:
+        raise PermissionError("Live goal not found")
+    goal.title = title.strip()
+    goal.target_amount_minor = target_amount_minor
+    goal.active = active
+    if not active:
+        goal.completed_at = None
+    return goal
+
+
+async def reset_live_goal(db: AsyncSession, actor: User, goal_id: UUID) -> LiveGoal:
+    creator = await approved_creator(db, actor)
+    goal = await db.scalar(
+        select(LiveGoal)
+        .where(LiveGoal.id == goal_id, LiveGoal.creator_id == creator.id)
+        .with_for_update()
+    )
+    if goal is None:
+        raise PermissionError("Live goal not found")
+    goal.starts_at = datetime.now(UTC)
+    goal.completed_at = None
+    goal.active = True
+    return goal
+
+
 async def live_goal_progress(
     db: AsyncSession, actor: User, room_id: UUID
 ) -> list[tuple[LiveGoal, int]]:
@@ -697,6 +739,7 @@ async def live_goal_progress(
                 LiveCommerceCharge.creator_id == room.creator_id,
                 LiveCommerceCharge.currency == goal.currency,
                 LiveCommerceCharge.status == LiveCommerceStatus.completed,
+                LiveCommerceCharge.created_at >= goal.starts_at,
             )
         )
         rows.append((goal, int(progress or 0)))
@@ -2490,7 +2533,12 @@ async def request_private_session(
         raise StreamingError("A 1-to-1 session cannot include an invited viewer")
     if invited_user_id:
         invited = await db.get(User, invited_user_id)
-        if invited is None:
+        follows_creator = await db.scalar(
+            select(Follow.id).where(
+                Follow.user_id == invited_user_id, Follow.creator_id == creator.id
+            )
+        )
+        if invited is None or follows_creator is None:
             raise StreamingError("The invited viewer is unavailable")
         await require_live_compliance(db, invited)
     rate = (
@@ -2503,6 +2551,11 @@ async def request_private_session(
         creator_id=creator.id,
         requester_user_id=requester.id,
         invited_user_id=invited_user_id,
+        invitation_status=(
+            PrivateInvitationStatus.pending
+            if mode is PrivateSessionMode.two_to_one
+            else PrivateInvitationStatus.not_required
+        ),
         mode=mode,
         per_minute_price_minor=rate,
         minimum_minutes=settings.minimum_minutes,
@@ -2521,6 +2574,122 @@ async def request_private_session(
         actor_user_id=requester.id,
         target_type="private_session_request",
         target_id=str(request.id),
+    )
+    if invited_user_id:
+        await emit_transactional(
+            db,
+            recipient_user_id=invited_user_id,
+            notification_type="PRIVATE_LIVE_INVITATION",
+            source_domain="streaming",
+            source_id=str(request.id),
+            title="Private Live invitation",
+            body="A fan invited you to a 2-to-1 private session. You must accept before it can proceed.",
+            target_path="/live",
+        )
+    return request
+
+
+def private_invitee_label(user: User | None) -> str | None:
+    if user is None:
+        return None
+    local, _, domain = user.email.partition("@")
+    return f"{local[:1]}***@{domain}" if local and domain else "Fan"
+
+
+async def eligible_private_invitees(
+    db: AsyncSession, requester: User, creator_id: UUID
+) -> list[tuple[User, str]]:
+    await require_public_creator_access(db, creator_id, requester.id)
+    users = list(
+        await db.scalars(
+            select(User)
+            .join(Follow, Follow.user_id == User.id)
+            .where(
+                Follow.creator_id == creator_id,
+                User.id != requester.id,
+                User.is_active.is_(True),
+                User.email_verified_at.is_not(None),
+                User.adult_attested_at.is_not(None),
+            )
+            .order_by(User.created_at.desc())
+            .limit(20)
+        )
+    )
+    eligible: list[tuple[User, str]] = []
+    for user in users:
+        try:
+            await require_live_compliance(db, user)
+            await require_public_creator_access(db, creator_id, user.id)
+        except (PermissionError, ValueError):
+            continue
+        eligible.append((user, private_invitee_label(user) or "Fan"))
+    return eligible
+
+
+async def invited_private_requests(
+    db: AsyncSession, actor: User
+) -> list[PrivateSessionRequest]:
+    return list(
+        await db.scalars(
+            select(PrivateSessionRequest)
+            .where(
+                PrivateSessionRequest.invited_user_id == actor.id,
+                PrivateSessionRequest.status == PrivateRequestStatus.pending,
+                PrivateSessionRequest.invitation_status == PrivateInvitationStatus.pending,
+                PrivateSessionRequest.expires_at > datetime.now(UTC),
+            )
+            .order_by(PrivateSessionRequest.created_at.desc())
+        )
+    )
+
+
+async def resolve_private_invitation(
+    db: AsyncSession, actor: User, request_id: UUID, *, accept: bool
+) -> PrivateSessionRequest:
+    request = await db.scalar(
+        select(PrivateSessionRequest)
+        .where(PrivateSessionRequest.id == request_id)
+        .with_for_update()
+    )
+    if (
+        request is None
+        or request.invited_user_id != actor.id
+        or request.mode is not PrivateSessionMode.two_to_one
+        or request.status is not PrivateRequestStatus.pending
+        or request.invitation_status is not PrivateInvitationStatus.pending
+        or request.expires_at <= datetime.now(UTC)
+    ):
+        raise PermissionError("Private session invitation is unavailable")
+    if accept:
+        await require_live_compliance(db, actor)
+        await require_public_creator_access(db, request.creator_id, actor.id)
+        request.invitation_status = PrivateInvitationStatus.accepted
+        event_type = "private_session.invitation_accepted"
+        title = "Invitation accepted"
+        body = "Your invited fan accepted. The creator can now review the 2-to-1 request."
+    else:
+        request.invitation_status = PrivateInvitationStatus.declined
+        request.status = PrivateRequestStatus.cancelled
+        event_type = "private_session.invitation_declined"
+        title = "Invitation declined"
+        body = "The invited fan declined this 2-to-1 request. No payment was initiated."
+    request.invitation_responded_at = datetime.now(UTC)
+    await record_event(
+        db,
+        event_type,
+        actor_user_id=actor.id,
+        target_type="private_session_request",
+        target_id=str(request.id),
+    )
+    await emit_transactional(
+        db,
+        recipient_user_id=request.requester_user_id,
+        notification_type="PRIVATE_LIVE_INVITATION_UPDATE",
+        source_domain="streaming",
+        source_id=str(request.id),
+        title=title,
+        body=body,
+        target_path="/live",
     )
     return request
 
@@ -2653,6 +2822,11 @@ async def accept_private_request(
         UTC
     ):
         raise StreamingError("Private session request is not pending")
+    if (
+        request.mode is PrivateSessionMode.two_to_one
+        and request.invitation_status is not PrivateInvitationStatus.accepted
+    ):
+        raise StreamingError("The invited viewer must accept before the creator can accept")
     public_room = await db.scalar(
         select(LiveRoom)
         .where(

@@ -1,7 +1,7 @@
 .root { display: grid; gap: 14px; }
-.dropzone { align-items: center; background: linear-gradient(135deg, rgb(14 165 255 / .1), rgb(236 72 153 / .08)); border: 1px dashed rgb(92 183 255 / .58); border-radius: 16px; cursor: pointer; display: grid; gap: 13px; grid-template-columns: auto 1fr auto; min-height: 112px; padding: 18px; transition: background 160ms ease, border-color 160ms ease, transform 160ms ease; }
+.dropzone { align-items: center; background: linear-gradient(135deg, rgb(14 165 255 / .1), rgb(236 72 153 / .08)); border: 1px dashed rgb(92 183 255 / .58); border-radius: 16px; cursor: pointer; display: grid; gap: 13px; grid-template-columns: auto 1fr auto; min-height: 112px; overflow: hidden; padding: 18px; position: relative; transition: background 160ms ease, border-color 160ms ease, transform 160ms ease; }
 .dropzone:hover, .dropzone.dragging { background: linear-gradient(135deg, rgb(14 165 255 / .2), rgb(236 72 153 / .15)); border-color: var(--brand-cyan); transform: translateY(-1px); }
-.dropzone input { height: 1px; opacity: 0; overflow: hidden; position: absolute; width: 1px; }
+.dropzone input { height: 1px; left: 0; opacity: 0; overflow: hidden; position: absolute; top: 0; width: 1px; }
 .dropzone strong, .dropzone small { display: block; }.dropzone strong { color: var(--text-primary); font-size: .92rem; }.dropzone small { color: var(--text-secondary); font-size: .75rem; margin-top: 4px; }
 .icon { align-items: center; background: rgb(14 165 255 / .16); border-radius: 50%; color: var(--brand-cyan); display: inline-flex; font-size: 1.45rem; height: 38px; justify-content: center; width: 38px; }
 .browse, .applyCrop { background: rgb(92 183 255 / .12); border: 1px solid rgb(92 183 255 / .45); border-radius: 9px; color: #d5f3ff; font-size: .76rem; font-weight: 800; padding: 10px 13px; }.disabled { cursor: not-allowed; opacity: .55; }.dragging { border-style: solid; }

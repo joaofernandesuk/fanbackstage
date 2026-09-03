@@ -88,24 +88,30 @@ export function LoginGate({
 export function CreatorAvatar({
   username,
   displayName,
+  source,
   size = 48,
   className = "",
   live = false,
 }: {
   username?: string | null;
   displayName: string;
+  source?: string | null;
   size?: number;
   className?: string;
   live?: boolean;
 }) {
-  const source = mediaForUsername(username)?.avatar;
+  const imageSource = source || mediaForUsername(username)?.avatar;
   return (
     <span
       className={`${styles.avatar} ${live ? styles.avatarLive : ""} ${className}`}
       style={{ width: size, height: size }}
     >
-      {source ? (
-        <Image alt={`${displayName} profile photo`} height={size} src={source} width={size} />
+      {imageSource ? (
+        imageSource.startsWith("http") ? (
+          <img alt={`${displayName} profile photo`} height={size} src={imageSource} width={size} />
+        ) : (
+          <Image alt={`${displayName} profile photo`} height={size} src={imageSource} width={size} />
+        )
       ) : (
         <span aria-label={`${displayName} profile placeholder`} className={styles.initials}>
           {displayName.slice(0, 2).toUpperCase()}

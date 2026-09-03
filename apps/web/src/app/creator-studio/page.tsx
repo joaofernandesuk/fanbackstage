@@ -17,9 +17,12 @@ import { GroupMemberships } from "../../components/group-memberships";
 import { MarketplaceFulfilment } from "../../components/marketplace-fulfilment";
 import { ReferralDashboard } from "../../components/referral-dashboard";
 import { MediaDropzone } from "../../components/media-dropzone";
+import { CreatorProfileMediaEditor } from "../../components/creator-profile-media";
+import { MarketplaceAuthoring } from "../../components/marketplace-authoring";
+import { LiveCommerceSettings } from "../../components/live-commerce-settings";
 import styles from "./creator-studio.module.css";
 
-type Asset = { id: string; status: string; media_type?: string };
+type Asset = { id: string; status: string; media_type?: string; display_path?: string };
 type Upload = Asset & { upload_url?: string };
 type Content = { id: string; title: string; content_type: string; status: string; access_policy: string; price_amount_minor?: number | null; price_currency?: string | null };
 type FeedPost = { id: string; body: string | null; status: string; pinned_at: string | null; access_policy: string };
@@ -231,6 +234,7 @@ function CreatorStudio() {
         <section className={styles.panel}><div className={styles.panelHeading}><div><p className="eyebrow">MEDIA LIBRARY</p><h2>Upload media</h2><p>Drop an image or video here, or browse your device. Images can be cropped for the card or surface you plan to use; video stays untouched.</p></div></div><form className={styles.form} onSubmit={upload}><MediaDropzone accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" onChange={setUploadFile} resetToken={uploadResetToken} /><button className={styles.primaryAction} disabled={!uploadFile}>Upload media</button></form></section>
         <div className={styles.twoPanels}><section className={styles.panel}><h2>Create a gallery</h2><form className={styles.form} onSubmit={createGallery}><label>Gallery title<input name="gallery-title" required /></label><label>Description<textarea name="gallery-description" maxLength={5000} /></label><label>Access policy<select name="gallery-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><div className={styles.twoColumns}><label>PPV price (minor units)<input name="gallery-price-minor" type="number" min="1" step="1" /></label><label>Currency<input name="gallery-currency" defaultValue="EUR" maxLength={3} /></label></div><label>Public preview images<input name="gallery-preview-count" type="number" min="0" max="100" defaultValue="1" /></label><label>Cover image<select name="gallery-cover"><option value="">First selected image</option>{readyImages.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><fieldset><legend>Ready images</legend>{readyImages.map((asset) => <label key={asset.id}><input name="image" type="checkbox" value={asset.id} />{asset.id}</label>)}</fieldset><button className={styles.primaryAction}>Create and submit gallery</button></form></section>
         <section className={styles.panel}><h2>Create a video</h2><form className={styles.form} onSubmit={createVideo}><label>Video title<input name="video-title" required /></label><label>Description<textarea name="video-description" maxLength={5000} /></label><label>Ready video<select name="video" required defaultValue=""><option value="" disabled>{readyVideos.length ? "Choose a processed video" : "Upload and process a video first"}</option>{readyVideos.map((asset) => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label><label>Access policy<select name="video-policy">{policies.map((policy) => <option key={policy}>{policy}</option>)}</select></label><div className={styles.twoColumns}><label>PPV price (minor units)<input name="video-price-minor" type="number" min="1" step="1" /></label><label>Currency<input name="video-currency" defaultValue="EUR" maxLength={3} /></label></div><div className={styles.twoColumns}><label>Preview starts at (seconds)<input name="video-preview-start" type="number" min="0" defaultValue="0" /></label><label>Preview duration (seconds)<input name="video-preview-duration" type="number" min="1" max="120" defaultValue="2" /></label></div><button className={styles.primaryAction}>Create video</button></form></section></div>
+        <section className={styles.panel}><CreatorProfileMediaEditor assets={assets} onSaved={refresh} /></section>
         <section className={styles.panel}><h2>Library status</h2>{assets.length ? <ul className={styles.recordList}>{assets.map(asset => <li key={asset.id}><strong>{asset.media_type ?? "media"}</strong><span>{asset.id}</span><em>{asset.status}</em></li>)}</ul> : <p>Your uploads will appear here.</p>}<h2>Content</h2>{content.length ? <ul className={styles.recordList}>{content.map(item => <li key={item.id}><strong>{item.content_type}</strong><span>{item.title}</span><em>{item.status}</em>{item.status !== "published" && <button onClick={() => submitForReview(item.id)} type="button">Submit for review</button>}</li>)}</ul> : <p>Your galleries and videos will appear here.</p>}</section>
       </div>}
 
@@ -253,10 +257,10 @@ function CreatorStudio() {
             )}
             <Link className={styles.primaryAction} href="/creator-onboarding#publication">Open profile publishing</Link>
           </section>
-        ) : <><LiveStudio /><LivePaidRequestStudio /><PrivateSessionQueue /></>}
+        ) : <><LiveStudio /><LiveCommerceSettings /><LivePaidRequestStudio /><PrivateSessionQueue /></>}
       </div>}
       {workspace === "audience" && <div className={styles.workspace}><SubscriptionSettings /><SubscriptionPromotionSettings /><MessagingSettings /><MassMessageCampaign /></div>}
-      {workspace === "business" && <div className={styles.workspace}><div id="marketplace-fulfilment"><MarketplaceFulfilment /></div><GroupMemberships /><ReferralDashboard heading="Creator referral earnings" /></div>}
+      {workspace === "business" && <div className={styles.workspace}><MarketplaceAuthoring assets={assets} /><div id="marketplace-fulfilment"><MarketplaceFulfilment /></div><GroupMemberships /><ReferralDashboard heading="Creator referral earnings" /></div>}
     </section>
   );
 }

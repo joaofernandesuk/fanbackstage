@@ -12,11 +12,24 @@ from app.api.routes import creators as creator_routes
 from app.creators import service
 from app.main import app
 from app.models.audit import AuditEvent
-from app.models.content import AccessPolicy, ContentItem, ContentStatus, ContentType
+from app.models.content import (
+    AccessPolicy,
+    ContentItem,
+    ContentStatus,
+    ContentType,
+    DerivativeType,
+    MediaAsset,
+    MediaAudience,
+    MediaDerivative,
+    MediaStatus,
+    MediaType,
+    ModerationStatus,
+)
 from app.models.creator import (
     CreatorCategory,
     CreatorLanguage,
     CreatorProfile,
+    CreatorProfileMedia,
     CreatorStatus,
     CreatorStatusHistory,
     CreatorVerification,
@@ -25,6 +38,50 @@ from app.models.creator import (
 from app.models.identity import User
 from app.models.messaging import UserBlock
 from app.models.notification import InAppNotification
+
+
+@pytest.mark.asyncio
+async def test_profile_media_requires_owned_ready_public_derivative_and_replaces_safely(db_session):
+    user, _ = await accounts.register(
+        db_session, "profile-media@example.com", "strong-password-123", None, country_code="PT"
+    )
+    profile = await service.get_or_create_profile(db_session, user)
+    asset = MediaAsset(
+        owner_creator_id=profile.id,
+        media_type=MediaType.image,
+        status=MediaStatus.ready,
+        moderation_status=ModerationStatus.approved,
+        audience=MediaAudience.safe_public,
+        storage_key="original/profile-media",
+        original_filename="avatar.jpg",
+        mime_type="image/jpeg",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    db_session.add(
+        MediaDerivative(
+            media_asset_id=asset.id,
+            derivative_type=DerivativeType.display,
+            status=MediaStatus.ready,
+            storage_key="display/profile-media",
+            mime_type="image/jpeg",
+        )
+    )
+    await db_session.flush()
+    assigned = await service.set_profile_media(
+        db_session,
+        profile,
+        user.id,
+        kind="avatar",
+        media_asset_id=asset.id,
+        focal_x=0.25,
+        focal_y=0.75,
+    )
+    assert assigned.focal_x == 0.25 and assigned.focal_y == 0.75
+    assert await db_session.scalar(
+        select(CreatorProfileMedia).where(CreatorProfileMedia.media_asset_id == asset.id)
+    )
+    assert await service.remove_profile_media(db_session, profile, user.id, kind="avatar")
 
 
 async def mark_email_verified(db_session, email: str) -> None:

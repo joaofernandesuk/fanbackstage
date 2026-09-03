@@ -15,8 +15,10 @@ type PrivateSession = {
   currency: string;
   billable_seconds: number;
   payment_attempt_id: string | null;
+  participant_role: string;
 };
 type Token = { provider_url: string; token: string };
+type Invitation = { id: string; mode: string; invitation_status: string; invited_viewer_label: string | null; expires_at: string };
 
 /**
  * Private-room transport is deliberately separate from the server's session
@@ -26,11 +28,13 @@ type Token = { provider_url: string; token: string };
 export function PrivateSessionRoom() {
   const [sessions, setSessions] = useState<PrivateSession[]>([]);
   const [message, setMessage] = useState("");
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
   const providerRoom = useRef<Room | null>(null);
 
   async function refresh() {
     try {
       setSessions(await api<PrivateSession[]>("/live/private-sessions/mine"));
+      setInvitations(await api<Invitation[]>("/live/private-invitations/mine"));
     } catch (caught) {
       setMessage(caught instanceof ApiError ? caught.message : "Unable to load private sessions");
     }
@@ -88,13 +92,23 @@ export function PrivateSessionRoom() {
     }
   }
 
+  async function decideInvitation(invitation: Invitation, decision: "accept" | "decline") {
+    try {
+      await api(`/live/private-invitations/${invitation.id}/${decision}`, { method: "POST" });
+      setMessage(decision === "accept" ? "Invitation accepted. The creator may now review the request; you will never be charged." : "Invitation declined. No payment was initiated.");
+      await refresh();
+    } catch (caught) { setMessage(caught instanceof ApiError ? caught.message : "Unable to update the invitation"); }
+  }
+
   return <section className="card" aria-label="Private rooms">
     <p className="eyebrow">PRIVATE ROOMS</p><h2>Your private sessions</h2>
+    {invitations.length > 0 && <section aria-label="2-to-1 invitations"><h3>Invitations awaiting your decision</h3>{invitations.map((invitation) => <article key={invitation.id}><p>A fan invited you to join a 2-to-1 private Live. You are not responsible for payment.</p><button onClick={() => void decideInvitation(invitation, "accept")}>Accept invitation</button><button onClick={() => void decideInvitation(invitation, "decline")}>Decline</button></article>)}</section>}
     {!sessions.length && <p>No private sessions are ready.</p>}
     {sessions.map((session) => <article key={session.id}>
       <p>{session.mode} · {session.status} · {session.per_minute_price_minor} {session.currency}/minute</p>
       <p>Authoritative billable time: {session.billable_seconds} seconds.</p>
-      {session.status === "awaiting_payment_authorization" && <button onClick={() => void authorize(session)}>Confirm payment authorization</button>}
+      {session.status === "awaiting_payment_authorization" && session.participant_role === "payer" && <button onClick={() => void authorize(session)}>Confirm payment authorization</button>}
+      {session.status === "awaiting_payment_authorization" && session.participant_role !== "payer" && <p>Waiting for the paying fan to confirm authorization.</p>}
       {["ready", "connecting", "active", "reconnecting"].includes(session.status) && <><button onClick={() => void join(session)}>Join private room</button><button onClick={() => void end(session)}>End private session</button></>}
     </article>)}
     {message && <p>{message}</p>}

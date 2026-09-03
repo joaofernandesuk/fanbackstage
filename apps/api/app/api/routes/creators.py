@@ -20,6 +20,8 @@ from app.models.creator import (
 from app.models.social import Follow
 from app.schemas.creator import (
     CreatorComplianceEligibilityResponse,
+    CreatorProfileMediaInput,
+    CreatorProfileMediaResponse,
     CreatorProfileUpdate,
     CreatorSelfResponse,
     CreatorUsernameAvailabilityResponse,
@@ -175,7 +177,61 @@ async def self_response(db: Db, profile: CreatorProfile) -> CreatorSelfResponse:
             and verification.status.value == "pending"
             else None
         ),
+        profile_media=[
+            CreatorProfileMediaResponse(
+                kind=row.kind,
+                media_asset_id=row.media_asset_id,
+                delivery_path=f"/media/profile/{profile.id}/{row.kind}",
+                focal_x=row.focal_x,
+                focal_y=row.focal_y,
+            )
+            for row in await service.profile_media(db, profile.id)
+        ],
     )
+
+
+@router.put("/me/media/{kind}", response_model=CreatorProfileMediaResponse)
+async def update_own_profile_media(
+    kind: str,
+    payload: CreatorProfileMediaInput,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> CreatorProfileMediaResponse:
+    await require_creator_registration(db, request, identity[0])
+    profile = await service.profile_for_user(db, identity[0].id)
+    if profile is None:
+        raise HTTPException(404, "Creator application not found")
+    try:
+        row = await service.set_profile_media(
+            db, profile, identity[0].id, kind=kind, **payload.model_dump()
+        )
+        await db.commit()
+        return CreatorProfileMediaResponse(
+            kind=row.kind,
+            media_asset_id=row.media_asset_id,
+            delivery_path=f"/media/profile/{profile.id}/{row.kind}",
+            focal_x=row.focal_x,
+            focal_y=row.focal_y,
+        )
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/me/media/{kind}")
+async def delete_own_profile_media(
+    kind: str, request: Request, identity: CurrentIdentity, db: Db
+) -> dict[str, bool]:
+    await require_creator_registration(db, request, identity[0])
+    if kind not in {"avatar", "cover"}:
+        raise HTTPException(400, "Profile media kind is invalid")
+    profile = await service.profile_for_user(db, identity[0].id)
+    if profile is None:
+        raise HTTPException(404, "Creator application not found")
+    removed = await service.remove_profile_media(db, profile, identity[0].id, kind=kind)
+    await db.commit()
+    return {"removed": removed}
 
 
 @router.post("/me/application", response_model=CreatorSelfResponse)
@@ -364,12 +420,12 @@ async def public_profile(
         display_name=profile.display_name or profile.username,
         bio=profile.bio if compliance_allowed else None,
         avatar_reference=(
-            safe_public_profile_media_reference(profile.avatar_reference)
+            next((f"/media/profile/{profile.id}/avatar" for row in await service.profile_media(db, profile.id) if row.kind == "avatar"), safe_public_profile_media_reference(profile.avatar_reference))
             if compliance_allowed
             else None
         ),
         cover_reference=(
-            safe_public_profile_media_reference(profile.cover_reference)
+            next((f"/media/profile/{profile.id}/cover" for row in await service.profile_media(db, profile.id) if row.kind == "cover"), safe_public_profile_media_reference(profile.cover_reference))
             if compliance_allowed
             else None
         ),

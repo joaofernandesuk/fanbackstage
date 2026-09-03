@@ -25,6 +25,8 @@ type PrivateRequest = {
   minimum_charge_minor: number;
   currency: string;
   expires_at: string;
+  invitation_status: string;
+  invited_viewer_label: string | null;
 };
 
 function formatMoney(amountMinor: number, currency: string) {
@@ -111,6 +113,10 @@ export function LiveStudio() {
 
 
   async function resolvePrivateRequest(request: PrivateRequest, action: "accept" | "decline") {
+    if (action === "accept" && request.mode === "two_to_one" && request.invitation_status !== "accepted") {
+      setMessage(`Waiting for ${request.invited_viewer_label ?? "the invited fan"} to accept before this request can proceed.`);
+      return;
+    }
     try {
       await api(`/live/private-requests/${request.id}/${action}`, { method: "POST" });
       setPrivateRequests((current) => current.filter((item) => item.id !== request.id));

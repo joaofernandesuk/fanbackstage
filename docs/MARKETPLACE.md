@@ -22,6 +22,7 @@ Each creator can operate a storefront for permitted physical and digital goods.
 - Physical and digital fulfilment are distinct flows.
 - Public listing photos use creator-owned, approved `safe_public` display derivatives dedicated to marketplace presentation. An asset already attached to content, a Story, a feed post, or a message cannot be reused as listing media; attachment, public projection, and derivative delivery all enforce this boundary so a listing cannot bypass another domain's access policy.
 - Public listing responses project only server-issued derivative delivery paths plus the eligible seller's public identity. Original storage keys and demo/persona fallback images are never marketplace business data.
+- Creator Studio uses the same listing commands for draft creation, permitted draft edits, review submission, and deactivation. The owned-listing projection includes only the creator's media asset identifiers needed to preserve selections while editing; public projections never include those identifiers.
 
 
 ## 12.2 Creator address privacy

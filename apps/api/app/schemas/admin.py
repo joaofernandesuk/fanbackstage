@@ -1,10 +1,15 @@
 from pydantic import BaseModel, Field
 
-from app.models.content import MediaAudience
+from app.models.content import MediaAudience, ModerationStatus
 
 
 class MediaAudienceUpdate(BaseModel):
     audience: MediaAudience
+
+
+class MediaModerationInput(BaseModel):
+    status: ModerationStatus
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class CreatorApplicationDecisionInput(BaseModel):

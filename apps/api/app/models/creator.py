@@ -3,7 +3,18 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -62,6 +73,28 @@ class CreatorProfile(UUIDPrimaryKey, Timestamped, Base):
     links: Mapped[list["CreatorSocialLink"]] = relationship(
         cascade="all, delete-orphan", lazy="selectin"
     )
+
+
+class CreatorProfileMedia(UUIDPrimaryKey, Timestamped, Base):
+    """One creator-owned, moderated image assigned to a public profile surface."""
+
+    __tablename__ = "creator_profile_media"
+    __table_args__ = (
+        UniqueConstraint("creator_profile_id", "kind", name="uq_creator_profile_media_kind"),
+        UniqueConstraint("media_asset_id", name="uq_creator_profile_media_asset"),
+        CheckConstraint("kind IN ('avatar', 'cover')", name="ck_creator_profile_media_kind"),
+        CheckConstraint("focal_x >= 0 AND focal_x <= 1", name="ck_creator_profile_media_focal_x"),
+        CheckConstraint("focal_y >= 0 AND focal_y <= 1", name="ck_creator_profile_media_focal_y"),
+    )
+    creator_profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="CASCADE"), index=True
+    )
+    media_asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16))
+    focal_x: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    focal_y: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
 
 
 class CreatorVerification(UUIDPrimaryKey, Timestamped, Base):

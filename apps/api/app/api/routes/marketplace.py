@@ -17,6 +17,7 @@ from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.groups import GroupPermission
 from app.models.marketplace import (
     MarketplaceListing,
+    MarketplaceListingMedia,
     MarketplaceListingStatus,
     MarketplaceOrder,
     MarketplaceTrackingEvent,
@@ -29,8 +30,10 @@ from app.schemas.marketplace import (
     MarketplaceListingCreate,
     MarketplaceListingMediaResponse,
     MarketplaceListingResponse,
+    MarketplaceListingUpdate,
     MarketplaceOrderReasonInput,
     MarketplaceOrderResponse,
+    MarketplaceOwnedListingResponse,
     MarketplaceSellerResponse,
     MarketplaceShipmentInput,
     MarketplaceShippingAddressResponse,
@@ -192,8 +195,10 @@ async def create_managed_listing(
     return await _create(payload, identity, db, creator_id)
 
 
-@router.get("/listings/mine", response_model=list[MarketplaceListingResponse])
-async def my_listings(identity: CurrentIdentity, db: Db) -> list[MarketplaceListingResponse]:
+@router.get("/listings/mine", response_model=list[MarketplaceOwnedListingResponse])
+async def my_listings(
+    identity: CurrentIdentity, db: Db
+) -> list[MarketplaceOwnedListingResponse]:
     creator = await approved_creator(db, identity[0])
     rows = (
         await db.scalars(
@@ -202,7 +207,18 @@ async def my_listings(identity: CurrentIdentity, db: Db) -> list[MarketplaceList
             .order_by(MarketplaceListing.created_at.desc())
         )
     ).all()
-    return [listing_response(row) for row in rows]
+    responses: list[MarketplaceOwnedListingResponse] = []
+    for row in rows:
+        response = MarketplaceOwnedListingResponse(**listing_response(row).model_dump())
+        response.media_asset_ids = list(
+            await db.scalars(
+                select(MarketplaceListingMedia.media_asset_id)
+                .where(MarketplaceListingMedia.listing_id == row.id)
+                .order_by(MarketplaceListingMedia.position)
+            )
+        )
+        responses.append(response)
+    return responses
 
 
 @router.post("/listings/{listing_id}/submit", response_model=MarketplaceListingResponse)
@@ -218,6 +234,46 @@ async def submit_listing(
     except service.MarketplaceError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/listings/{listing_id}", response_model=MarketplaceListingResponse)
+async def update_listing(
+    listing_id: UUID,
+    payload: MarketplaceListingUpdate,
+    request: Request,
+    identity: CurrentIdentity,
+    db: Db,
+) -> MarketplaceListingResponse:
+    await require_marketplace_authoring(db, request, identity[0])
+    creator = await approved_creator(db, identity[0])
+    try:
+        listing = await service.update_listing(
+            db,
+            identity[0],
+            listing_id=listing_id,
+            creator_id=creator.id,
+            **payload.model_dump(),
+        )
+        await db.commit()
+        return listing_response(listing)
+    except (PermissionError, service.MarketplaceError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
+
+
+@router.post("/listings/{listing_id}/deactivate", response_model=MarketplaceListingResponse)
+async def deactivate_listing(
+    listing_id: UUID, request: Request, identity: CurrentIdentity, db: Db
+) -> MarketplaceListingResponse:
+    await require_marketplace_authoring(db, request, identity[0])
+    creator = await approved_creator(db, identity[0])
+    try:
+        listing = await service.deactivate_listing(db, identity[0], listing_id, creator.id)
+        await db.commit()
+        return listing_response(listing)
+    except (PermissionError, service.MarketplaceError) as exc:
+        await db.rollback()
+        raise HTTPException(403 if isinstance(exc, PermissionError) else 400, str(exc)) from exc
 
 
 @router.get("/listings", response_model=list[MarketplaceListingResponse])

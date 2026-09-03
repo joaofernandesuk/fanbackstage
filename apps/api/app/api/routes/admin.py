@@ -39,7 +39,11 @@ from app.models.trust_safety import (
 )
 from app.permissions.policies import Permission, authorize
 from app.referrals import service as referral_service
-from app.schemas.admin import CreatorApplicationDecisionInput, MediaAudienceUpdate
+from app.schemas.admin import (
+    CreatorApplicationDecisionInput,
+    MediaAudienceUpdate,
+    MediaModerationInput,
+)
 from app.schemas.auth import MessageResponse
 from app.schemas.marketplace import (
     MarketplaceHoldPolicyInput,
@@ -81,6 +85,25 @@ async def classify_media_audience(
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/media-assets/{asset_id}/moderation")
+async def moderate_media_asset(
+    asset_id: UUID,
+    payload: MediaModerationInput,
+    identity: CurrentIdentity,
+    db: Db,
+) -> dict:
+    authorize(identity[0], Permission.MODERATION_ACCESS)
+    try:
+        asset = await media_service.moderate_asset(
+            db, identity[0], asset_id, payload.status, payload.reason
+        )
+        await db.commit()
+        return {"id": str(asset.id), "moderation_status": asset.moderation_status.value}
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/notifications/deliveries")

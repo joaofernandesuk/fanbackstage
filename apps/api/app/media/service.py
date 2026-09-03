@@ -8,7 +8,7 @@ from app.audit.service import record_event
 from app.core.config import get_settings
 from app.creators.service import resolve_creator_compliance_eligibility
 from app.media.storage import StorageProvider, storage_provider
-from app.models.content import MediaAsset, MediaAudience, MediaStatus, MediaType
+from app.models.content import MediaAsset, MediaAudience, MediaStatus, MediaType, ModerationStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.identity import User
 from app.permissions.policies import Permission, authorize
@@ -60,6 +60,27 @@ async def classify_audience(
         metadata={"previous": previous.value, "audience": audience.value},
     )
     return asset, True
+
+
+async def moderate_asset(
+    db: AsyncSession, actor: User, asset_id: UUID, status: ModerationStatus, reason: str
+) -> MediaAsset:
+    authorize(actor, Permission.MODERATION_ACCESS)
+    if status not in {ModerationStatus.approved, ModerationStatus.rejected}:
+        raise ValueError("Media moderation decision is invalid")
+    asset = await db.scalar(select(MediaAsset).where(MediaAsset.id == asset_id).with_for_update())
+    if asset is None or asset.status is not MediaStatus.ready:
+        raise ValueError("Ready media asset not found")
+    asset.moderation_status = status
+    await record_event(
+        db,
+        f"media.{status.value}",
+        actor_user_id=actor.id,
+        target_type="media_asset",
+        target_id=str(asset.id),
+        metadata={"reason": reason},
+    )
+    return asset
 
 
 async def begin_upload(

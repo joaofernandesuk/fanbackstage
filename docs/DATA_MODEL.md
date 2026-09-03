@@ -113,6 +113,8 @@ requested -> review/queued -> processing -> paid
 
 ## Cross-domain invariants
 
+`creator_profile_media` assigns at most one creator-owned, ready, approved `safe_public` image to each avatar or cover slot and stores bounded focal coordinates. Public delivery resolves only the processed display derivative; it never promotes or exposes the original object. Private 2-to-1 requests persist an explicit invitation state and response timestamp. `live_goals.starts_at` is the immutable query baseline for ledger-derived progress after a creator reset.
+
 # 44. Critical Acceptance Tests / Business Invariants
 
 - Creator A joins Group X at 50/50. Group default later becomes 30/70. Creator A still settles at 50/50 until accepting a new version.

@@ -16,6 +16,7 @@ class UploadResponse(BaseModel):
     status: str
     media_type: str | None = None
     upload_url: str | None = None
+    display_path: str | None = None
 
 
 class GalleryCreate(BaseModel):

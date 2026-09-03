@@ -180,6 +180,51 @@ async def listing(db, creator, user, *, shipping: int) -> MarketplaceListing:
     return row
 
 
+@pytest.mark.asyncio
+async def test_creator_listing_edit_and_deactivate_follow_authoritative_lifecycle(db_session):
+    owner, profile = await approved_creator(db_session, "listing-author@example.com")
+    draft = await marketplace.create_listing(
+        db_session,
+        owner,
+        creator_id=profile.id,
+        title="First title",
+        description=None,
+        category="prints",
+        condition="new",
+        quantity_available=2,
+        price_amount_minor=500,
+        currency="EUR",
+        shipping_mode="domestic",
+        origin_country_code="PT",
+        shipping_charged_minor=100,
+        media_asset_ids=[],
+    )
+    updated = await marketplace.update_listing(
+        db_session,
+        owner,
+        listing_id=draft.id,
+        creator_id=profile.id,
+        title="Revised title",
+        description="A saved draft",
+        category="prints",
+        condition="like_new",
+        quantity_available=3,
+        price_amount_minor=650,
+        currency="EUR",
+        shipping_mode="worldwide",
+        origin_country_code="PT",
+        shipping_charged_minor=150,
+        media_asset_ids=[],
+    )
+    assert updated.title == "Revised title" and updated.price_amount_minor == 650
+    updated.status = MarketplaceListingStatus.published
+    updated.moderation_status = ModerationStatus.approved
+    await marketplace.deactivate_listing(db_session, owner, updated.id, profile.id)
+    assert updated.status is MarketplaceListingStatus.paused
+    with pytest.raises(marketplace.MarketplaceError, match="active listing"):
+        await marketplace.deactivate_listing(db_session, owner, updated.id, profile.id)
+
+
 async def allowance(db, amount: int, country_code: str = "PT") -> MarketplaceShippingAllowance:
     existing = await db.scalar(
         select(MarketplaceShippingAllowance).where(

@@ -25,6 +25,7 @@ from app.models.content import (
 from app.models.creator import (
     CreatorKycWebhookEvent,
     CreatorProfile,
+    CreatorProfileMedia,
     CreatorVerification,
     StagingCreatorKycSandboxEvent,
 )
@@ -178,6 +179,7 @@ __all__ = [
     "CreatorKycWebhookEvent",
     "CreatorLiveSettings",
     "CreatorProfile",
+    "CreatorProfileMedia",
     "CreatorVerification",
     "DiscoveryConfig",
     "DiscoveryEvent",
@@ -275,9 +277,9 @@ __all__ = [
     "SessionParticipant",
     "SignupAttribution",
     "SiteSettingsVersion",
-    "StagingPaymentSandboxEvent",
-    "StagingCreatorKycSandboxEvent",
     "SocialReport",
+    "StagingCreatorKycSandboxEvent",
+    "StagingPaymentSandboxEvent",
     "Story",
     "StoryReaction",
     "Subscription",

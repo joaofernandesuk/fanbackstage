@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.content import Gallery, GalleryItem, MediaAsset, VideoContent
+from app.models.creator import CreatorProfileMedia
 from app.models.marketplace import MarketplaceListingMedia
 from app.models.messaging import MessageAttachment
 from app.models.social import FeedPostMedia
@@ -63,6 +64,12 @@ async def media_asset_contexts(
     contexts.update(
         ("story", story_id)
         for story_id in await db.scalars(select(Story.id).where(Story.media_asset_id == asset_id))
+    )
+    contexts.update(
+        ("profile", profile_media_id)
+        for profile_media_id in await db.scalars(
+            select(CreatorProfileMedia.id).where(CreatorProfileMedia.media_asset_id == asset_id)
+        )
     )
     contexts.update(
         ("marketplace", listing_id)

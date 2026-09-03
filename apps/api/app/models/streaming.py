@@ -57,6 +57,13 @@ class PrivateRequestStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 
+class PrivateInvitationStatus(str, enum.Enum):
+    not_required = "not_required"
+    pending = "pending"
+    accepted = "accepted"
+    declined = "declined"
+
+
 class PrivateSessionStatus(str, enum.Enum):
     awaiting_payment_authorization = "awaiting_payment_authorization"
     ready = "ready"
@@ -297,6 +304,7 @@ class LiveGoal(UUIDPrimaryKey, Timestamped, Base):
     target_amount_minor: Mapped[int] = mapped_column(Integer)
     currency: Mapped[str] = mapped_column(String(3))
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -462,6 +470,13 @@ class PrivateSessionRequest(UUIDPrimaryKey, Timestamped, Base):
     invited_user_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), index=True
     )
+    invitation_status: Mapped[PrivateInvitationStatus] = mapped_column(
+        Enum(PrivateInvitationStatus, name="private_invitation_status"),
+        default=PrivateInvitationStatus.not_required,
+        nullable=False,
+        index=True,
+    )
+    invitation_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     mode: Mapped[PrivateSessionMode] = mapped_column(
         Enum(PrivateSessionMode, name="private_session_mode")
     )

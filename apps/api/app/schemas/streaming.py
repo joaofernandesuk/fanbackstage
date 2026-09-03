@@ -111,6 +111,10 @@ class LiveGoalInput(BaseModel):
     target_amount_minor: int = Field(ge=1)
 
 
+class LiveGoalUpdate(LiveGoalInput):
+    active: bool
+
+
 class LiveGoalResponse(LiveGoalInput):
     id: UUID
     currency: str
@@ -169,6 +173,13 @@ class PrivateRequestResponse(BaseModel):
     minimum_charge_minor: int
     currency: str
     expires_at: datetime
+    invitation_status: str = "not_required"
+    invited_viewer_label: str | None = None
+
+
+class PrivateInviteCandidateResponse(BaseModel):
+    user_id: UUID
+    label: str
 
 
 class PrivateSessionResponse(BaseModel):
@@ -181,6 +192,7 @@ class PrivateSessionResponse(BaseModel):
     currency: str
     billable_seconds: int
     payment_attempt_id: UUID | None
+    participant_role: str
 
 
 class ProviderTokenResponse(BaseModel):

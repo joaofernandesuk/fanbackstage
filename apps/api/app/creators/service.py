@@ -19,12 +19,23 @@ from app.audit.service import record_event
 from app.compliance.policy import effective_policy_for_country
 from app.compliance.types import JurisdictionSignals, resolve_jurisdiction_candidates
 from app.core.config import get_settings
+from app.media.contexts import require_media_context_available
 from app.models.compliance import CountryRegistry
+from app.models.content import (
+    DerivativeType,
+    MediaAsset,
+    MediaAudience,
+    MediaDerivative,
+    MediaStatus,
+    MediaType,
+    ModerationStatus,
+)
 from app.models.creator import (
     CreatorCategory,
     CreatorKycWebhookEvent,
     CreatorLanguage,
     CreatorProfile,
+    CreatorProfileMedia,
     CreatorSocialLink,
     CreatorStatus,
     CreatorStatusHistory,
@@ -66,6 +77,108 @@ TRANSITIONS = {
     CreatorStatus.suspended: {CreatorStatus.approved, CreatorStatus.disabled},
     CreatorStatus.disabled: {CreatorStatus.draft},
 }
+
+
+async def profile_media(db: AsyncSession, creator_id: UUID) -> list[CreatorProfileMedia]:
+    return list(
+        await db.scalars(
+            select(CreatorProfileMedia)
+            .where(CreatorProfileMedia.creator_profile_id == creator_id)
+            .order_by(CreatorProfileMedia.kind)
+        )
+    )
+
+
+async def set_profile_media(
+    db: AsyncSession,
+    profile: CreatorProfile,
+    actor_user_id: UUID,
+    *,
+    kind: str,
+    media_asset_id: UUID,
+    focal_x: float,
+    focal_y: float,
+) -> CreatorProfileMedia:
+    if kind not in {"avatar", "cover"}:
+        raise ValueError("Profile media kind is invalid")
+    asset = await db.scalar(
+        select(MediaAsset)
+        .where(
+            MediaAsset.id == media_asset_id,
+            MediaAsset.owner_creator_id == profile.id,
+            MediaAsset.media_type == MediaType.image,
+            MediaAsset.status == MediaStatus.ready,
+            MediaAsset.moderation_status == ModerationStatus.approved,
+            MediaAsset.audience == MediaAudience.safe_public,
+            MediaAsset.deleted_at.is_(None),
+            select(MediaDerivative.id).where(
+                MediaDerivative.media_asset_id == MediaAsset.id,
+                MediaDerivative.derivative_type == DerivativeType.display,
+                MediaDerivative.status == MediaStatus.ready,
+            ).exists(),
+        )
+        .with_for_update()
+    )
+    if asset is None:
+        raise ValueError("Profile media must be a ready, approved, safe-public image")
+    current = await db.scalar(
+        select(CreatorProfileMedia)
+        .where(
+            CreatorProfileMedia.creator_profile_id == profile.id,
+            CreatorProfileMedia.kind == kind,
+        )
+        .with_for_update()
+    )
+    await require_media_context_available(
+        db,
+        asset.id,
+        context_type="profile",
+        context_id=current.id if current and current.media_asset_id == asset.id else None,
+    )
+    if current is None:
+        current = CreatorProfileMedia(
+            creator_profile_id=profile.id, media_asset_id=asset.id, kind=kind
+        )
+        db.add(current)
+        await db.flush()
+    else:
+        current.media_asset_id = asset.id
+    current.focal_x = focal_x
+    current.focal_y = focal_y
+    await record_event(
+        db,
+        "creator.profile_media_updated",
+        actor_user_id=actor_user_id,
+        target_type="creator_profile",
+        target_id=str(profile.id),
+        metadata={"kind": kind, "media_asset_id": str(asset.id)},
+    )
+    return current
+
+
+async def remove_profile_media(
+    db: AsyncSession, profile: CreatorProfile, actor_user_id: UUID, *, kind: str
+) -> bool:
+    row = await db.scalar(
+        select(CreatorProfileMedia)
+        .where(
+            CreatorProfileMedia.creator_profile_id == profile.id,
+            CreatorProfileMedia.kind == kind,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        return False
+    await db.delete(row)
+    await record_event(
+        db,
+        "creator.profile_media_removed",
+        actor_user_id=actor_user_id,
+        target_type="creator_profile",
+        target_id=str(profile.id),
+        metadata={"kind": kind},
+    )
+    return True
 
 
 @dataclass(frozen=True)

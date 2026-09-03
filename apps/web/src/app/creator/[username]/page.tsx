@@ -20,7 +20,7 @@ import { PrivateSessionRequest } from "../../../components/private-session-reque
 import { StoryRailSource } from "../../../components/story-experience";
 import styles from "../../../components/social-surface.module.css";
 import { SubscriptionOptions } from "../../../components/subscription-options";
-import { api, ApiError } from "../../../lib/api";
+import { api, apiMediaUrl, ApiError } from "../../../lib/api";
 import { marketplaceListingMediaUrl } from "../../../lib/content-api";
 import { mediaForUsername } from "../../../lib/demo-personas";
 import { formatMoney, type MarketplaceListing } from "../../../lib/public-api";
@@ -200,6 +200,12 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
   }
 
   const coverSource = creator.cover_reference || visual?.cover || "/images/fanbackstage-hero.png";
+  const resolvedCoverSource = creator.cover_reference?.startsWith("/media/")
+    ? apiMediaUrl(creator.cover_reference)
+    : coverSource;
+  const resolvedAvatarSource = creator.avatar_reference?.startsWith("/media/")
+    ? apiMediaUrl(creator.avatar_reference)
+    : creator.avatar_reference;
   const photoCount = content.filter((item) => item.content_type !== "video").length;
   const videoCount = content.filter((item) => item.content_type === "video").length;
 
@@ -207,10 +213,14 @@ export default function CreatorPage({ params }: { params: Promise<{ username: st
     <div className={styles.profileShell}>
       <section className={styles.profileHero} aria-labelledby="creator-name">
         <div className={styles.profileCover}>
-          <Image alt={`${creator.display_name} cover`} fill priority sizes="(max-width: 1200px) 100vw, 1180px" src={coverSource} />
+          {resolvedCoverSource.startsWith("http") ? (
+            <img alt={`${creator.display_name} cover`} src={resolvedCoverSource} style={{ height: "100%", inset: 0, position: "absolute", width: "100%" }} />
+          ) : (
+            <Image alt={`${creator.display_name} cover`} fill priority sizes="(max-width: 1200px) 100vw, 1180px" src={resolvedCoverSource} />
+          )}
         </div>
         <div className={styles.profileInfo}>
-          <CreatorAvatar className={styles.profileAvatar} displayName={creator.display_name} size={130} username={creator.username} />
+          <CreatorAvatar className={styles.profileAvatar} displayName={creator.display_name} size={130} source={resolvedAvatarSource} username={creator.username} />
           <div className={styles.profileIdentity}>
             <div className={styles.profileNameRow}>
               <h1 id="creator-name">{creator.display_name}</h1>

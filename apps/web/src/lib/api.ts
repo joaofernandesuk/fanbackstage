@@ -1,5 +1,9 @@
 const baseUrl = process.env.NEXT_PUBLIC_FANBACKSTAGE_API_URL ?? "http://localhost:8000";
 
+export function apiMediaUrl(path: string): string {
+  return `${baseUrl}/api/v1${path}`;
+}
+
 export type CurrentUser = {
   id: string;
   email: string;

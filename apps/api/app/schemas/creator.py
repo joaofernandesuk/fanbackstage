@@ -30,6 +30,20 @@ class CreatorProfileUpdate(BaseModel):
     is_public: bool | None = None
 
 
+class CreatorProfileMediaInput(BaseModel):
+    media_asset_id: UUID
+    focal_x: float = Field(default=0.5, ge=0, le=1)
+    focal_y: float = Field(default=0.5, ge=0, le=1)
+
+
+class CreatorProfileMediaResponse(BaseModel):
+    kind: str
+    media_asset_id: UUID
+    delivery_path: str
+    focal_x: float
+    focal_y: float
+
+
 class CreatorUsernameAvailabilityResponse(BaseModel):
     username: str
     available: bool
@@ -80,6 +94,7 @@ class CreatorSelfResponse(BaseModel):
     staging_kyc_sandbox_available: bool
     staging_kyc_session_reference: str | None = None
     staging_kyc_verification_id: UUID | None = None
+    profile_media: list[CreatorProfileMediaResponse] = Field(default_factory=list)
 
 
 class StagingKycOutcomeInput(BaseModel):

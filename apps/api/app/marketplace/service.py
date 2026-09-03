@@ -6,7 +6,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import case, exists, func, select
+from sqlalchemy import case, delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -474,6 +474,141 @@ async def submit_listing_for_review(
         target_type="marketplace_listing",
         target_id=str(listing.id),
         metadata={"owner_creator_id": str(creator_id)},
+    )
+    return listing
+
+
+async def update_listing(
+    db: AsyncSession,
+    actor: User,
+    *,
+    listing_id: UUID,
+    creator_id: UUID,
+    **values,
+) -> MarketplaceListing:
+    listing = await db.scalar(
+        select(MarketplaceListing)
+        .where(
+            MarketplaceListing.id == listing_id,
+            MarketplaceListing.owner_creator_id == creator_id,
+        )
+        .with_for_update()
+    )
+    if listing is None:
+        raise MarketplaceError("Marketplace listing not found")
+    if listing.status not in {
+        MarketplaceListingStatus.draft,
+        MarketplaceListingStatus.paused,
+        MarketplaceListingStatus.rejected,
+    }:
+        raise MarketplaceError("Only draft, paused, or rejected listings can be edited")
+    from app.models.marketplace import MarketplaceCondition, MarketplaceShippingMode
+
+    title = values["title"].strip()
+    category = values["category"].strip().lower()
+    media_asset_ids = values["media_asset_ids"]
+    if not title or not category:
+        raise MarketplaceError("Listing title and category are required")
+    if (
+        values["quantity_available"] < 0
+        or values["price_amount_minor"] <= 0
+        or values["shipping_charged_minor"] < 0
+    ):
+        raise MarketplaceError("Listing stock, price, or shipping charge is invalid")
+    if len(media_asset_ids) != len(set(media_asset_ids)) or len(media_asset_ids) > 12:
+        raise MarketplaceError("Listing media must be unique and limited to 12 assets")
+    try:
+        condition = MarketplaceCondition(values["condition"])
+        shipping_mode = MarketplaceShippingMode(values["shipping_mode"])
+    except ValueError as exc:
+        raise MarketplaceError("Listing condition or shipping mode is invalid") from exc
+    if media_asset_ids:
+        assets = list(
+            await db.scalars(
+                select(MediaAsset)
+                .join(MediaDerivative, MediaDerivative.media_asset_id == MediaAsset.id)
+                .where(
+                    MediaAsset.id.in_(media_asset_ids),
+                    MediaAsset.owner_creator_id == creator_id,
+                    MediaAsset.status == MediaStatus.ready,
+                    MediaAsset.deleted_at.is_(None),
+                    MediaAsset.moderation_status == ModerationStatus.approved,
+                    MediaAsset.audience == MediaAudience.safe_public,
+                    MediaDerivative.derivative_type == DerivativeType.display,
+                    MediaDerivative.status == MediaStatus.ready,
+                )
+            )
+        )
+        if len({asset.id for asset in assets}) != len(media_asset_ids):
+            raise MarketplaceError(
+                "Listing media must be approved, safe-public, creator-owned, and dedicated to marketplace display"
+            )
+        for asset_id in media_asset_ids:
+            current_link = await db.scalar(
+                select(MarketplaceListingMedia).where(
+                    MarketplaceListingMedia.listing_id == listing.id,
+                    MarketplaceListingMedia.media_asset_id == asset_id,
+                )
+            )
+            await require_media_context_available(
+                db,
+                asset_id,
+                context_type="marketplace",
+                context_id=listing.id if current_link else None,
+            )
+    await db.execute(
+        delete(MarketplaceListingMedia).where(MarketplaceListingMedia.listing_id == listing.id)
+    )
+    listing.title = title
+    listing.description = values["description"].strip() if values["description"] else None
+    listing.category = category
+    listing.condition = condition
+    listing.quantity_available = values["quantity_available"]
+    listing.price_amount_minor = values["price_amount_minor"]
+    listing.currency = currency_code(values["currency"])
+    listing.shipping_mode = shipping_mode
+    listing.origin_country_code = _country_code(values["origin_country_code"], "Origin country")
+    listing.shipping_charged_minor = values["shipping_charged_minor"]
+    db.add_all(
+        MarketplaceListingMedia(
+            listing_id=listing.id, media_asset_id=asset_id, position=position
+        )
+        for position, asset_id in enumerate(media_asset_ids)
+    )
+    listing.status = MarketplaceListingStatus.draft
+    listing.moderation_status = ModerationStatus.not_reviewed
+    await record_event(
+        db,
+        "marketplace.listing_updated",
+        actor_user_id=actor.id,
+        target_type="marketplace_listing",
+        target_id=str(listing.id),
+    )
+    return listing
+
+
+async def deactivate_listing(
+    db: AsyncSession, actor: User, listing_id: UUID, creator_id: UUID
+) -> MarketplaceListing:
+    listing = await db.scalar(
+        select(MarketplaceListing)
+        .where(
+            MarketplaceListing.id == listing_id,
+            MarketplaceListing.owner_creator_id == creator_id,
+        )
+        .with_for_update()
+    )
+    if listing is None:
+        raise MarketplaceError("Marketplace listing not found")
+    if listing.status not in {MarketplaceListingStatus.published, MarketplaceListingStatus.sold_out}:
+        raise MarketplaceError("Only an active listing can be deactivated")
+    listing.status = MarketplaceListingStatus.paused
+    await record_event(
+        db,
+        "marketplace.listing_deactivated",
+        actor_user_id=actor.id,
+        target_type="marketplace_listing",
+        target_id=str(listing.id),
     )
     return listing
 

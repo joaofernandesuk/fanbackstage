@@ -596,7 +596,7 @@ export function CreatorOnboarding() {
             Fan adult access remains a separate check.
           </p>
           <p className={styles.mediaBoundary}>
-            Avatar and cover editing will appear only after the media domain exposes an owner-authorised profile association command.
+            After approval, manage avatar and cover images from the Creator Studio media library.
           </p>
           {canRunDevelopmentVerification(profile) && (
             <div className={styles.nextAction}>
