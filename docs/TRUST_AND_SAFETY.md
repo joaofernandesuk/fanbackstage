@@ -124,6 +124,10 @@ Compliance audit includes template/country/feature revisions, verification start
 - Sensitive actions may require re-authentication.
 - Backup and restore testing.
 
+## Private Live peek safety
+
+Paid private peeks remain subject to current Live compliance, blocks and durable participant removal. Peek tokens are subscribe-only and cannot publish data, camera or microphone; private chat and private-session identifiers are not exposed on the public activity surface. The primary purchaser must see the creator's snapshotted peek choice before payment authorization. Revocation or a cached unauthorized join removes the peeker without mutating the private session's financial truth.
+
 ## Phase 11 discovery safety
 
 Discovery serves only approved public creators and currently eligible public objects. It excludes suspended/removed/moderated source state before ranking and relies on the existing safe preview resolver for locked media. Responses never contain original-media URLs, storage keys, private-message attachments, KYC/location fields, or entitlement internals. Public search is rate-limited to reduce enumeration and all dynamic filters are validated server-side.

@@ -4,7 +4,9 @@ Public Live, private sessions, 2-to-1/multi-party rooms, realtime effects, billi
 
 ## Phase 7 public-live/private-session policy
 
-Private-session requests may queue while a creator is public live, but the creator cannot accept or start one until the public room has been explicitly ended. FanBackstage does not automatically end a public room, pause it, or move viewers to a holding state. A private request remains queued and the creator dashboard must state that ending the public live is required before acceptance. A private-break / be-right-back mode is deferred to a future streaming enhancement.
+Private-session requests may queue and be creator-accepted while a public room remains live. Acceptance creates the payment authorization but does not pause public delivery. Only verified payment authorization moves the private session to `ready`, atomically marks the durable public room as paused, and lets the creator and named purchaser enter the private provider room. Waiting public viewers see a creator-branded holding surface; when the private room reaches its terminal provider-confirmed state, the same public room is unpaused and resumes. Ending the public room is not part of this handoff.
+
+Creators may allow or disallow paid peeks for future private sessions. The platform-wide active flag, price, currency and commission belong to an audited admin policy and are snapshotted when the creator accepts the private request. The primary purchaser receives a clear peek disclosure before authorizing payment. A confirmed peeker receives a short-lived subscribe-only token for the private video: no publishing, camera, microphone, private chat, private identifiers, or billing authority. Cached or unauthorized peeker joins are removed through the durable provider-control outbox. Private-session financial terms and settled history remain immutable when the public room resumes.
 
 Public transport uses short-lived LiveKit tokens issued only after FanBackstage's PostgreSQL authorization decision. Creator tokens may publish; public-viewer tokens are subscribe-only. Durable chat and REST polling remain available if realtime transport degrades. Public-recording requests are persisted for provider egress processing; private sessions deliberately have no recording command and remain unrecorded by default. Live report context requires moderation permission and is audited.
 
@@ -18,7 +20,19 @@ Live reactions use a small server enum and aggregate room/type counters under an
 
 Live reporting resolves through the central Trust & Safety target snapshot and report queue. Participant removal is a central enforcement action that audits the actor and enqueues the existing durable LiveKit `remove_participant` control. The creator cannot be removed as a participant; room termination is the explicit creator-level control. Neither report handling nor removal mutates settled ledger history.
 
-Creator Studio configures the server-owned tip menu and ledger-derived Live goals through authenticated creator commands. Resetting a goal advances its contribution baseline; the client cannot write current progress. A 2-to-1 request can name only an eligible follower returned by a bounded, masked candidate projection. The invited fan must explicitly accept before creator acceptance or payment authorization, and only the sole payer receives the payment-attempt identifier.
+The viewer surface keeps conversation and actions separate. Chat, current-session supporter ranking, goals, and compact canonical activity occupy the right rail. A stage-side action dock opens modal controls for creator bio, follow/favorite, subscriptions, reactions, the platform tip and gift catalogues, server-priced paid requests, creator-priced snapshots, private-session requests, local playback, and Trust & Safety reporting. A full-width scrollable quick-tip rail remains available along the bottom of the stage; its keyboard-accessible tooltip is rendered outside the clipped scroll viewport and opens the same confirmation dialog. The browser submits only catalogue identifiers and never supplies authoritative tip/gift prices or financial outcomes. Confirmed tips, gifts, paid requests, snapshots, and goal completions animate over the video for viewers and the creator. Bounded reaction aggregates animate as ephemeral room moments and remain visible as shared counters without persisting an event for every click.
+
+Live discovery uses a compact, filterable landscape-card grid. On fine-pointer devices, a bounded hover delay may open a muted preview using the normal short-lived, subscribe-only Live authorization path; leaving the card disconnects it immediately. A preview never bypasses audience, age, jurisdiction, KYC, subscription, moderation, or private/VIP authority.
+
+Live commerce charges the viewer through the configured payment provider and confirms every action through the existing payment-attempt and ledger workflow. The Live UI must not present a platform credit balance or create a parallel stored-value wallet unless that separately governed financial product is explicitly introduced.
+
+A paid snapshot freezes the creator's current server-owned price on `LiveCommerceCharge`, uses a distinct immutable `live_snapshot` ledger transaction, and emits one canonical `snapshot` Live event only after verified payment. The browser captures the already-authorized visible frame before payment, releases the local download only after confirmation, and does not upload or expose a protected-media original URL. Creators may disable snapshots or change the price for future charges; historical charges are never recalculated.
+
+VIP mode is a paid group segment inside an otherwise public/follower/subscriber Live room. The creator starts an immutable one-to-five-minute pre-show offer with a title, promised description, goal, fixed buy-in, and a five-to-fifteen-minute duration. Confirmed pre-show captures remain pending creator delivery and do not become revenue until the VIP segment starts. Reaching the goal when the countdown expires starts automatically; a creator may start early with at least one confirmed admission, or may cancel before starting. Cancellation and late capture route through the durable finance refund-requirement workflow. A five-second backend reconciler advances due pre-show and active-show timers even when no browser is connected; API reads perform the same idempotent reconciliation defensively.
+
+Once active, the creator and confirmed buyers retain room authority, new buyers may still join, and non-admitted viewers are removed through the durable LiveKit control outbox. An admitted buyer receives a new provider token only after payment confirmation. Each admission settles once as `live_vip_admission`, emits one canonical `vip_admission` event, and contributes to room goals and supporter ranking. At duration expiry the room returns to its underlying audience mode; ending or moderating the public room also terminates the VIP segment without rewriting financial history.
+
+Creator Studio presents the shared platform tip catalogue as read-only and configures ledger-derived Live goals through authenticated creator commands. Creators cannot add, remove, price, or reorder Live tips or gifts. Resetting a goal advances its contribution baseline; the client cannot write current progress. A 2-to-1 request can name only an eligible follower returned by a bounded, masked candidate projection. The invited fan must explicitly accept before creator acceptance or payment authorization, and only the sole payer receives the payment-attempt identifier.
 
 The server-control JWTs are method-scoped: room deletion receives only `roomCreate`; participant listing/removal receives `roomAdmin` plus the exact room name. Browser tokens never receive either administrative grant.
 
@@ -37,8 +51,8 @@ The real-stack Playwright configuration grants camera/microphone permissions to 
 
 - Free or gated room entry according to creator settings.
 - Realtime chat.
-- Tipping and configurable tip menu.
-- Virtual gifts.
+- Platform-curated, predefined tip shortcuts.
+- Platform-curated virtual gifts.
 - Paid requests where permitted.
 - Private-session request flow and queue.
 - Creator-defined live title, category, tags and schedule.
@@ -71,7 +85,7 @@ Creators should be able to prepare and control a live broadcast through a dedica
 - Camera/microphone device selection and pre-live preview.
 - Stream title, category, tags, thumbnail/cover and audience/access settings.
 - Free, followers-only, subscribers-only or otherwise permitted gated live modes.
-- Tip menu, goals, pinned offers and private-session availability.
+- Read-only platform tip/gift catalogue preview, creator goals, pinned offers and private-session availability.
 - Realtime visual filters and lightweight effects.
 - Beauty/softening controls where technically supported.
 - Background blur/replacement or privacy-friendly masking where supported.
@@ -96,9 +110,9 @@ Use WebRTC where low-latency interactive communication is required and HLS/LL-HL
 
 Tips should be available at creator profile, feed post, image/gallery, video, blog, live, private live, message and other relevant surfaces.
 
-- Preset tip amounts plus custom amount.
-- Creator-configurable live tip menu.
-- Virtual gifts may map to fixed credit/value amounts.
+- Live tips and gifts come from platform-owned, currency-scoped catalogues shared by all eligible creators.
+- Each catalogue item has fixed artwork, ordering, availability, and an authoritative server-side value.
+- Live clients submit catalogue identifiers only; arbitrary client-supplied Live tip amounts are rejected.
 - Tip transactions must be ledger entries with source context.
 - Tips may be refundable/reversible only according to explicit fraud/payment policy; never mutate ledger history.
 
@@ -114,6 +128,14 @@ Gamification is a cross-platform engagement layer spanning profiles, feed, Stori
 ## 19.6 Leaderboards and top supporters
 Creators may enable leaderboards for selected periods such as current Live, day, week, month or campaign.
 - Live supporters.
+
+## 19.7 Creator session intelligence and audience presence
+
+- The active creator surface presents current, peak, and distinct viewer counts, chat and reaction totals, confirmed Live-commerce counts and value, the current audience, and creator-visible top-supporter identities beneath the video.
+- Chat responses include a stable display label. Creator handles are preferred; other accounts receive a non-sensitive stable fan label. Email addresses and other private identifiers are never exposed through Live chat or rankings.
+- Join and leave notices are calculated from bounded polling of durable participant state and remain ephemeral UI notices. They are not permanent canonical Live events, avoiding unbounded activity-feed spam.
+- Creator historical Live analytics reuse durable room, participant, chat, reaction, and ledger-linked canonical event truth. Date ranges are bounded to 366 days and financial results remain currency-separated.
+- When a public room ends, connected viewer surfaces replace the stream with the creator cover and an explicit offline state with profile and live-directory actions.
 - Referral leaderboard.
 - Community participation leaderboard.
 - Creator can disable leaderboards entirely.
@@ -135,6 +157,13 @@ LeaderboardPeriod
 LeaderboardEntry
 Gamification consumes canonical domain events from purchases, subscriptions, Lives, content engagement and referrals. It must not become the source of truth for those domains.
 - Public leaderboard opt-out never removes legitimate private accounting/progress records.
+
+## Live notifications and auditability
+
+Creator-facing Live notifications are projections of authoritative server events, not client clicks. Private-session requests, confirmed tips and gifts, paid snapshots, paid-request decisions, VIP admissions/lifecycle changes, goal completion and financial reversals create idempotent in-app notification intents. Active creators also receive a prominent private-request decision card over their own camera preview, while the durable request remains available in Creator Studio after dismissal or reconnect.
+
+Chat stays in the durable room history and high-volume reactions stay in bounded aggregates; neither creates one permanent inbox notification per interaction. Trust & Safety reports remain in the moderation/audit domain and are not disclosed to the reported participant. This preserves traceability without notification flooding or reporter-retaliation risk.
+
 # Terminal callback safety
 
 LiveKit callbacks are signed and their provider IDs are persisted before private-session state changes. A callback delivered after a session is ending, ended, or settled is retained for replay auditing but is a no-op; it cannot reopen the session, restart billing, or alter the final settlement.

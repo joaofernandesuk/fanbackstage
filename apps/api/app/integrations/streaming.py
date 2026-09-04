@@ -135,7 +135,12 @@ class LiveKitStreamingProvider(StreamingProvider):
             {
                 "iss": settings.livekit_api_key,
                 "sub": identity,
-                "nbf": int(now.timestamp()),
+                # A sleeping VM can resume with its media node briefly behind
+                # the API clock. Backdate only the start boundary; ``exp``
+                # remains capped by current application authority.
+                "nbf": int(
+                    (now - timedelta(seconds=settings.livekit_token_ttl_seconds)).timestamp()
+                ),
                 "exp": int(expires_at.timestamp()),
                 "video": {
                     "room": room_name,
@@ -297,7 +302,9 @@ class LiveKitStreamingProvider(StreamingProvider):
         payload = self._part(
             {
                 "iss": settings.livekit_api_key,
-                "nbf": int(now.timestamp()),
+                "nbf": int(
+                    (now - timedelta(seconds=settings.livekit_token_ttl_seconds)).timestamp()
+                ),
                 "exp": int(
                     (now + timedelta(seconds=settings.livekit_token_ttl_seconds)).timestamp()
                 ),

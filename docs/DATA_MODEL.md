@@ -143,3 +143,12 @@ The Phase 3 financial tables are `ledger_accounts`, `ledger_transactions`, `ledg
 # Phase 11 discovery
 
 `discovery_configs` is an append-oriented versioned ranking configuration. `discovery_hides` is an auditable operational exclusion overlay for otherwise public entities. `discovery_events` stores deduplicated, privacy-minimised discovery analytics. They are derived controls and never replace creator, content, marketplace, live, entitlement, moderation, referral, or ledger truth.
+## Live commerce catalogues
+
+`LiveTipCatalogItem` and `LiveGiftCatalogItem` are platform-owned, currency-scoped catalogue truth. They define the selectable label/artwork and current price offered to all eligible creators. A new Live tip references `LiveTipCatalogItem`; the resulting `LiveCommerceCharge` snapshots amount and currency so later catalogue edits cannot change history. `LiveTipMenuItem` is retained only as legacy reference data for already-created charges and is not creator-editable.
+
+`CreatorLiveSettings.snapshots_enabled` and `snapshot_price_minor` own the creator's current paid-snapshot offer. Each snapshot purchase copies that price and currency into an immutable `LiveCommerceCharge`; the locally generated image is not stored as platform media and no protected original URL is created.
+
+`LiveVipShow` records each immutable paid group-show promise and its explicit `preshow -> awaiting_creator/active -> completed` or `preshow/awaiting_creator -> cancelled` lifecycle. Multiple historical VIP segments may belong to one Live room, but room locking permits only one non-terminal segment at a time. A VIP admission is an ordinary immutable `LiveCommerceCharge` linked to the exact show. Confirmed pre-show payments remain unsettled until activation; cancellation creates `PaymentRefundRequirement` records, while activation produces exactly one `live_vip_admission` ledger transaction and canonical Live event per buyer.
+
+`LiveRoom.active_private_session_id` and `private_paused_at` represent a resumable public-room pause without ending or replacing the room. `PrivateSession.public_live_room_id` links the handoff back to that room. `LivePrivatePeekPolicy` is the current admin-owned offer; `PrivateSession.peeks_allowed`, price, currency and commission fields freeze the accepted session's terms. Each paid viewer has a separate `LiveCommerceCharge.private_session_id`; no editable admission or leaderboard truth is introduced.

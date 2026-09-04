@@ -74,6 +74,7 @@ async def clean_database() -> None:
         await session.execute(
             text(
                 "TRUNCATE live_provider_control_intents, "
+                "live_private_peek_policies, "
                 "staging_creator_kyc_sandbox_events, creator_kyc_webhook_events, "
                 "staging_payment_sandbox_events, payment_webhook_events, "
                 "legal_acceptances, legal_document_versions, legal_documents, "

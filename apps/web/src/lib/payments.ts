@@ -14,8 +14,20 @@ const wait = (milliseconds: number) => new Promise<void>((resolve) => window.set
 export async function completePaymentCheckout(paymentAttemptId: string): Promise<boolean> {
   const checkout = await api<Checkout>(`/payments/${paymentAttemptId}/checkout`);
   if (checkout.action === "development_complete") {
-    await api(`/payments/development/${paymentAttemptId}/complete`, { method: "POST" });
-    return true;
+    let lastFailure: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await api(`/payments/development/${paymentAttemptId}/complete`, { method: "POST" });
+      } catch (caught) {
+        lastFailure = caught;
+      }
+      const current = await api<Checkout>(`/payments/${paymentAttemptId}/checkout`);
+      if (current.status !== "pending") return true;
+      if (attempt < 2) await wait(100 * (attempt + 1));
+    }
+    throw lastFailure instanceof Error
+      ? lastFailure
+      : new Error("The development payment callback did not complete in time.");
   }
   if (checkout.action !== "staging_sandbox_checkout") {
     return false;

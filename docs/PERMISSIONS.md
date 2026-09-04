@@ -25,6 +25,8 @@ delivery state. Notification targets are internal paths only.
 | Role | Capabilities |
 | --- | --- |
 | Viewer / Fan | Discover creators; follow; subscribe; buy PPV; tip; message; join live/private sessions; purchase marketplace items; refer users. |
+
+Private Live peeks require verified purchase and Live compliance. The primary payer and invited participants use named private-session membership; paid peek viewers receive subscribe-only media authority and no private chat/publish authority. Creators control only whether future accepted sessions permit peeks. `financial.configure` owns the platform price/currency/commission policy and every change is audited.
 | Creator / Model | Publish and monetise content; stream; sell products; blog; manage subscribers; receive tips; use promotions; join/leave groups. |
 | Group / Agency Manager | Manage authorised creator profiles, content, messaging, schedules and analytics within explicit delegated permissions. |
 | Moderator | Review reports, content queues, sanctions and verification tasks without unrestricted financial/admin powers. |

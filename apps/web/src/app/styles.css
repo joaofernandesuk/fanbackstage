@@ -196,6 +196,62 @@ article.card {
   margin-bottom: 16px;
 }
 
+.commerce-catalogue-preview {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  margin: 22px 0 28px;
+}
+
+.commerce-catalogue-preview article {
+  align-items: center;
+  background: linear-gradient(135deg, rgb(39 158 255 / 0.08), rgb(236 72 153 / 0.1));
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  display: flex;
+  gap: 11px;
+  padding: 11px;
+}
+
+.commerce-catalogue-preview article > span {
+  display: grid;
+  gap: 3px;
+}
+
+.commerce-catalogue-preview article strong {
+  font-size: 0.78rem;
+}
+
+.commerce-catalogue-preview article small {
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+}
+
+.live-settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0;
+}
+
+.live-settings-tabs button {
+  -webkit-text-fill-color: var(--text-secondary);
+  background: rgb(255 255 255 / 0.045);
+  border: 1px solid var(--border-subtle);
+  box-shadow: none;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  min-height: 38px;
+  padding: 8px 13px;
+}
+
+.live-settings-tabs button[aria-pressed="true"] {
+  -webkit-text-fill-color: #fff;
+  background: linear-gradient(115deg, rgb(14 165 255 / 0.25), rgb(236 72 153 / 0.25));
+  border-color: rgb(92 183 255 / 0.48);
+  color: #fff;
+}
+
 .button,
 button:not([class]) {
   align-items: center;

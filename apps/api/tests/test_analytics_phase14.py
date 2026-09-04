@@ -12,6 +12,17 @@ from app.finance.service import _account, post_entries
 from app.groups import service as groups
 from app.models.discovery import DiscoveryEntityType, DiscoveryEvent
 from app.models.finance import LedgerAccountKind, LedgerDirection, LedgerTransactionType
+from app.models.streaming import (
+    LiveAccessMode,
+    LiveChatKind,
+    LiveChatMessage,
+    LiveParticipant,
+    LiveParticipantRole,
+    LiveReactionAggregate,
+    LiveReactionType,
+    LiveRoom,
+    LiveRoomStatus,
+)
 
 
 @pytest.mark.asyncio
@@ -82,6 +93,68 @@ async def test_creator_analytics_is_ledger_derived_and_currency_separated(db_ses
     assert by_currency["USD"]["gross_sales_minor"] == 500
     assert report["metric_definition_version"] == "phase14.v1"
     assert all(row["source"] != "payment_dispute_hold" for row in report["revenue_sources"])
+
+
+@pytest.mark.asyncio
+async def test_creator_live_analytics_uses_durable_room_participant_chat_and_reaction_state(
+    db_session,
+):
+    owner, _ = await accounts.register(
+        db_session, "live-analytics-owner@example.com", "strong-password-123", None
+    )
+    viewer, _ = await accounts.register(
+        db_session, "live-analytics-viewer@example.com", "strong-password-123", None
+    )
+    creator = await creators.get_or_create_profile(db_session, owner)
+    now = datetime.now(UTC)
+    room = LiveRoom(
+        creator_id=creator.id,
+        public_id="live-analytics-room",
+        provider_room_name="live-analytics-provider",
+        status=LiveRoomStatus.ended,
+        access_mode=LiveAccessMode.public,
+        title="Analytics Live",
+        viewer_count=0,
+        peak_viewer_count=7,
+        started_at=now - timedelta(hours=1),
+        ended_at=now,
+    )
+    db_session.add(room)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            LiveParticipant(
+                live_room_id=room.id,
+                user_id=viewer.id,
+                role=LiveParticipantRole.viewer,
+                joined_at=now - timedelta(minutes=50),
+                left_at=now - timedelta(minutes=5),
+            ),
+            LiveChatMessage(
+                live_room_id=room.id,
+                sender_user_id=viewer.id,
+                kind=LiveChatKind.text,
+                body="hello",
+            ),
+            LiveReactionAggregate(
+                live_room_id=room.id,
+                reaction_type=LiveReactionType.love,
+                reaction_count=9,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    report = await service.creator_live_metrics(
+        db_session, creator.id, now - timedelta(days=1), now + timedelta(days=1)
+    )
+
+    assert report["sessions"] == 1
+    assert report["live_seconds"] == 3600
+    assert report["peak_viewers"] == 7
+    assert report["unique_viewers"] == 1
+    assert report["chat_messages"] == 1
+    assert report["reactions"] == 9
 
 
 def test_analytics_csv_formula_cells_are_neutralized():

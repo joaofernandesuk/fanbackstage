@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.content import ContentItem
@@ -34,6 +34,11 @@ from app.models.messaging import MessageUnlockPurchase, PendingMessageSend
 from app.models.referral import ReferralCommissionAllocation, SignupAttribution
 from app.models.social import FeedPost, Follow, PostComment, PostReaction
 from app.models.streaming import (
+    LiveChatMessage,
+    LiveEvent,
+    LiveParticipant,
+    LiveReactionAggregate,
+    LiveRoom,
     PrivateSession,
     PrivateSessionMode,
     PrivateSessionSettlement,
@@ -141,6 +146,105 @@ async def creator_overview(
         "revenue_sources": [
             {"currency": currency_code, "source": source, **value}
             for (currency_code, source), value in sorted(sources.items())
+        ],
+    }
+
+
+async def creator_live_metrics(
+    db: AsyncSession,
+    creator_id: UUID,
+    starts_at: datetime,
+    ends_at: datetime,
+    currency: str | None = None,
+) -> dict:
+    """Aggregate public-Live operations from room state and canonical events."""
+
+    rooms = list(
+        await db.scalars(
+            select(LiveRoom).where(
+                LiveRoom.creator_id == creator_id,
+                LiveRoom.started_at.is_not(None),
+                LiveRoom.started_at >= starts_at,
+                LiveRoom.started_at < ends_at,
+            )
+        )
+    )
+    room_ids = [room.id for room in rooms]
+    if not room_ids:
+        return {
+            "metric_definition_version": METRIC_DEFINITION_VERSION,
+            "sessions": 0,
+            "live_seconds": 0,
+            "peak_viewers": 0,
+            "unique_viewers": 0,
+            "chat_messages": 0,
+            "reactions": 0,
+            "financial_actions": [],
+        }
+    now = datetime.now(UTC)
+    live_seconds = sum(
+        max(0, int(((room.ended_at or now) - room.started_at).total_seconds()))
+        for room in rooms
+        if room.started_at
+    )
+    unique_viewers = await db.scalar(
+        select(func.count(func.distinct(LiveParticipant.user_id))).where(
+            LiveParticipant.live_room_id.in_(room_ids),
+            LiveParticipant.user_id.is_not(None),
+        )
+    )
+    chat_messages = await db.scalar(
+        select(func.count(LiveChatMessage.id)).where(LiveChatMessage.live_room_id.in_(room_ids))
+    )
+    reactions = await db.scalar(
+        select(func.coalesce(func.sum(LiveReactionAggregate.reaction_count), 0)).where(
+            LiveReactionAggregate.live_room_id.in_(room_ids)
+        )
+    )
+    reversal_exists = exists().where(
+        LedgerTransaction.reversal_of_transaction_id == LiveEvent.ledger_transaction_id,
+        LedgerTransaction.transaction_type.in_(
+            [LedgerTransactionType.refund, LedgerTransactionType.chargeback]
+        ),
+    )
+    financial_query = (
+        select(
+            LiveEvent.event_type,
+            LiveEvent.currency,
+            func.count(LiveEvent.id),
+            func.sum(LiveEvent.amount_minor),
+        )
+        .where(
+            LiveEvent.live_room_id.in_(room_ids),
+            LiveEvent.event_type.in_(
+                ["tip", "gift", "paid_request", "snapshot", "vip_admission", "private_peek"]
+            ),
+            LiveEvent.ledger_transaction_id.is_not(None),
+            LiveEvent.amount_minor.is_not(None),
+            ~reversal_exists,
+        )
+        .group_by(LiveEvent.event_type, LiveEvent.currency)
+        .order_by(LiveEvent.currency, LiveEvent.event_type)
+    )
+    if currency:
+        financial_query = financial_query.where(LiveEvent.currency == currency.upper())
+    financial_rows = (await db.execute(financial_query)).all()
+    return {
+        "metric_definition_version": METRIC_DEFINITION_VERSION,
+        "sessions": len(rooms),
+        "live_seconds": live_seconds,
+        "peak_viewers": max((room.peak_viewer_count for room in rooms), default=0),
+        "unique_viewers": int(unique_viewers or 0),
+        "chat_messages": int(chat_messages or 0),
+        "reactions": int(reactions or 0),
+        "financial_actions": [
+            {
+                "event_type": event_type,
+                "currency": currency_code,
+                "count": int(count),
+                "amount_minor": int(amount_minor),
+            }
+            for event_type, currency_code, count, amount_minor in financial_rows
         ],
     }
 

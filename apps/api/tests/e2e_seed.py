@@ -333,7 +333,7 @@ async def seed() -> None:
             gift = LiveGiftCatalogItem(
                 id=LIVE_GIFT_ID,
                 name="E2E Rose",
-                icon="/live/gifts/e2e-rose.svg",
+                icon="/live/catalogue/gift-rose.svg",
                 amount_minor=300,
                 currency="EUR",
                 active=True,
@@ -343,7 +343,7 @@ async def seed() -> None:
             db.add(gift)
         else:
             gift.name = "E2E Rose"
-            gift.icon = "/live/gifts/e2e-rose.svg"
+            gift.icon = "/live/catalogue/gift-rose.svg"
             gift.amount_minor = 300
             gift.currency = "EUR"
             gift.active = True

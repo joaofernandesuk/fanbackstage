@@ -48,6 +48,9 @@ class LedgerTransactionType(str, enum.Enum):
     live_tip = "live_tip"
     live_gift = "live_gift"
     live_paid_request = "live_paid_request"
+    live_snapshot = "live_snapshot"
+    live_vip_admission = "live_vip_admission"
+    private_live_peek = "private_live_peek"
     marketplace_order = "marketplace_order"
     featuring_charge = "featuring_charge"
     excess_capture_liability = "excess_capture_liability"
@@ -93,6 +96,8 @@ class ExcessCaptureSource(str, enum.Enum):
     paid_message_send = "paid_message_send"
     private_live_session = "private_live_session"
     live_paid_request = "live_paid_request"
+    live_vip_admission = "live_vip_admission"
+    private_live_peek = "private_live_peek"
 
 
 class LedgerAccount(UUIDPrimaryKey, Timestamped, Base):

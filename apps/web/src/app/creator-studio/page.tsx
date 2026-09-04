@@ -11,6 +11,7 @@ import { SubscriptionSettings } from "../../components/subscription-settings";
 import { SubscriptionPromotionSettings } from "../../components/subscription-promotion-settings";
 import { MessagingSettings } from "../../components/messaging-settings";
 import { LiveStudio } from "../../components/live-studio";
+import { LiveVipStudio } from "../../components/live-vip-studio";
 import { LivePaidRequestStudio } from "../../components/live-paid-request-studio";
 import { PrivateSessionQueue } from "../../components/private-session-queue";
 import { GroupMemberships } from "../../components/group-memberships";
@@ -32,6 +33,7 @@ type CreatorAccess = {
   creator_compliance: { public_allowed: boolean; reason: string };
 };
 type StudioWorkspace = "overview" | "publish" | "library" | "live" | "audience" | "business";
+type LiveTool = "vip" | "commerce" | "paid-requests" | "private-queue";
 
 const policies = ["free", "followers", "subscription", "ppv", "private"];
 const workspaceForHash: Record<string, StudioWorkspace> = {
@@ -56,6 +58,7 @@ function CreatorStudio() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [workspace, setWorkspace] = useState<StudioWorkspace>("overview");
+  const [liveTool, setLiveTool] = useState<LiveTool | null>(null);
   const readyImages = assets.filter((asset) => asset.status === "ready" && asset.media_type === "image");
   const readyVideos = assets.filter((asset) => asset.status === "ready" && asset.media_type === "video");
 
@@ -257,7 +260,31 @@ function CreatorStudio() {
             )}
             <Link className={styles.primaryAction} href="/creator-onboarding#publication">Open profile publishing</Link>
           </section>
-        ) : <><LiveStudio /><LiveCommerceSettings /><LivePaidRequestStudio /><PrivateSessionQueue /></>}
+        ) : <>
+          <LiveStudio />
+          <section aria-label="Live setup tools" className={styles.liveControlCenter}>
+            <div className={styles.panelHeading}>
+              <div><p className="eyebrow">LIVE CONTROL CENTER</p><h2>Prepare the show</h2><p>Open one tool when you need it. Your camera and chat stay at the top.</p></div>
+            </div>
+            <div className={styles.liveControlGrid}>
+              <button onClick={() => setLiveTool("vip")} type="button"><span aria-hidden="true">★</span><strong>VIP mode</strong><small>Plan or control a paid group show</small></button>
+              <button onClick={() => setLiveTool("commerce")} type="button"><span aria-hidden="true">◎</span><strong>Tips, snapshots & goals</strong><small>Preview catalogues and set creator options</small></button>
+              <button onClick={() => setLiveTool("paid-requests")} type="button"><span aria-hidden="true">☷</span><strong>Paid requests</strong><small>Set the menu and review requests</small></button>
+              <button onClick={() => setLiveTool("private-queue")} type="button"><span aria-hidden="true">◉</span><strong>Private queue</strong><small>Review queued 1:1 and 2-to-1 sessions</small></button>
+            </div>
+          </section>
+          {liveTool && (
+            <div className={styles.liveToolModal} onMouseDown={() => setLiveTool(null)}>
+              <section aria-label="Live setup panel" aria-modal="true" className={styles.liveToolPanel} onMouseDown={(event) => event.stopPropagation()} role="dialog">
+                <header><strong>Live setup</strong><button aria-label="Close live setup" onClick={() => setLiveTool(null)} type="button">×</button></header>
+                {liveTool === "vip" && <LiveVipStudio />}
+                {liveTool === "commerce" && <LiveCommerceSettings />}
+                {liveTool === "paid-requests" && <LivePaidRequestStudio />}
+                {liveTool === "private-queue" && <PrivateSessionQueue />}
+              </section>
+            </div>
+          )}
+        </>}
       </div>}
       {workspace === "audience" && <div className={styles.workspace}><SubscriptionSettings /><SubscriptionPromotionSettings /><MessagingSettings /><MassMessageCampaign /></div>}
       {workspace === "business" && <div className={styles.workspace}><MarketplaceAuthoring assets={assets} /><div id="marketplace-fulfilment"><MarketplaceFulfilment /></div><GroupMemberships /><ReferralDashboard heading="Creator referral earnings" /></div>}

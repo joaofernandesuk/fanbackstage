@@ -17,6 +17,9 @@ class CreatorLiveSettingsInput(BaseModel):
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     minimum_minutes: int | None = Field(default=None, ge=1, le=120)
     max_authorization_minor: int | None = Field(default=None, ge=1)
+    snapshots_enabled: bool | None = None
+    snapshot_price_minor: int | None = Field(default=None, ge=1)
+    private_peeks_enabled: bool | None = None
 
 
 class CreatorLiveSettingsResponse(BaseModel):
@@ -26,6 +29,66 @@ class CreatorLiveSettingsResponse(BaseModel):
     currency: str
     minimum_minutes: int
     max_authorization_minor: int
+    snapshots_enabled: bool
+    snapshot_price_minor: int
+    private_peeks_enabled: bool
+
+
+class LivePrivatePeekPolicyInput(BaseModel):
+    active: bool
+    amount_minor: int = Field(ge=1)
+    currency: str = Field(min_length=3, max_length=3)
+    commission_basis_points: int = Field(ge=0, le=10_000)
+    reason: str = Field(min_length=8, max_length=500)
+    confirmed: bool
+
+
+class LivePrivatePeekPolicyResponse(BaseModel):
+    active: bool
+    amount_minor: int
+    currency: str
+    commission_basis_points: int
+
+
+class LivePrivatePeekOfferResponse(BaseModel):
+    paused: bool
+    enabled: bool
+    amount_minor: int | None = None
+    currency: str | None = None
+    private_session_id: UUID | None = None
+    viewer_admitted: bool = False
+
+
+class LiveSnapshotOfferResponse(BaseModel):
+    enabled: bool
+    amount_minor: int
+    currency: str
+
+
+class LiveVipShowInput(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1, max_length=1000)
+    goal_amount_minor: int = Field(ge=1)
+    buy_in_amount_minor: int = Field(ge=1)
+    preshow_minutes: int = Field(ge=1, le=5)
+    duration_minutes: int = Field(ge=5, le=15)
+
+
+class LiveVipShowResponse(BaseModel):
+    id: UUID
+    live_room_id: UUID
+    status: str
+    title: str
+    description: str
+    goal_amount_minor: int
+    confirmed_amount_minor: int
+    buy_in_amount_minor: int
+    currency: str
+    preshow_ends_at: datetime
+    duration_seconds: int
+    started_at: datetime | None
+    ends_at: datetime | None
+    viewer_admitted: bool
 
 
 class PrivateRequestInput(BaseModel):
@@ -39,12 +102,20 @@ class ChatInput(BaseModel):
 
 
 class LiveTipInput(BaseModel):
-    amount_minor: int | None = Field(default=None, ge=1)
-    tip_menu_item_id: UUID | None = None
+    tip_catalog_item_id: UUID
 
 
 class LiveGiftInput(BaseModel):
     gift_catalog_item_id: UUID
+
+
+class LiveGiftCatalogItemResponse(BaseModel):
+    id: UUID
+    name: str
+    icon: str
+    amount_minor: int
+    currency: str
+    category: str | None
 
 
 class LiveCommerceResponse(BaseModel):
@@ -94,15 +165,35 @@ class LiveSupporterRankingEntry(BaseModel):
     viewer_is_current_user: bool
 
 
-class TipMenuItemInput(BaseModel):
-    label: str = Field(min_length=1, max_length=100)
-    amount_minor: int = Field(ge=1)
-    enabled: bool = True
-    sort_order: int = Field(default=0, ge=0, le=100)
+class LiveAudienceMemberResponse(BaseModel):
+    user_id: UUID
+    label: str
+    joined_at: datetime | None
 
 
-class TipMenuItemResponse(TipMenuItemInput):
+class LiveAudienceResponse(BaseModel):
+    current_viewers: int
+    peak_viewers: int
+    unique_viewers: int
+    members: list[LiveAudienceMemberResponse] = Field(default_factory=list)
+
+
+class LiveFinancialActionSummary(BaseModel):
+    event_type: str
+    currency: str
+    count: int
+    amount_minor: int
+
+
+class LiveCreatorSessionSummaryResponse(BaseModel):
+    financial_actions: list[LiveFinancialActionSummary] = Field(default_factory=list)
+
+
+class LiveTipCatalogItemResponse(BaseModel):
     id: UUID
+    label: str
+    icon: str
+    amount_minor: int
     currency: str
 
 
@@ -154,8 +245,10 @@ class LiveRoomResponse(BaseModel):
     title: str
     description: str | None
     viewer_count: int
+    peak_viewer_count: int
     started_at: datetime | None
     ended_at: datetime | None
+    private_paused: bool = False
     adult_access_required: bool = True
     adult_access_granted: bool = False
     compliance_allowed: bool = False
@@ -175,6 +268,7 @@ class PrivateRequestResponse(BaseModel):
     expires_at: datetime
     invitation_status: str = "not_required"
     invited_viewer_label: str | None = None
+    peeks_may_be_available: bool = False
 
 
 class PrivateInviteCandidateResponse(BaseModel):
@@ -189,10 +283,16 @@ class PrivateSessionResponse(BaseModel):
     mode: str
     per_minute_price_minor: int
     minimum_charge_minor: int
+    max_authorization_minor: int
     currency: str
     billable_seconds: int
     payment_attempt_id: UUID | None
     participant_role: str
+    public_live_room_id: UUID | None = None
+    peeks_allowed: bool = False
+    peek_price_minor: int | None = None
+    peek_currency: str | None = None
+    peek_commission_basis_points: int | None = None
 
 
 class ProviderTokenResponse(BaseModel):

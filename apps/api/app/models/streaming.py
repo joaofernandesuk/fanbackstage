@@ -37,6 +37,14 @@ class LiveAccessMode(str, enum.Enum):
     subscribers = "subscribers"
 
 
+class LiveVipShowStatus(str, enum.Enum):
+    preshow = "preshow"
+    awaiting_creator = "awaiting_creator"
+    active = "active"
+    completed = "completed"
+    cancelled = "cancelled"
+
+
 class LiveParticipantRole(str, enum.Enum):
     creator = "creator"
     viewer = "viewer"
@@ -137,6 +145,16 @@ class LiveRoom(UUIDPrimaryKey, Timestamped, Base):
     peak_viewer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active_private_session_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "private_sessions.id",
+            name="fk_live_room_active_private_session",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        index=True,
+    )
+    private_paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LiveParticipant(UUIDPrimaryKey, Timestamped, Base):
@@ -151,6 +169,38 @@ class LiveParticipant(UUIDPrimaryKey, Timestamped, Base):
     )
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveVipShow(UUIDPrimaryKey, Timestamped, Base):
+    """One immutable paid group-show offer within a public Live room."""
+
+    __tablename__ = "live_vip_shows"
+    __table_args__ = (
+        CheckConstraint("goal_amount_minor > 0", name="ck_live_vip_goal_positive"),
+        CheckConstraint("buy_in_amount_minor > 0", name="ck_live_vip_buy_in_positive"),
+        CheckConstraint("duration_seconds BETWEEN 300 AND 900", name="ck_live_vip_duration"),
+        CheckConstraint("btrim(title) <> ''", name="ck_live_vip_title"),
+        Index("ix_live_vip_status_preshow", "status", "preshow_ends_at"),
+    )
+    live_room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("live_rooms.id", ondelete="RESTRICT"), index=True
+    )
+    creator_id: Mapped[UUID] = mapped_column(
+        ForeignKey("creator_profiles.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[LiveVipShowStatus] = mapped_column(
+        Enum(LiveVipShowStatus, name="live_vip_show_status"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text)
+    goal_amount_minor: Mapped[int] = mapped_column(Integer)
+    buy_in_amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    preshow_ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    duration_seconds: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LiveChatMessage(UUIDPrimaryKey, Timestamped, Base):
@@ -220,6 +270,9 @@ class LiveCommerceKind(str, enum.Enum):
     tip = "tip"
     gift = "gift"
     paid_request = "paid_request"
+    snapshot = "snapshot"
+    vip_admission = "vip_admission"
+    private_peek = "private_peek"
 
 
 class LiveCommerceStatus(str, enum.Enum):
@@ -255,7 +308,26 @@ class LiveGiftCatalogItem(UUIDPrimaryKey, Timestamped, Base):
     category: Mapped[str | None] = mapped_column(String(48))
 
 
+class LiveTipCatalogItem(UUIDPrimaryKey, Timestamped, Base):
+    """Platform-owned tip shortcut available to every eligible Live room."""
+
+    __tablename__ = "live_tip_catalog_items"
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_live_tip_catalog_amount_positive"),
+        CheckConstraint("btrim(label) <> ''", name="ck_live_tip_catalog_label"),
+        UniqueConstraint("label", "currency", name="uq_live_tip_catalog_label_currency"),
+    )
+    label: Mapped[str] = mapped_column(String(100))
+    icon: Mapped[str] = mapped_column(String(160))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class LiveTipMenuItem(UUIDPrimaryKey, Timestamped, Base):
+    """Legacy creator-authored menu row retained for immutable charge history."""
+
     __tablename__ = "live_tip_menu_items"
     __table_args__ = (
         CheckConstraint("amount_minor > 0", name="ck_live_tip_menu_amount_positive"),
@@ -334,8 +406,17 @@ class LiveCommerceCharge(UUIDPrimaryKey, Timestamped, Base):
     tip_menu_item_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("live_tip_menu_items.id", ondelete="RESTRICT")
     )
+    tip_catalog_item_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_tip_catalog_items.id", ondelete="RESTRICT")
+    )
     paid_request_option_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("live_paid_request_options.id", ondelete="RESTRICT")
+    )
+    vip_show_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_vip_shows.id", ondelete="RESTRICT"), index=True
+    )
+    private_session_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("private_sessions.id", ondelete="RESTRICT"), index=True
     )
     request_label: Mapped[str | None] = mapped_column(String(100))
     request_message: Mapped[str | None] = mapped_column(String(500))
@@ -438,6 +519,7 @@ class CreatorLiveSettings(UUIDPrimaryKey, Timestamped, Base):
         CheckConstraint("one_to_one_price_minor > 0", name="ck_live_settings_one_to_one_price"),
         CheckConstraint("two_to_one_price_minor > 0", name="ck_live_settings_two_to_one_price"),
         CheckConstraint("minimum_minutes > 0", name="ck_live_settings_minimum_minutes"),
+        CheckConstraint("snapshot_price_minor > 0", name="ck_live_settings_snapshot_price"),
     )
     creator_id: Mapped[UUID] = mapped_column(
         ForeignKey("creator_profiles.id", ondelete="CASCADE"), unique=True
@@ -448,6 +530,26 @@ class CreatorLiveSettings(UUIDPrimaryKey, Timestamped, Base):
     currency: Mapped[str] = mapped_column(String(3), default="EUR", nullable=False)
     minimum_minutes: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     max_authorization_minor: Mapped[int] = mapped_column(Integer, default=6000, nullable=False)
+    snapshots_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    snapshot_price_minor: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    private_peeks_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class LivePrivatePeekPolicy(UUIDPrimaryKey, Timestamped, Base):
+    """Admin-owned current offer; every purchase snapshots these terms."""
+
+    __tablename__ = "live_private_peek_policies"
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_live_private_peek_policy_amount"),
+        CheckConstraint(
+            "commission_basis_points BETWEEN 0 AND 10000",
+            name="ck_live_private_peek_policy_commission",
+        ),
+    )
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, unique=True)
+    amount_minor: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="EUR", nullable=False)
+    commission_basis_points: Mapped[int] = mapped_column(Integer, default=2000, nullable=False)
 
 
 class PrivateSessionRequest(UUIDPrimaryKey, Timestamped, Base):
@@ -502,6 +604,9 @@ class PrivateSession(UUIDPrimaryKey, Timestamped, Base):
     payer_user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), index=True
     )
+    public_live_room_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("live_rooms.id", ondelete="RESTRICT"), index=True
+    )
     mode: Mapped[PrivateSessionMode] = mapped_column(
         Enum(PrivateSessionMode, name="private_session_mode", create_type=False)
     )
@@ -520,6 +625,10 @@ class PrivateSession(UUIDPrimaryKey, Timestamped, Base):
     max_authorization_minor: Mapped[int] = mapped_column(Integer)
     commission_basis_points: Mapped[int] = mapped_column(Integer)
     currency: Mapped[str] = mapped_column(String(3))
+    peeks_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    peek_price_minor: Mapped[int | None] = mapped_column(Integer)
+    peek_currency: Mapped[str | None] = mapped_column(String(3))
+    peek_commission_basis_points: Mapped[int | None] = mapped_column(Integer)
     accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

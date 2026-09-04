@@ -176,6 +176,24 @@ async def creator_analytics_private_live(
     }
 
 
+@router.get("/creator/live")
+async def creator_analytics_live(
+    identity: CurrentIdentity,
+    db: Db,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+    currency: str | None = None,
+) -> dict:
+    creator = await _creator_scope(identity, db)
+    if currency and len(currency) != 3:
+        raise HTTPException(400, "Currency must be a three-letter code")
+    start, end = _range(starts_at, ends_at)
+    return {
+        "creator_id": str(creator.id),
+        **(await service.creator_live_metrics(db, creator.id, start, end, currency)),
+    }
+
+
 @router.get("/creator/referrals")
 async def creator_analytics_referrals(
     identity: CurrentIdentity,

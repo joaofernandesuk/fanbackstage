@@ -6,7 +6,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,7 @@ from app.models.compliance import ComplianceFeature
 from app.models.content import ContentEntitlement, EntitlementStatus
 from app.models.creator import CreatorProfile, CreatorStatus
 from app.models.finance import (
+    CommissionRule,
     ExcessCaptureSource,
     LedgerAccountKind,
     LedgerDirection,
@@ -60,6 +61,7 @@ from app.models.streaming import (
     LivePaidRequestOption,
     LiveParticipant,
     LiveParticipantRole,
+    LivePrivatePeekPolicy,
     LiveProviderControlAction,
     LiveProviderControlIntent,
     LiveReactionAggregate,
@@ -69,7 +71,10 @@ from app.models.streaming import (
     LiveReport,
     LiveRoom,
     LiveRoomStatus,
+    LiveTipCatalogItem,
     LiveTipMenuItem,
+    LiveVipShow,
+    LiveVipShowStatus,
     PrivateInvitationStatus,
     PrivateRequestStatus,
     PrivateSession,
@@ -90,6 +95,83 @@ from app.streaming.control_outbox import (
 
 class StreamingError(ValueError):
     pass
+
+
+CURRENT_VIP_SHOW_STATUSES = (
+    LiveVipShowStatus.preshow,
+    LiveVipShowStatus.awaiting_creator,
+    LiveVipShowStatus.active,
+)
+
+
+LIVE_CREATOR_NOTIFICATION_COPY: dict[str, tuple[str, str]] = {
+    "tip": ("New Live tip", "A supporter sent a tip during your Live."),
+    "gift": ("New Live gift", "A supporter sent a gift during your Live."),
+    "snapshot": ("Paid snapshot captured", "A supporter purchased a snapshot during your Live."),
+    "paid_request_pending": (
+        "Paid request needs your decision",
+        "A confirmed paid request is waiting for you in Creator Studio.",
+    ),
+    "paid_request": ("Paid request completed", "A paid request was completed during your Live."),
+    "paid_request_declined": (
+        "Paid request declined",
+        "A paid request was declined and routed for reversal.",
+    ),
+    "paid_request_expired": (
+        "Paid request expired",
+        "A paid request expired and was routed for reversal.",
+    ),
+    "vip_admission_reserved": (
+        "New VIP pledge",
+        "A supporter reserved admission to your VIP show.",
+    ),
+    "vip_admission": ("VIP admission paid", "A supporter joined your VIP show."),
+    "private_peek": (
+        "Paid private peek",
+        "A verified viewer purchased view-only access to your private session.",
+    ),
+    "vip_cancelled": (
+        "VIP show cancelled",
+        "Your VIP show was cancelled and confirmed payments were routed for reversal.",
+    ),
+    "vip_completed": ("VIP show completed", "Your VIP show has completed."),
+    "goal_completed": ("Live goal completed", "Your current Live goal has been reached."),
+    "commerce_reversed": ("Live payment reversed", "A settled Live payment was reversed."),
+}
+
+
+async def _notify_creator_for_live_event(db: AsyncSession, event: LiveEvent) -> None:
+    """Project durable, low-volume Live facts into the creator notification inbox."""
+
+    copy = LIVE_CREATOR_NOTIFICATION_COPY.get(event.event_type)
+    if copy is None or event.live_room_id is None:
+        return
+    creator_user_id = await db.scalar(
+        select(CreatorProfile.user_id)
+        .join(LiveRoom, LiveRoom.creator_id == CreatorProfile.id)
+        .where(LiveRoom.id == event.live_room_id)
+    )
+    if creator_user_id is None or creator_user_id == event.actor_user_id:
+        return
+    title, body = copy
+    await emit_transactional(
+        db,
+        recipient_user_id=creator_user_id,
+        notification_type=f"LIVE_{event.event_type.upper()}",
+        source_domain="streaming",
+        source_id=str(event.id),
+        title=title,
+        body=body,
+        target_path="/creator-studio",
+        email=False,
+    )
+
+
+def current_vip_show_statement(room_id: UUID):
+    return select(LiveVipShow).where(
+        LiveVipShow.live_room_id == room_id,
+        LiveVipShow.status.in_(CURRENT_VIP_SHOW_STATUSES),
+    )
 
 
 async def record_live_event(
@@ -132,6 +214,7 @@ async def record_live_event(
     )
     db.add(event)
     await db.flush()
+    await _notify_creator_for_live_event(db, event)
     return event
 
 
@@ -304,6 +387,65 @@ async def settings_for_creator(db: AsyncSession, creator_id: UUID) -> CreatorLiv
     return settings
 
 
+async def private_peek_policy(db: AsyncSession) -> LivePrivatePeekPolicy:
+    policy = await db.scalar(
+        select(LivePrivatePeekPolicy).order_by(LivePrivatePeekPolicy.created_at)
+    )
+    if policy is None:
+        policy = LivePrivatePeekPolicy(
+            active=True,
+            amount_minor=100,
+            currency="EUR",
+            commission_basis_points=await finance.commission_for(db, "private_live_peek"),
+        )
+        db.add(policy)
+        await db.flush()
+    return policy
+
+
+async def update_private_peek_policy(
+    db: AsyncSession,
+    actor: User,
+    *,
+    active: bool,
+    amount_minor: int,
+    currency: str,
+    commission_basis_points: int,
+    reason: str,
+) -> LivePrivatePeekPolicy:
+    policy = await private_peek_policy(db)
+    policy.active = active
+    policy.amount_minor = amount_minor
+    policy.currency = currency_code(currency)
+    policy.commission_basis_points = commission_basis_points
+    rule = await db.scalar(
+        select(CommissionRule).where(CommissionRule.revenue_type == "private_live_peek")
+    )
+    if rule is None:
+        rule = CommissionRule(
+            revenue_type="private_live_peek", basis_points=commission_basis_points
+        )
+        db.add(rule)
+    else:
+        rule.basis_points = commission_basis_points
+        rule.active = True
+    await record_event(
+        db,
+        "live.private_peek_policy_updated",
+        actor_user_id=actor.id,
+        target_type="live_private_peek_policy",
+        target_id=str(policy.id),
+        metadata={
+            "active": active,
+            "amount_minor": amount_minor,
+            "currency": policy.currency,
+            "commission_basis_points": commission_basis_points,
+            "reason": reason,
+        },
+    )
+    return policy
+
+
 async def _live_commerce_room(
     db: AsyncSession, buyer: User, room_id: UUID, compliance_decision: ComplianceDecision | None
 ) -> tuple[LiveRoom, CreatorProfile, CreatorLiveSettings]:
@@ -332,8 +474,7 @@ async def initiate_live_tip(
     room_id: UUID,
     idempotency_key: str,
     *,
-    amount_minor: int | None = None,
-    tip_menu_item_id: UUID | None = None,
+    tip_catalog_item_id: UUID,
     compliance_decision: ComplianceDecision | None = None,
 ) -> LiveCommerceCharge:
     """Create one server-priced tip payment attempt; success is webhook-only."""
@@ -349,24 +490,18 @@ async def initiate_live_tip(
         if existing is not None:
             return existing
         raise StreamingError("Payment idempotency key is already in use")
-    menu_item = None
-    if tip_menu_item_id:
-        menu_item = await db.scalar(
-            select(LiveTipMenuItem).where(
-                LiveTipMenuItem.id == tip_menu_item_id,
-                LiveTipMenuItem.creator_id == creator.id,
-                LiveTipMenuItem.enabled.is_(True),
-            )
+    catalog_item = await db.scalar(
+        select(LiveTipCatalogItem).where(
+            LiveTipCatalogItem.id == tip_catalog_item_id,
+            LiveTipCatalogItem.active.is_(True),
         )
-        if menu_item is None:
-            raise StreamingError("Tip menu item is unavailable")
-        amount = menu_item.amount_minor
-        currency = currency_code(menu_item.currency)
-    else:
-        amount = amount_minor or 0
-        currency = currency_code(settings.currency)
-        if amount <= 0 or amount > settings.max_authorization_minor:
-            raise StreamingError("Tip amount is outside the creator's permitted limit")
+    )
+    if catalog_item is None:
+        raise StreamingError("Tip is unavailable")
+    amount = catalog_item.amount_minor
+    currency = currency_code(catalog_item.currency)
+    if amount > settings.max_authorization_minor:
+        raise StreamingError("Tip amount is outside the creator's permitted limit")
     if currency != currency_code(settings.currency):
         raise StreamingError("Tip currency is unavailable for this live room")
     attempt = PaymentAttempt(
@@ -385,7 +520,7 @@ async def initiate_live_tip(
         buyer_user_id=buyer.id,
         kind=LiveCommerceKind.tip,
         status=LiveCommerceStatus.pending_payment,
-        tip_menu_item_id=menu_item.id if menu_item else None,
+        tip_catalog_item_id=catalog_item.id,
         gross_amount_minor=amount,
         currency=currency,
         commission_basis_points=await finance.commission_for(db, "tip"),
@@ -444,6 +579,74 @@ async def initiate_live_gift(
         currency=currency_code(gift.currency),
         commission_basis_points=await finance.commission_for(db, "tip"),
         payment_attempt_id=attempt.id,
+    )
+    db.add(charge)
+    await db.flush()
+    return charge
+
+
+async def live_snapshot_offer(
+    db: AsyncSession,
+    buyer: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> CreatorLiveSettings:
+    """Return the creator-owned snapshot offer after normal room authorization."""
+
+    _room, _creator, settings = await _live_commerce_room(db, buyer, room_id, compliance_decision)
+    return settings
+
+
+async def initiate_live_snapshot(
+    db: AsyncSession,
+    buyer: User,
+    room_id: UUID,
+    idempotency_key: str,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> LiveCommerceCharge:
+    """Create one creator-priced snapshot charge; capture unlocks after confirmation."""
+
+    if not idempotency_key or len(idempotency_key) > 100:
+        raise StreamingError("A bounded Idempotency-Key is required")
+    room, creator, settings = await _live_commerce_room(db, buyer, room_id, compliance_decision)
+    if not settings.snapshots_enabled:
+        raise StreamingError("Snapshots are unavailable for this live room")
+    if settings.snapshot_price_minor > settings.max_authorization_minor:
+        raise StreamingError("Snapshot price is outside the creator's permitted limit")
+    locked = await finance.lock_payment_idempotency(
+        db, buyer.id, f"live-snapshot:{idempotency_key}"
+    )
+    if locked:
+        existing = await db.scalar(
+            select(LiveCommerceCharge).where(LiveCommerceCharge.payment_attempt_id == locked.id)
+        )
+        if existing is not None:
+            return existing
+        raise StreamingError("Payment idempotency key is already in use")
+    attempt = PaymentAttempt(
+        buyer_user_id=buyer.id,
+        provider=get_settings().payment_provider,
+        provider_reference=new_provider_reference(),
+        amount_minor=settings.snapshot_price_minor,
+        currency=currency_code(settings.currency),
+        idempotency_key=f"live-snapshot:{idempotency_key}",
+    )
+    db.add(attempt)
+    await db.flush()
+    charge = LiveCommerceCharge(
+        live_room_id=room.id,
+        creator_id=creator.id,
+        buyer_user_id=buyer.id,
+        kind=LiveCommerceKind.snapshot,
+        status=LiveCommerceStatus.pending_payment,
+        request_label="Live snapshot",
+        gross_amount_minor=settings.snapshot_price_minor,
+        currency=currency_code(settings.currency),
+        commission_basis_points=await finance.commission_for(db, "tip"),
+        payment_attempt_id=attempt.id,
+        creator_acceptance_required=False,
     )
     db.add(charge)
     await db.flush()
@@ -612,6 +815,46 @@ async def room_paid_request_options(
     )
 
 
+async def room_tip_menu(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> list[LiveTipCatalogItem]:
+    _room, _creator, settings = await _live_commerce_room(db, actor, room_id, compliance_decision)
+    return list(
+        await db.scalars(
+            select(LiveTipCatalogItem)
+            .where(
+                LiveTipCatalogItem.active.is_(True),
+                LiveTipCatalogItem.currency == currency_code(settings.currency),
+            )
+            .order_by(LiveTipCatalogItem.sort_order, LiveTipCatalogItem.created_at)
+        )
+    )
+
+
+async def room_gift_catalog(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> list[LiveGiftCatalogItem]:
+    _room, _creator, settings = await _live_commerce_room(db, actor, room_id, compliance_decision)
+    return list(
+        await db.scalars(
+            select(LiveGiftCatalogItem)
+            .where(
+                LiveGiftCatalogItem.active.is_(True),
+                LiveGiftCatalogItem.currency == currency_code(settings.currency),
+            )
+            .order_by(LiveGiftCatalogItem.sort_order, LiveGiftCatalogItem.created_at)
+        )
+    )
+
+
 async def creator_pending_paid_requests(db: AsyncSession, actor: User) -> list[LiveCommerceCharge]:
     creator = await approved_creator(db, actor)
     return list(
@@ -627,50 +870,34 @@ async def creator_pending_paid_requests(db: AsyncSession, actor: User) -> list[L
     )
 
 
-async def creator_tip_menu(db: AsyncSession, actor: User) -> list[LiveTipMenuItem]:
+async def platform_tip_catalog(db: AsyncSession, actor: User) -> list[LiveTipCatalogItem]:
     creator = await approved_creator(db, actor)
+    settings = await settings_for_creator(db, creator.id)
     return list(
         await db.scalars(
-            select(LiveTipMenuItem)
-            .where(LiveTipMenuItem.creator_id == creator.id)
-            .order_by(LiveTipMenuItem.sort_order, LiveTipMenuItem.created_at)
+            select(LiveTipCatalogItem)
+            .where(
+                LiveTipCatalogItem.active.is_(True),
+                LiveTipCatalogItem.currency == currency_code(settings.currency),
+            )
+            .order_by(LiveTipCatalogItem.sort_order, LiveTipCatalogItem.created_at)
         )
     )
 
 
-async def save_tip_menu_item(
-    db: AsyncSession,
-    actor: User,
-    *,
-    label: str,
-    amount_minor: int,
-    enabled: bool,
-    sort_order: int,
-    item_id: UUID | None = None,
-) -> LiveTipMenuItem:
+async def platform_gift_catalog(db: AsyncSession, actor: User) -> list[LiveGiftCatalogItem]:
     creator = await approved_creator(db, actor)
     settings = await settings_for_creator(db, creator.id)
-    if amount_minor <= 0 or amount_minor > settings.max_authorization_minor:
-        raise StreamingError("Tip menu amount is outside the creator's permitted limit")
-    item = None
-    if item_id:
-        item = await db.scalar(
-            select(LiveTipMenuItem)
-            .where(LiveTipMenuItem.id == item_id, LiveTipMenuItem.creator_id == creator.id)
-            .with_for_update()
+    return list(
+        await db.scalars(
+            select(LiveGiftCatalogItem)
+            .where(
+                LiveGiftCatalogItem.active.is_(True),
+                LiveGiftCatalogItem.currency == currency_code(settings.currency),
+            )
+            .order_by(LiveGiftCatalogItem.sort_order, LiveGiftCatalogItem.created_at)
         )
-        if item is None:
-            raise PermissionError("Tip menu item not found")
-    else:
-        item = LiveTipMenuItem(creator_id=creator.id, label="", amount_minor=1, currency="EUR")
-        db.add(item)
-    item.label = label.strip()
-    item.amount_minor = amount_minor
-    item.currency = currency_code(settings.currency)
-    item.enabled = enabled
-    item.sort_order = sort_order
-    await db.flush()
-    return item
+    )
 
 
 async def creator_live_goals(db: AsyncSession, actor: User) -> list[LiveGoal]:
@@ -887,7 +1114,9 @@ async def live_supporter_ranking(
             )
             .where(
                 LiveEvent.live_room_id == room_id,
-                LiveEvent.event_type.in_(["tip", "gift", "paid_request"]),
+                LiveEvent.event_type.in_(
+                    ["tip", "gift", "paid_request", "snapshot", "vip_admission", "private_peek"]
+                ),
                 LiveEvent.actor_user_id.is_not(None),
                 LiveEvent.ledger_transaction_id.is_not(None),
                 LiveEvent.amount_minor.is_not(None),
@@ -898,16 +1127,335 @@ async def live_supporter_ranking(
             .limit(max(1, min(limit, 25)))
         )
     ).all()
+    creator_user_id = await db.scalar(
+        select(CreatorProfile.user_id)
+        .join(LiveRoom, LiveRoom.creator_id == CreatorProfile.id)
+        .where(LiveRoom.id == room_id)
+    )
+    creator_labels = (
+        await live_actor_labels(db, {row.actor_user_id for row in rows if row.actor_user_id})
+        if creator_user_id == actor.id
+        else {}
+    )
     return [
         {
             "rank": index,
             "amount_minor": int(row.amount_minor),
             "currency": row.currency,
-            "supporter_label": "You" if row.actor_user_id == actor.id else f"Supporter {index}",
+            "supporter_label": (
+                "You"
+                if row.actor_user_id == actor.id
+                else creator_labels.get(row.actor_user_id, f"Supporter {index}")
+                if creator_user_id == actor.id
+                else f"Supporter {index}"
+            ),
             "viewer_is_current_user": row.actor_user_id == actor.id,
         }
         for index, row in enumerate(rows, start=1)
     ]
+
+
+async def live_actor_labels(db: AsyncSession, user_ids: set[UUID]) -> dict[UUID, str]:
+    """Return stable Live identities without exposing private email addresses."""
+
+    if not user_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(User.id, CreatorProfile.username, CreatorProfile.display_name)
+            .outerjoin(CreatorProfile, CreatorProfile.user_id == User.id)
+            .where(User.id.in_(user_ids))
+        )
+    ).all()
+    return {
+        user_id: (
+            f"@{username}"
+            if username
+            else display_name
+            if display_name
+            else f"Fan {user_id.hex[:6].upper()}"
+        )
+        for user_id, username, display_name in rows
+    }
+
+
+async def creator_live_audience(db: AsyncSession, actor: User, room_id: UUID) -> dict[str, object]:
+    """Creator-only current audience derived from durable participant state."""
+
+    room = await db.scalar(
+        select(LiveRoom)
+        .join(CreatorProfile, CreatorProfile.id == LiveRoom.creator_id)
+        .where(LiveRoom.id == room_id, CreatorProfile.user_id == actor.id)
+    )
+    if room is None:
+        raise PermissionError("Only the room creator can view audience identities")
+    participants = list(
+        await db.scalars(
+            select(LiveParticipant)
+            .where(
+                LiveParticipant.live_room_id == room_id,
+                LiveParticipant.role == LiveParticipantRole.viewer,
+            )
+            .order_by(LiveParticipant.joined_at, LiveParticipant.id)
+        )
+    )
+    active = [item for item in participants if item.left_at is None]
+    labels = await live_actor_labels(db, {item.user_id for item in active})
+    return {
+        "current_viewers": room.viewer_count,
+        "peak_viewers": room.peak_viewer_count,
+        "unique_viewers": len({item.user_id for item in participants}),
+        "members": [
+            {
+                "user_id": item.user_id,
+                "label": labels.get(item.user_id, f"Fan {item.user_id.hex[:6].upper()}"),
+                "joined_at": item.joined_at,
+            }
+            for item in active
+        ],
+    }
+
+
+async def creator_live_session_summary(
+    db: AsyncSession, actor: User, room_id: UUID
+) -> dict[str, object]:
+    """Return creator-only, ledger-linked commerce totals for one Live room."""
+
+    is_owner = await db.scalar(
+        select(LiveRoom.id)
+        .join(CreatorProfile, CreatorProfile.id == LiveRoom.creator_id)
+        .where(LiveRoom.id == room_id, CreatorProfile.user_id == actor.id)
+    )
+    if is_owner is None:
+        raise PermissionError("Only the room creator can view the session summary")
+    reversal_exists = exists().where(
+        LedgerTransaction.reversal_of_transaction_id == LiveEvent.ledger_transaction_id,
+        LedgerTransaction.transaction_type.in_(
+            [LedgerTransactionType.refund, LedgerTransactionType.chargeback]
+        ),
+    )
+    rows = (
+        await db.execute(
+            select(
+                LiveEvent.event_type,
+                LiveEvent.currency,
+                func.count(LiveEvent.id),
+                func.sum(LiveEvent.amount_minor),
+            )
+            .where(
+                LiveEvent.live_room_id == room_id,
+                LiveEvent.event_type.in_(
+                    [
+                        "tip",
+                        "gift",
+                        "paid_request",
+                        "snapshot",
+                        "vip_admission",
+                        "private_peek",
+                    ]
+                ),
+                LiveEvent.ledger_transaction_id.is_not(None),
+                LiveEvent.amount_minor.is_not(None),
+                LiveEvent.currency.is_not(None),
+                ~reversal_exists,
+            )
+            .group_by(LiveEvent.event_type, LiveEvent.currency)
+            .order_by(LiveEvent.currency, LiveEvent.event_type)
+        )
+    ).all()
+    return {
+        "financial_actions": [
+            {
+                "event_type": event_type,
+                "currency": currency,
+                "count": int(count),
+                "amount_minor": int(amount_minor),
+            }
+            for event_type, currency, count, amount_minor in rows
+        ]
+    }
+
+
+PRIVATE_DELIVERY_STATUSES = {
+    PrivateSessionStatus.ready,
+    PrivateSessionStatus.connecting,
+    PrivateSessionStatus.active,
+    PrivateSessionStatus.reconnecting,
+}
+
+
+async def private_peek_offer(db: AsyncSession, actor: User, room_id: UUID) -> dict[str, object]:
+    await require_live_compliance(db, actor)
+    room = await db.get(LiveRoom, room_id)
+    if room is None or room.status is not LiveRoomStatus.live:
+        raise PermissionError("Live room not found")
+    if not await can_join_live(db, actor, room):
+        raise PermissionError("Live room not found")
+    session = (
+        await db.get(PrivateSession, room.active_private_session_id)
+        if room.active_private_session_id
+        else None
+    )
+    admitted = False
+    if session is not None:
+        admitted = bool(
+            await db.scalar(
+                select(LiveCommerceCharge.id).where(
+                    LiveCommerceCharge.private_session_id == session.id,
+                    LiveCommerceCharge.buyer_user_id == actor.id,
+                    LiveCommerceCharge.kind == LiveCommerceKind.private_peek,
+                    LiveCommerceCharge.status == LiveCommerceStatus.completed,
+                )
+            )
+        )
+    enabled = bool(
+        session
+        and session.peeks_allowed
+        and session.status in PRIVATE_DELIVERY_STATUSES
+        and session.peek_price_minor
+        and session.peek_currency
+    )
+    return {
+        "paused": session is not None,
+        "enabled": enabled,
+        "amount_minor": session.peek_price_minor if enabled else None,
+        "currency": session.peek_currency if enabled else None,
+        "private_session_id": session.id if session else None,
+        "viewer_admitted": admitted,
+    }
+
+
+async def initiate_private_peek(
+    db: AsyncSession,
+    buyer: User,
+    room_id: UUID,
+    idempotency_key: str,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> LiveCommerceCharge:
+    if not idempotency_key or len(idempotency_key) > 100:
+        raise StreamingError("A bounded Idempotency-Key is required")
+    await require_live_compliance(db, buyer, compliance_decision)
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    if room is None or room.status is not LiveRoomStatus.live or not room.active_private_session_id:
+        raise StreamingError("This Live is not currently in a private session")
+    if not await can_join_live(db, buyer, room):
+        raise PermissionError("Private peek is unavailable")
+    session = await db.scalar(
+        select(PrivateSession)
+        .where(PrivateSession.id == room.active_private_session_id)
+        .with_for_update()
+    )
+    if (
+        session is None
+        or not session.peeks_allowed
+        or session.status not in PRIVATE_DELIVERY_STATUSES
+        or not session.peek_price_minor
+        or not session.peek_currency
+        or session.peek_commission_basis_points is None
+    ):
+        raise StreamingError("Paid peeking is unavailable")
+    creator = await db.get(CreatorProfile, session.creator_id)
+    participant_ids = set(
+        await db.scalars(
+            select(SessionParticipant.user_id).where(
+                SessionParticipant.private_session_id == session.id
+            )
+        )
+    )
+    if creator is None or buyer.id in participant_ids:
+        raise PermissionError("Private participants cannot buy peek access")
+    if await db.scalar(
+        select(UserBlock.id).where(
+            or_(
+                and_(
+                    UserBlock.blocker_user_id == buyer.id,
+                    UserBlock.blocked_user_id.in_(participant_ids),
+                ),
+                and_(
+                    UserBlock.blocked_user_id == buyer.id,
+                    UserBlock.blocker_user_id.in_(participant_ids),
+                ),
+            )
+        )
+    ):
+        raise PermissionError("Private peek is unavailable")
+    locked = await finance.lock_payment_idempotency(db, buyer.id, f"private-peek:{idempotency_key}")
+    if locked:
+        existing = await db.scalar(
+            select(LiveCommerceCharge).where(LiveCommerceCharge.payment_attempt_id == locked.id)
+        )
+        if existing:
+            return existing
+        raise StreamingError("Payment idempotency key is already in use")
+    attempt = PaymentAttempt(
+        buyer_user_id=buyer.id,
+        provider=get_settings().payment_provider,
+        provider_reference=new_provider_reference(),
+        amount_minor=session.peek_price_minor,
+        currency=session.peek_currency,
+        idempotency_key=f"private-peek:{idempotency_key}",
+    )
+    db.add(attempt)
+    await db.flush()
+    charge = LiveCommerceCharge(
+        live_room_id=room.id,
+        creator_id=session.creator_id,
+        buyer_user_id=buyer.id,
+        kind=LiveCommerceKind.private_peek,
+        status=LiveCommerceStatus.pending_payment,
+        private_session_id=session.id,
+        gross_amount_minor=session.peek_price_minor,
+        currency=session.peek_currency,
+        commission_basis_points=session.peek_commission_basis_points,
+        payment_attempt_id=attempt.id,
+        creator_acceptance_required=False,
+    )
+    db.add(charge)
+    await db.flush()
+    return charge
+
+
+async def issue_private_peek_token(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> tuple[PrivateSession, str]:
+    await lock_compliance_subject(db, actor.id)
+    decision = await require_live_compliance(db, actor, compliance_decision)
+    room = await db.get(LiveRoom, room_id)
+    if room is None or not room.active_private_session_id:
+        raise PermissionError("Private peek is unavailable")
+    if not await can_join_live(db, actor, room):
+        raise PermissionError("Private peek is unavailable")
+    session = await db.get(PrivateSession, room.active_private_session_id)
+    if (
+        session is None
+        or not session.peeks_allowed
+        or session.status not in PRIVATE_DELIVERY_STATUSES
+    ):
+        raise PermissionError("Private peek is unavailable")
+    charge = await db.scalar(
+        select(LiveCommerceCharge).where(
+            LiveCommerceCharge.private_session_id == session.id,
+            LiveCommerceCharge.buyer_user_id == actor.id,
+            LiveCommerceCharge.kind == LiveCommerceKind.private_peek,
+            LiveCommerceCharge.status == LiveCommerceStatus.completed,
+            LiveCommerceCharge.ledger_transaction_id.is_not(None),
+        )
+    )
+    if charge is None:
+        raise PermissionError("Confirmed private peek payment is required")
+    token = await LiveKitStreamingProvider().participant_token(
+        session.provider_room_name,
+        str(actor.id),
+        can_publish=False,
+        can_subscribe=True,
+        authority_expires_at=_authority_expiry(decision.verification_expires_at),
+    )
+    return session, token
 
 
 async def settle_live_commerce_charge(
@@ -922,6 +1470,78 @@ async def settle_live_commerce_charge(
     )
     if charge is None:
         return None
+    if charge.kind is LiveCommerceKind.private_peek:
+        session = await db.scalar(
+            select(PrivateSession)
+            .where(PrivateSession.id == charge.private_session_id)
+            .with_for_update()
+        )
+        if payment_attempt.status is not PaymentStatus.succeeded:
+            raise StreamingError("Private peek payment is not confirmed")
+        if (
+            session is None
+            or not session.peeks_allowed
+            or session.status
+            not in {
+                PrivateSessionStatus.ready,
+                PrivateSessionStatus.connecting,
+                PrivateSessionStatus.active,
+                PrivateSessionStatus.reconnecting,
+            }
+        ):
+            await finance.record_excess_capture(
+                db,
+                payment_attempt,
+                source_type=ExcessCaptureSource.private_live_peek,
+                source_reference=charge.id,
+            )
+            charge.status = LiveCommerceStatus.expired
+            charge.resolved_at = datetime.now(UTC)
+            return charge
+        return await _complete_live_commerce_charge(db, charge)
+    if charge.kind is LiveCommerceKind.vip_admission:
+        vip_show = await db.scalar(
+            select(LiveVipShow).where(LiveVipShow.id == charge.vip_show_id).with_for_update()
+        )
+        if vip_show is None:
+            raise StreamingError("VIP show is missing")
+        if payment_attempt.status is not PaymentStatus.succeeded:
+            raise StreamingError("VIP admission payment is not confirmed")
+        if (
+            vip_show.status
+            in {
+                LiveVipShowStatus.cancelled,
+                LiveVipShowStatus.completed,
+            }
+            or charge.status is LiveCommerceStatus.expired
+        ):
+            await finance.record_excess_capture(
+                db,
+                payment_attempt,
+                source_type=ExcessCaptureSource.live_vip_admission,
+                source_reference=charge.id,
+            )
+            charge.status = LiveCommerceStatus.expired
+            charge.resolved_at = datetime.now(UTC)
+            return charge
+        if charge.ledger_transaction_id:
+            return charge
+        if vip_show.status is LiveVipShowStatus.active:
+            return await _complete_live_commerce_charge(db, charge)
+        charge.status = LiveCommerceStatus.paid_pending_creator
+        await record_live_event(
+            db,
+            event_type="vip_admission_reserved",
+            live_room_id=charge.live_room_id,
+            actor_user_id=charge.buyer_user_id,
+            source_type="live_commerce_charge",
+            source_id=str(charge.id),
+            amount_minor=charge.gross_amount_minor,
+            currency=charge.currency,
+            idempotency_key=f"live-vip-admission-reserved:{charge.id}",
+            metadata={"vip_show_id": str(vip_show.id)},
+        )
+        return charge
     if charge.kind is LiveCommerceKind.paid_request:
         if payment_attempt.status is not PaymentStatus.succeeded:
             raise StreamingError("Live commerce payment is not confirmed")
@@ -980,6 +1600,9 @@ async def _complete_live_commerce_charge(
         LiveCommerceKind.tip: LedgerTransactionType.live_tip,
         LiveCommerceKind.gift: LedgerTransactionType.live_gift,
         LiveCommerceKind.paid_request: LedgerTransactionType.live_paid_request,
+        LiveCommerceKind.snapshot: LedgerTransactionType.live_snapshot,
+        LiveCommerceKind.vip_admission: LedgerTransactionType.live_vip_admission,
+        LiveCommerceKind.private_peek: LedgerTransactionType.private_live_peek,
     }[charge.kind]
     ledger = await finance.post_entries(
         db,
@@ -1005,6 +1628,10 @@ async def _complete_live_commerce_charge(
     charge.resolved_at = datetime.now(UTC)
     event_type = charge.kind.value
     metadata: dict[str, str] = {}
+    if charge.tip_catalog_item_id:
+        tip = await db.get(LiveTipCatalogItem, charge.tip_catalog_item_id)
+        if tip:
+            metadata.update({"tip_label": tip.label, "tip_icon": tip.icon})
     if charge.tip_menu_item_id:
         menu = await db.get(LiveTipMenuItem, charge.tip_menu_item_id)
         if menu:
@@ -1015,6 +1642,14 @@ async def _complete_live_commerce_charge(
             metadata.update({"gift_name": gift.name, "gift_icon": gift.icon})
     if charge.kind is LiveCommerceKind.paid_request:
         metadata["request_label"] = charge.request_label or "Paid request"
+    if charge.kind is LiveCommerceKind.snapshot:
+        metadata["snapshot_label"] = "Live snapshot"
+    if charge.kind is LiveCommerceKind.vip_admission:
+        metadata.update({"vip_label": "VIP admission", "vip_show_id": str(charge.vip_show_id)})
+    if charge.kind is LiveCommerceKind.private_peek:
+        # Public activity may acknowledge the purchase, but must not expose the
+        # private room/session identifier to public-room participants.
+        metadata["peek_label"] = "Private session peek"
     await record_live_event(
         db,
         event_type=event_type,
@@ -1275,6 +1910,448 @@ async def reverse_live_commerce_charge(
         metadata={"reversal_ledger_transaction_id": str(reversal.id)},
     )
     return charge
+
+
+async def _vip_confirmed_total(db: AsyncSession, vip_show_id: UUID) -> int:
+    total = await db.scalar(
+        select(func.coalesce(func.sum(LiveCommerceCharge.gross_amount_minor), 0))
+        .join(PaymentAttempt, PaymentAttempt.id == LiveCommerceCharge.payment_attempt_id)
+        .where(
+            LiveCommerceCharge.vip_show_id == vip_show_id,
+            LiveCommerceCharge.kind == LiveCommerceKind.vip_admission,
+            LiveCommerceCharge.status.in_(
+                [LiveCommerceStatus.paid_pending_creator, LiveCommerceStatus.completed]
+            ),
+            PaymentAttempt.status == PaymentStatus.succeeded,
+        )
+    )
+    return int(total or 0)
+
+
+async def _vip_viewer_admitted(db: AsyncSession, vip_show_id: UUID, user_id: UUID) -> bool:
+    return bool(
+        await db.scalar(
+            select(LiveCommerceCharge.id)
+            .join(PaymentAttempt, PaymentAttempt.id == LiveCommerceCharge.payment_attempt_id)
+            .where(
+                LiveCommerceCharge.vip_show_id == vip_show_id,
+                LiveCommerceCharge.buyer_user_id == user_id,
+                LiveCommerceCharge.kind == LiveCommerceKind.vip_admission,
+                LiveCommerceCharge.status.in_(
+                    [LiveCommerceStatus.paid_pending_creator, LiveCommerceStatus.completed]
+                ),
+                PaymentAttempt.status == PaymentStatus.succeeded,
+            )
+            .limit(1)
+        )
+    )
+
+
+async def create_live_vip_show(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    *,
+    title: str,
+    description: str,
+    goal_amount_minor: int,
+    buy_in_amount_minor: int,
+    preshow_minutes: int,
+    duration_minutes: int,
+) -> LiveVipShow:
+    """Start one immutable VIP pre-show within the creator's current room."""
+
+    creator = await approved_creator(db, actor)
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    if room is None or room.creator_id != creator.id or room.status is not LiveRoomStatus.live:
+        raise PermissionError("Live room not found")
+    existing = await db.scalar(current_vip_show_statement(room.id).with_for_update())
+    if existing is not None:
+        raise StreamingError("This Live room already has a VIP show")
+    if not 1 <= preshow_minutes <= 5 or not 5 <= duration_minutes <= 15:
+        raise StreamingError("VIP timing is outside the supported range")
+    settings = await settings_for_creator(db, creator.id)
+    if goal_amount_minor < 1 or buy_in_amount_minor < 1:
+        raise StreamingError("VIP pricing must be positive")
+    if buy_in_amount_minor > settings.max_authorization_minor:
+        raise StreamingError("VIP buy-in exceeds the creator's authorization limit")
+    current = datetime.now(UTC)
+    show = LiveVipShow(
+        live_room_id=room.id,
+        creator_id=creator.id,
+        status=LiveVipShowStatus.preshow,
+        title=title.strip(),
+        description=description.strip(),
+        goal_amount_minor=goal_amount_minor,
+        buy_in_amount_minor=buy_in_amount_minor,
+        currency=currency_code(settings.currency),
+        preshow_ends_at=current + timedelta(minutes=preshow_minutes),
+        duration_seconds=duration_minutes * 60,
+    )
+    if not show.title or not show.description:
+        raise StreamingError("VIP title and description are required")
+    db.add(show)
+    await db.flush()
+    await record_live_event(
+        db,
+        event_type="vip_preshow_started",
+        live_room_id=room.id,
+        actor_user_id=actor.id,
+        source_type="live_vip_show",
+        source_id=str(show.id),
+        idempotency_key=f"live-vip-preshow:{show.id}",
+        metadata={"title": show.title},
+    )
+    await record_event(
+        db,
+        "live.vip_preshow.started",
+        actor_user_id=actor.id,
+        target_type="live_vip_show",
+        target_id=str(show.id),
+    )
+    return show
+
+
+async def initiate_live_vip_admission(
+    db: AsyncSession,
+    buyer: User,
+    room_id: UUID,
+    idempotency_key: str,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> LiveCommerceCharge:
+    """Create the server-priced buy-in; a confirmed payment grants admission."""
+
+    if not idempotency_key or len(idempotency_key) > 100:
+        raise StreamingError("A bounded Idempotency-Key is required")
+    await require_live_compliance(db, buyer, compliance_decision)
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    if room is None or room.status is not LiveRoomStatus.live:
+        raise PermissionError("Live room is unavailable")
+    creator = await db.get(CreatorProfile, room.creator_id)
+    if creator is None or creator.user_id == buyer.id:
+        raise PermissionError("VIP admission is unavailable")
+    if not await _base_live_access_allowed(db, buyer, room, creator):
+        raise PermissionError("Live room is unavailable")
+    show = await db.scalar(current_vip_show_statement(room.id).with_for_update())
+    if show is None:
+        raise StreamingError("VIP show is unavailable")
+    await advance_live_vip_show(db, show)
+    if show.status not in {
+        LiveVipShowStatus.preshow,
+        LiveVipShowStatus.awaiting_creator,
+        LiveVipShowStatus.active,
+    }:
+        raise StreamingError("VIP show is no longer accepting admissions")
+    existing = await db.scalar(
+        select(LiveCommerceCharge)
+        .join(PaymentAttempt, PaymentAttempt.id == LiveCommerceCharge.payment_attempt_id)
+        .where(
+            LiveCommerceCharge.vip_show_id == show.id,
+            LiveCommerceCharge.buyer_user_id == buyer.id,
+            LiveCommerceCharge.kind == LiveCommerceKind.vip_admission,
+            LiveCommerceCharge.status.in_(
+                [
+                    LiveCommerceStatus.pending_payment,
+                    LiveCommerceStatus.paid_pending_creator,
+                    LiveCommerceStatus.completed,
+                ]
+            ),
+        )
+        .with_for_update()
+    )
+    if existing is not None:
+        return existing
+    locked = await finance.lock_payment_idempotency(
+        db, buyer.id, f"live-vip-admission:{idempotency_key}"
+    )
+    if locked:
+        replay = await db.scalar(
+            select(LiveCommerceCharge).where(LiveCommerceCharge.payment_attempt_id == locked.id)
+        )
+        if replay is not None:
+            return replay
+        raise StreamingError("Payment idempotency key is already in use")
+    attempt = PaymentAttempt(
+        buyer_user_id=buyer.id,
+        provider=get_settings().payment_provider,
+        provider_reference=new_provider_reference(),
+        amount_minor=show.buy_in_amount_minor,
+        currency=show.currency,
+        idempotency_key=f"live-vip-admission:{idempotency_key}",
+    )
+    db.add(attempt)
+    await db.flush()
+    charge = LiveCommerceCharge(
+        live_room_id=room.id,
+        creator_id=creator.id,
+        buyer_user_id=buyer.id,
+        kind=LiveCommerceKind.vip_admission,
+        status=LiveCommerceStatus.pending_payment,
+        vip_show_id=show.id,
+        request_label=show.title,
+        gross_amount_minor=show.buy_in_amount_minor,
+        currency=show.currency,
+        commission_basis_points=await finance.commission_for(db, "private_live"),
+        payment_attempt_id=attempt.id,
+        creator_acceptance_required=True,
+    )
+    db.add(charge)
+    await db.flush()
+    return charge
+
+
+async def _cancel_live_vip_show(
+    db: AsyncSession, show: LiveVipShow, *, actor_user_id: UUID | None
+) -> LiveVipShow:
+    if show.status is LiveVipShowStatus.cancelled:
+        return show
+    if show.status not in {LiveVipShowStatus.preshow, LiveVipShowStatus.awaiting_creator}:
+        raise StreamingError("An active or completed VIP show cannot be cancelled")
+    charges = list(
+        await db.scalars(
+            select(LiveCommerceCharge)
+            .where(
+                LiveCommerceCharge.vip_show_id == show.id,
+                LiveCommerceCharge.kind == LiveCommerceKind.vip_admission,
+                LiveCommerceCharge.ledger_transaction_id.is_(None),
+            )
+            .with_for_update()
+        )
+    )
+    for charge in charges:
+        attempt = await db.get(PaymentAttempt, charge.payment_attempt_id)
+        if attempt and attempt.status is PaymentStatus.succeeded:
+            await finance.record_excess_capture(
+                db,
+                attempt,
+                source_type=ExcessCaptureSource.live_vip_admission,
+                source_reference=charge.id,
+            )
+        charge.status = LiveCommerceStatus.expired
+        charge.resolved_at = datetime.now(UTC)
+    show.status = LiveVipShowStatus.cancelled
+    show.completed_at = datetime.now(UTC)
+    await record_live_event(
+        db,
+        event_type="vip_cancelled",
+        live_room_id=show.live_room_id,
+        actor_user_id=actor_user_id,
+        source_type="live_vip_show",
+        source_id=str(show.id),
+        idempotency_key=f"live-vip-cancelled:{show.id}",
+        metadata={"title": show.title},
+    )
+    return show
+
+
+async def _complete_live_vip_show(
+    db: AsyncSession, show: LiveVipShow, *, reason: str
+) -> LiveVipShow:
+    if show.status is LiveVipShowStatus.completed:
+        return show
+    if show.status is not LiveVipShowStatus.active:
+        raise StreamingError("Only an active VIP show can complete")
+    current = datetime.now(UTC)
+    show.status = LiveVipShowStatus.completed
+    show.ends_at = min(show.ends_at, current) if show.ends_at else current
+    show.completed_at = current
+    pending_charges = list(
+        await db.scalars(
+            select(LiveCommerceCharge)
+            .where(
+                LiveCommerceCharge.vip_show_id == show.id,
+                LiveCommerceCharge.ledger_transaction_id.is_(None),
+                LiveCommerceCharge.status.in_(
+                    [
+                        LiveCommerceStatus.pending_payment,
+                        LiveCommerceStatus.paid_pending_creator,
+                    ]
+                ),
+            )
+            .with_for_update()
+        )
+    )
+    for charge in pending_charges:
+        attempt = await db.get(PaymentAttempt, charge.payment_attempt_id)
+        if attempt and attempt.status is PaymentStatus.succeeded:
+            await finance.record_excess_capture(
+                db,
+                attempt,
+                source_type=ExcessCaptureSource.live_vip_admission,
+                source_reference=charge.id,
+            )
+        charge.status = LiveCommerceStatus.expired
+        charge.resolved_at = current
+    await record_live_event(
+        db,
+        event_type="vip_completed",
+        live_room_id=show.live_room_id,
+        source_type="live_vip_show",
+        source_id=str(show.id),
+        idempotency_key=f"live-vip-completed:{show.id}",
+        metadata={"title": show.title, "reason": reason},
+    )
+    return show
+
+
+async def activate_live_vip_show(
+    db: AsyncSession, actor: User | None, show_id: UUID
+) -> LiveVipShow:
+    show = await db.scalar(select(LiveVipShow).where(LiveVipShow.id == show_id).with_for_update())
+    if show is None:
+        raise PermissionError("VIP show not found")
+    if actor is not None:
+        creator = await approved_creator(db, actor)
+        if creator.id != show.creator_id:
+            raise PermissionError("VIP show not found")
+    if show.status is LiveVipShowStatus.active:
+        return show
+    if show.status not in {LiveVipShowStatus.preshow, LiveVipShowStatus.awaiting_creator}:
+        raise StreamingError("VIP show cannot start from its current state")
+    if await _vip_confirmed_total(db, show.id) <= 0:
+        raise StreamingError("At least one confirmed VIP admission is required")
+    current = datetime.now(UTC)
+    show.status = LiveVipShowStatus.active
+    show.started_at = current
+    show.ends_at = current + timedelta(seconds=show.duration_seconds)
+    charges = list(
+        await db.scalars(
+            select(LiveCommerceCharge)
+            .join(PaymentAttempt, PaymentAttempt.id == LiveCommerceCharge.payment_attempt_id)
+            .where(
+                LiveCommerceCharge.vip_show_id == show.id,
+                LiveCommerceCharge.status == LiveCommerceStatus.paid_pending_creator,
+                PaymentAttempt.status == PaymentStatus.succeeded,
+            )
+            .with_for_update()
+        )
+    )
+    for charge in charges:
+        await _complete_live_commerce_charge(db, charge)
+    room = await db.scalar(
+        select(LiveRoom).where(LiveRoom.id == show.live_room_id).with_for_update()
+    )
+    if room is None or room.status is not LiveRoomStatus.live:
+        raise StreamingError("VIP show's Live room is unavailable")
+    participants = list(
+        await db.scalars(
+            select(LiveParticipant).where(
+                LiveParticipant.live_room_id == room.id,
+                LiveParticipant.role == LiveParticipantRole.viewer,
+                LiveParticipant.left_at.is_(None),
+            )
+        )
+    )
+    for participant in participants:
+        if not await _vip_viewer_admitted(db, show.id, participant.user_id):
+            await _enqueue_public_participant_eviction(
+                db,
+                room,
+                participant,
+                reason="vip_admission_required",
+                actor_user_id=actor.id if actor else None,
+            )
+    await record_live_event(
+        db,
+        event_type="vip_started",
+        live_room_id=show.live_room_id,
+        actor_user_id=actor.id if actor else None,
+        source_type="live_vip_show",
+        source_id=str(show.id),
+        idempotency_key=f"live-vip-started:{show.id}",
+        metadata={"title": show.title},
+    )
+    return show
+
+
+async def advance_live_vip_show(
+    db: AsyncSession, show: LiveVipShow, *, now: datetime | None = None
+) -> LiveVipShow:
+    current = now or datetime.now(UTC)
+    if show.status is LiveVipShowStatus.active and show.ends_at and show.ends_at <= current:
+        await _complete_live_vip_show(db, show, reason="duration_elapsed")
+    elif show.status is LiveVipShowStatus.preshow and show.preshow_ends_at <= current:
+        confirmed = await _vip_confirmed_total(db, show.id)
+        if confirmed >= show.goal_amount_minor:
+            await activate_live_vip_show(db, None, show.id)
+        elif confirmed > 0:
+            show.status = LiveVipShowStatus.awaiting_creator
+        else:
+            await _cancel_live_vip_show(db, show, actor_user_id=None)
+    return show
+
+
+async def reconcile_live_vip_shows(
+    db: AsyncSession, *, now: datetime | None = None, batch_size: int = 100
+) -> int:
+    """Advance due VIP timers without relying on a connected browser."""
+
+    current = now or datetime.now(UTC)
+    due_ids = list(
+        await db.scalars(
+            select(LiveVipShow.id)
+            .where(
+                or_(
+                    and_(
+                        LiveVipShow.status == LiveVipShowStatus.preshow,
+                        LiveVipShow.preshow_ends_at <= current,
+                    ),
+                    and_(
+                        LiveVipShow.status == LiveVipShowStatus.active,
+                        LiveVipShow.ends_at <= current,
+                    ),
+                )
+            )
+            .order_by(LiveVipShow.id)
+            .limit(max(1, min(batch_size, 500)))
+            .with_for_update(skip_locked=True)
+        )
+    )
+    advanced = 0
+    for show_id in due_ids:
+        show = await db.scalar(
+            select(LiveVipShow).where(LiveVipShow.id == show_id).with_for_update()
+        )
+        if show is None:
+            continue
+        previous = show.status
+        await advance_live_vip_show(db, show, now=current)
+        advanced += int(show.status is not previous)
+    return advanced
+
+
+async def live_vip_show_for_room(
+    db: AsyncSession,
+    actor: User,
+    room_id: UUID,
+    *,
+    compliance_decision: ComplianceDecision | None = None,
+) -> tuple[LiveVipShow | None, int, bool]:
+    await require_live_compliance(db, actor, compliance_decision)
+    room = await db.scalar(select(LiveRoom).where(LiveRoom.id == room_id).with_for_update())
+    if room is None or room.status is not LiveRoomStatus.live:
+        raise PermissionError("Live room is unavailable")
+    creator = await db.get(CreatorProfile, room.creator_id)
+    if creator is None or not await _base_live_access_allowed(db, actor, room, creator):
+        raise PermissionError("Live room is unavailable")
+    show = await db.scalar(current_vip_show_statement(room.id).with_for_update())
+    if show is None:
+        return None, 0, False
+    await advance_live_vip_show(db, show)
+    return (
+        show,
+        await _vip_confirmed_total(db, show.id),
+        await _vip_viewer_admitted(db, show.id, actor.id),
+    )
+
+
+async def cancel_live_vip_show(db: AsyncSession, actor: User, show_id: UUID) -> LiveVipShow:
+    creator = await approved_creator(db, actor)
+    show = await db.scalar(select(LiveVipShow).where(LiveVipShow.id == show_id).with_for_update())
+    if show is None or show.creator_id != creator.id:
+        raise PermissionError("VIP show not found")
+    return await _cancel_live_vip_show(db, show, actor_user_id=actor.id)
 
 
 async def current_creator_public_live_room(db: AsyncSession, actor: User) -> LiveRoom | None:
@@ -1603,6 +2680,14 @@ async def end_live(db: AsyncSession, actor: User, room_id: UUID) -> LiveRoom:
         return room
     if room.status is not LiveRoomStatus.live:
         raise StreamingError("Live room cannot be ended from its current state")
+    vip_show = await db.scalar(current_vip_show_statement(room.id).with_for_update())
+    if vip_show and vip_show.status in {
+        LiveVipShowStatus.preshow,
+        LiveVipShowStatus.awaiting_creator,
+    }:
+        await _cancel_live_vip_show(db, vip_show, actor_user_id=actor.id)
+    elif vip_show and vip_show.status is LiveVipShowStatus.active:
+        await _complete_live_vip_show(db, vip_show, reason="public_live_ended")
     # Commit ``ending`` and the outbox command before LiveKit is contacted.
     # The worker owns provider I/O and finalizes this row only after success.
     await _enqueue_public_room_termination(
@@ -1622,24 +2707,26 @@ async def terminate_live_for_moderation(
         return room
     if room.status is not LiveRoomStatus.live:
         raise StreamingError("Live room cannot be terminated from its current state")
+    vip_show = await db.scalar(current_vip_show_statement(room.id).with_for_update())
+    if vip_show and vip_show.status in {
+        LiveVipShowStatus.preshow,
+        LiveVipShowStatus.awaiting_creator,
+    }:
+        await _cancel_live_vip_show(db, vip_show, actor_user_id=actor.id)
+    elif vip_show and vip_show.status is LiveVipShowStatus.active:
+        await _complete_live_vip_show(db, vip_show, reason="moderation_termination")
     await _enqueue_public_room_termination(db, room, reason=reason, actor_user_id=actor.id)
     return room
 
 
-async def can_join_live(
-    db: AsyncSession,
-    viewer: User,
-    room: LiveRoom,
-    compliance_decision: ComplianceDecision | None = None,
+async def _base_live_access_allowed(
+    db: AsyncSession, viewer: User, room: LiveRoom, creator: CreatorProfile
 ) -> bool:
-    try:
-        await require_live_compliance(db, viewer, compliance_decision)
-    except PermissionError:
-        return False
     if room.status is not LiveRoomStatus.live:
         return False
-    creator = await db.get(CreatorProfile, room.creator_id)
-    if creator is None or await is_blocked(db, viewer.id, creator.user_id):
+    if creator.user_id == viewer.id:
+        return True
+    if await is_blocked(db, viewer.id, creator.user_id):
         return False
     if not (await resolve_creator_compliance_eligibility(db, profile=creator)).public_allowed:
         return False
@@ -1657,7 +2744,7 @@ async def can_join_live(
                 )
             )
         )
-    return (
+    return bool(
         await _active_creator_entitlement(
             db,
             user_id=viewer.id,
@@ -1665,6 +2752,30 @@ async def can_join_live(
         )
         is not None
     )
+
+
+async def can_join_live(
+    db: AsyncSession,
+    viewer: User,
+    room: LiveRoom,
+    compliance_decision: ComplianceDecision | None = None,
+) -> bool:
+    try:
+        await require_live_compliance(db, viewer, compliance_decision)
+    except PermissionError:
+        return False
+    creator = await db.get(CreatorProfile, room.creator_id)
+    if creator is None or not await _base_live_access_allowed(db, viewer, room, creator):
+        return False
+    if creator.user_id == viewer.id:
+        return True
+    vip_show = await db.scalar(current_vip_show_statement(room.id).with_for_update())
+    if vip_show is None:
+        return True
+    await advance_live_vip_show(db, vip_show)
+    if vip_show.status is not LiveVipShowStatus.active:
+        return True
+    return await _vip_viewer_admitted(db, vip_show.id, viewer.id)
 
 
 async def join_live(
@@ -1723,9 +2834,11 @@ async def issue_live_token(
     room = await db.get(LiveRoom, room_id)
     if room is None:
         raise PermissionError("Live room not found")
-    participant = await join_live(db, viewer, room_id, compliance_decision=decision)
     creator = await db.get(CreatorProfile, room.creator_id)
     can_publish = bool(creator and creator.user_id == viewer.id)
+    if room.active_private_session_id and not can_publish:
+        raise PermissionError("The public Live is paused for a private session")
+    participant = await join_live(db, viewer, room_id, compliance_decision=decision)
     if creator is None:
         raise PermissionError("Live room is unavailable")
     creator_eligibility = await resolve_creator_compliance_eligibility(db, profile=creator)
@@ -2600,6 +3713,17 @@ async def request_private_session(
         target_type="private_session_request",
         target_id=str(request.id),
     )
+    await emit_transactional(
+        db,
+        recipient_user_id=creator.user_id,
+        notification_type="PRIVATE_LIVE_REQUESTED",
+        source_domain="streaming",
+        source_id=str(request.id),
+        title="New private session request",
+        body="A fan queued a private session request for your review.",
+        target_path="/creator-studio",
+        email=False,
+    )
     if invited_user_id:
         await emit_transactional(
             db,
@@ -2860,8 +3984,8 @@ async def accept_private_request(
         )
         .with_for_update()
     )
-    if public_room:
-        raise StreamingError("End the public live before accepting a private session request")
+    if public_room and public_room.status is not LiveRoomStatus.live:
+        raise StreamingError("The public live must be fully live before it can pause")
     active = await db.scalar(
         select(PrivateSession)
         .where(
@@ -2893,10 +4017,14 @@ async def accept_private_request(
         raise PermissionError("Private session request not found") from exc
     request.status = PrivateRequestStatus.accepted
     request.accepted_at = datetime.now(UTC)
+    creator_settings = await settings_for_creator(db, creator.id)
+    peek_policy = await private_peek_policy(db)
+    peeks_allowed = bool(creator_settings.private_peeks_enabled and peek_policy.active)
     session = PrivateSession(
         request_id=request.id,
         creator_id=creator.id,
         payer_user_id=request.requester_user_id,
+        public_live_room_id=public_room.id if public_room else None,
         mode=request.mode,
         provider_room_name=_opaque("private"),
         per_minute_price_minor=request.per_minute_price_minor,
@@ -2905,6 +4033,12 @@ async def accept_private_request(
         max_authorization_minor=request.max_authorization_minor,
         commission_basis_points=request.commission_basis_points,
         currency=request.currency,
+        peeks_allowed=peeks_allowed,
+        peek_price_minor=peek_policy.amount_minor if peeks_allowed else None,
+        peek_currency=peek_policy.currency if peeks_allowed else None,
+        peek_commission_basis_points=(
+            peek_policy.commission_basis_points if peeks_allowed else None
+        ),
         accepted_at=request.accepted_at,
     )
     db.add(session)
@@ -2982,6 +4116,25 @@ async def authorize_private_session(db: AsyncSession, session: PrivateSession) -
     if attempt is None or attempt.status is not PaymentStatus.succeeded:
         raise StreamingError("Private-session payment authorization is not verified")
     session.status, session.ready_at = PrivateSessionStatus.ready, datetime.now(UTC)
+    if session.public_live_room_id:
+        public_room = await db.scalar(
+            select(LiveRoom).where(LiveRoom.id == session.public_live_room_id).with_for_update()
+        )
+        if public_room and public_room.status is LiveRoomStatus.live:
+            if public_room.active_private_session_id not in {None, session.id}:
+                raise StreamingError("The public Live is already paused for another session")
+            public_room.active_private_session_id = session.id
+            public_room.private_paused_at = session.ready_at
+            await record_live_event(
+                db,
+                event_type="private_session_paused",
+                live_room_id=public_room.id,
+                private_session_id=session.id,
+                source_type="private_session",
+                source_id=str(session.id),
+                idempotency_key=f"private-session-paused:{session.id}",
+                metadata={"peeks_allowed": session.peeks_allowed},
+            )
     await record_event(
         db,
         "private_session.authorized",
@@ -3272,6 +4425,27 @@ async def _enqueue_private_session_termination(
     return created
 
 
+async def _resume_public_room_after_private(db: AsyncSession, session: PrivateSession) -> None:
+    if not session.public_live_room_id:
+        return
+    room = await db.scalar(
+        select(LiveRoom).where(LiveRoom.id == session.public_live_room_id).with_for_update()
+    )
+    if room is None or room.active_private_session_id != session.id:
+        return
+    room.active_private_session_id = None
+    room.private_paused_at = None
+    await record_live_event(
+        db,
+        event_type="private_session_resumed",
+        live_room_id=room.id,
+        private_session_id=session.id,
+        source_type="private_session",
+        source_id=str(session.id),
+        idempotency_key=f"private-session-resumed:{session.id}",
+    )
+
+
 async def end_private_session(
     db: AsyncSession,
     actor: User | None,
@@ -3302,6 +4476,7 @@ async def end_private_session(
         PrivateSessionStatus.disputed,
     }
     if session.status in terminal_statuses:
+        await _resume_public_room_after_private(db, session)
         return session
     if reason != "provider_room_finished" and not provider_room_closed:
         await _enqueue_private_session_termination(
@@ -3337,6 +4512,7 @@ async def end_private_session(
             intent_reason,
         )
         session.ended_by_user_id = intent_actor_id
+        await _resume_public_room_after_private(db, session)
         return session
     session.status, session.ended_at, session.end_reason = (
         PrivateSessionStatus.ended,
@@ -3344,7 +4520,9 @@ async def end_private_session(
         intent_reason,
     )
     session.ended_by_user_id = intent_actor_id
-    return await settle_private_session(db, session)
+    settled = await settle_private_session(db, session)
+    await _resume_public_room_after_private(db, settled)
+    return settled
 
 
 async def expire_reconnect_grace(
@@ -3744,6 +4922,89 @@ async def process_livekit_webhook(db: AsyncSession, event: dict) -> PrivateSessi
         session=session,
         received_at=datetime.now(UTC),
     )
+    required_participant = await db.scalar(
+        select(SessionParticipant.id).where(
+            SessionParticipant.private_session_id == session.id,
+            SessionParticipant.user_id == user_id,
+        )
+    )
+    peek_admission = await db.scalar(
+        select(LiveCommerceCharge.id).where(
+            LiveCommerceCharge.private_session_id == session.id,
+            LiveCommerceCharge.buyer_user_id == user_id,
+            LiveCommerceCharge.kind == LiveCommerceKind.private_peek,
+            LiveCommerceCharge.status == LiveCommerceStatus.completed,
+            LiveCommerceCharge.ledger_transaction_id.is_not(None),
+        )
+    )
+    if required_participant is None:
+        peek_authority_allowed = bool(
+            peek_admission is not None
+            and session.peeks_allowed
+            and session.status in PRIVATE_DELIVERY_STATUSES
+        )
+        if peek_authority_allowed:
+            peek_user = await db.get(User, user_id)
+            if peek_user is None:
+                peek_authority_allowed = False
+            else:
+                try:
+                    await require_live_compliance(db, peek_user)
+                except PermissionError:
+                    peek_authority_allowed = False
+        if peek_authority_allowed:
+            required_user_ids = set(
+                await db.scalars(
+                    select(SessionParticipant.user_id).where(
+                        SessionParticipant.private_session_id == session.id
+                    )
+                )
+            )
+            peek_authority_allowed = not bool(
+                await db.scalar(
+                    select(UserBlock.id).where(
+                        or_(
+                            and_(
+                                UserBlock.blocker_user_id == user_id,
+                                UserBlock.blocked_user_id.in_(required_user_ids),
+                            ),
+                            and_(
+                                UserBlock.blocked_user_id == user_id,
+                                UserBlock.blocker_user_id.in_(required_user_ids),
+                            ),
+                        )
+                    )
+                )
+            )
+        if event_type == "participant_joined" and not peek_authority_allowed:
+            await enqueue_live_provider_control_intent(
+                db,
+                action=LiveProviderControlAction.remove_participant,
+                target_type="private_session_peek",
+                target_id=str(session.id),
+                provider_room_name=session.provider_room_name,
+                participant_identity=str(user_id),
+                reason="private_peek_authority_unavailable",
+                idempotency_key=f"private-peek-remove:{session.id}:{user_id}:{event['id']}",
+            )
+        existing = await db.scalar(
+            select(ProviderLiveEvent).where(
+                ProviderLiveEvent.provider == "livekit",
+                ProviderLiveEvent.external_event_id == event["id"],
+            )
+        )
+        if not existing:
+            db.add(
+                ProviderLiveEvent(
+                    provider="livekit",
+                    external_event_id=event["id"],
+                    event_type=event_type,
+                    private_session_id=session.id,
+                    processed_at=datetime.now(UTC),
+                )
+            )
+            await db.flush()
+        return None
     if event_type == "participant_joined" and session.status in {
         PrivateSessionStatus.ending,
         PrivateSessionStatus.ended,
@@ -3762,28 +5023,21 @@ async def process_livekit_webhook(db: AsyncSession, event: dict) -> PrivateSessi
             actor_user_id=session.ended_by_user_id,
             idempotency_key=f"private-session-reclose:{session.id}:{event['id']}",
         )
-    elif event_type == "participant_joined":
-        participant = await db.scalar(
-            select(SessionParticipant.id).where(
-                SessionParticipant.private_session_id == session.id,
-                SessionParticipant.user_id == user_id,
-            )
-        )
-        if participant is None or not await _private_session_authority_allowed(
+    elif event_type == "participant_joined" and not await _private_session_authority_allowed(
+        db,
+        session,
+    ):
+        # A cached token must not reopen private delivery between an
+        # authority change and the periodic sweep. Delete first; if the
+        # provider call fails, propagate so the signed event is not
+        # acknowledged/deduplicated and LiveKit can retry it.
+        await end_private_session(
             db,
-            session,
-        ):
-            # A cached token must not reopen private delivery between an
-            # authority change and the periodic sweep. Delete first; if the
-            # provider call fails, propagate so the signed event is not
-            # acknowledged/deduplicated and LiveKit can retry it.
-            await end_private_session(
-                db,
-                None,
-                session.id,
-                "compliance_authority_unavailable",
-                propagate_provider_failure=True,
-            )
+            None,
+            session.id,
+            "compliance_authority_unavailable",
+            propagate_provider_failure=True,
+        )
     return await process_private_provider_event(
         db,
         event_id=event["id"],

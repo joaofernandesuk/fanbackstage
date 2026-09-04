@@ -161,6 +161,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.worker.tasks.expire_live_paid_requests",
         "schedule": 30.0,
     },
+    "live-vip-lifecycle": {
+        "task": "app.worker.tasks.reconcile_live_vip_lifecycle",
+        "schedule": 5.0,
+    },
     "marketplace-earnings-release": {
         "task": "app.worker.tasks.release_marketplace_earnings",
         "schedule": 300.0,

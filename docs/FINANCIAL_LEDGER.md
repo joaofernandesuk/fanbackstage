@@ -6,6 +6,8 @@ Phase 7 private sessions use the `private_live_session` transaction type. The re
 
 Phase 7 public Live tips, gifts, and accepted paid requests settle through the `live_commerce` transaction type. A paid request snapshots its server-owned option price and acceptance requirement. Verified capture is necessary but does not settle an acceptance-required request; creator acceptance creates exactly one ledger transaction. Decline, expiry, or late success after expiry records a `live_paid_request` excess-capture refund requirement and liability transaction. Supporter rankings and goals read eligible canonical Live events linked to these immutable transactions and exclude reversed/refunded value.
 
+Paid private peeks use the `private_live_peek` transaction type. The accepted `PrivateSession` freezes the admin-owned price, currency and commission before any viewer can purchase. A peek settles once only while that exact session remains deliverable; late confirmation after decline, expiry or termination uses the `private_live_peek` excess-capture reversal path. The browser cannot supply price, commission, session identity or financial success.
+
 Financial source-of-truth rules. Any feature creating economic value must integrate here rather than maintaining its own balance.
 
 # 22. Unified Wallet and Immutable Financial Ledger

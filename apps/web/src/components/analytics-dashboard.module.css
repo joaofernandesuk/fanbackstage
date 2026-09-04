@@ -27,10 +27,18 @@
 .retention > div { border-left: 3px solid var(--brand-cyan); padding-left: 12px; }
 .retention b { color: var(--success); display: block; font-size: 1.5rem; margin-top: 8px; }
 .retention p { font-size: .78rem; margin: 5px 0 0; }
+.liveMetrics, .liveActions { display: grid; gap: 12px; margin-top: 16px; }
+.liveMetrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.liveActions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.liveMetrics article, .liveActions article { background: rgb(255 255 255 / .035); border: 1px solid var(--border-subtle); border-radius: 12px; display: grid; gap: 6px; padding: 14px; }
+.liveMetrics span, .liveActions span { color: var(--text-muted); font-size: .72rem; }
+.liveMetrics strong { font-size: 1.35rem; }
+.liveActions strong { text-transform: capitalize; }
+.liveActions b { color: var(--brand-cyan); }
 .footer { align-items: center; display: flex; gap: 16px; justify-content: space-between; }
 .footer p { font-size: .82rem; margin: 0; max-width: 760px; }
 .loading, .error { border-radius: var(--radius-md); padding: 16px; }
 .loading { background: var(--surface-raised); }
 .error { background: rgb(255 98 124 / .12); border: 1px solid rgb(255 98 124 / .36); color: #ffd2dc; }
-@media (max-width: 900px) { .kpis, .retention { grid-template-columns: repeat(2, minmax(0, 1fr)); } .filters, .split { grid-template-columns: 1fr; } }
-@media (max-width: 560px) { .kpis, .retention { grid-template-columns: 1fr; } .footer { align-items: flex-start; flex-direction: column; } .compositionRow { grid-template-columns: 1fr minmax(70px, 1fr); } .compositionRow b { grid-column: 1 / -1; text-align: left; } }
+@media (max-width: 900px) { .kpis, .retention { grid-template-columns: repeat(2, minmax(0, 1fr)); } .filters, .split, .liveActions { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .kpis, .retention, .liveMetrics { grid-template-columns: 1fr; } .footer { align-items: flex-start; flex-direction: column; } .compositionRow { grid-template-columns: 1fr minmax(70px, 1fr); } .compositionRow b { grid-column: 1 / -1; text-align: left; } }

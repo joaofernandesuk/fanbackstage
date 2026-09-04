@@ -56,7 +56,7 @@ export function LivePaidRequestStudio() {
         method: "POST",
         body: JSON.stringify({
           label: values.get("paid-request-label"),
-          amount_minor: Number(values.get("paid-request-amount")),
+          amount_minor: Math.round(Number(values.get("paid-request-amount")) * 100),
           enabled: true,
           sort_order: options.length,
           requires_creator_acceptance: true,
@@ -96,8 +96,8 @@ export function LivePaidRequestStudio() {
           <input maxLength={100} name="paid-request-label" required />
         </label>
         <label>
-          Price (minor units)
-          <input min={1} name="paid-request-amount" required type="number" />
+          Price (EUR)
+          <input min="0.01" name="paid-request-amount" required step="0.01" type="number" />
         </label>
         <button type="submit">Add paid request option</button>
       </form>

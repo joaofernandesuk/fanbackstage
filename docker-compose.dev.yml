@@ -59,7 +59,10 @@ services:
     environment:
       MINIO_ROOT_USER: fanbackstage
       MINIO_ROOT_PASSWORD: fanbackstage-development-only
-      MINIO_API_CORS_ALLOW_ORIGIN: http://localhost:13000
+      # Browser uploads originate from the normal dev UI or the guarded,
+      # loopback-only Playwright runner. Keep this explicit instead of using a
+      # wildcard so local validation exercises the production CORS contract.
+      MINIO_API_CORS_ALLOW_ORIGIN: http://localhost:13000,http://127.0.0.1:38181
     ports: ["19010:9000", "19011:9001"]
     volumes: [fanbackstage_dev_minio:/data]
     healthcheck:

@@ -172,9 +172,14 @@ Custom Content Request: €100+
 
 Tips should be available at creator profile, feed post, image/gallery, video, blog, live, private live, message and other relevant surfaces.
 
-- Preset tip amounts plus custom amount.
-- Creator-configurable live tip menu.
-- Virtual gifts may map to fixed credit/value amounts.
+- Live uses a platform-owned catalogue of predefined tips and virtual gifts with fixed artwork and value; every eligible creator receives the same currency-scoped choices and cannot edit them.
+- Custom tip amounts may be considered on non-Live surfaces only; the Live client must submit a catalogue identifier rather than a price.
+- Virtual gifts map to fixed, server-owned credit/value amounts.
+- Creators may enable paid Live snapshots and set the future-facing snapshot price. Payment must be confirmed before the captured frame is released; historical settlement remains immutable.
+- Creators may turn an active Live room into a time-bounded paid VIP group show. They define the promised show, fixed admission price, funding goal, pre-show countdown, and duration before fundraising begins; those terms cannot be edited once buyers can pay.
+- VIP admission remains available during the active show. Non-paying viewers lose media authority when the VIP segment starts, while confirmed members can reconnect from durable admission state. A cancelled pre-show does not create creator earnings and sends confirmed captures through the finance refund workflow.
+- An accepted private session pauses rather than ends the creator's public Live after payment authorization. Waiting viewers see a branded holding screen and the public room resumes after the private session closes.
+- Creators may allow or disallow paid, silent private-session peeks. Administrators own the global peek price, currency and commission; those terms are snapshotted on creator acceptance and disclosed to the primary purchaser before authorization. Peek buyers can only subscribe to private video and never receive private chat, camera or microphone authority.
 - Tip transactions must be ledger entries with source context.
 - Tips may be refundable/reversible only according to explicit fraud/payment policy; never mutate ledger history.
 

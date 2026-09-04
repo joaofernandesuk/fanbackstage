@@ -477,3 +477,18 @@ def expire_live_paid_requests() -> dict[str, int]:
             return expired
 
     return {"expired": run_async(run())}
+
+
+@celery_app.task
+def reconcile_live_vip_lifecycle() -> dict[str, int]:
+    """Advance due VIP pre-show and show timers from backend authority."""
+    from app.db.session import SessionLocal
+    from app.streaming.service import reconcile_live_vip_shows
+
+    async def run() -> int:
+        async with SessionLocal() as session:
+            advanced = await reconcile_live_vip_shows(session)
+            await session.commit()
+            return advanced
+
+    return {"advanced": run_async(run())}
